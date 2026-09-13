@@ -279,6 +279,7 @@ class PlayerService : Service() {
             }
         }
         _state.value = s.copy(isPlaying = true)
+        PlaybackSession.onAudioStarted()   // Phase3-步骤1：记「当前播放源=音频」（只记录，不参与判定）
         startTicker()
         updateMediaSession()
         updateNotification()
@@ -407,6 +408,7 @@ class PlayerService : Service() {
             positionMs = playStart,
             currentSentenceIndex = if (needTrack) index else -1,
         )
+        PlaybackSession.onAudioStarted()   // Phase3-步骤1：点句复读也是音频发声，同样记账
         // 停止旧 ticker：seek 完成前暂停中播放头不动，防止旧 ticker 在暂停窗口误触边界处理
         stopTicker()
         // MediaPlayer 偶发进入非法状态（长音频 seek/prepare 竞态、系统回收解码器等）：
@@ -715,6 +717,7 @@ class PlayerService : Service() {
                     mp.start()
                     applySpeed(mp, sp)
                     _state.value = _state.value.copy(isPlaying = true)
+                    PlaybackSession.onAudioStarted()   // Phase3-步骤1：自动续播同样记账
                 }
                 // 无论是否自动续播，prepare 完成后都要启动 ticker：
                 // 恢复现场/视频模式后切回音频时 autoPlay=false，不启动 ticker 会导致

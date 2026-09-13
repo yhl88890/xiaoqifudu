@@ -340,6 +340,13 @@ private fun loadVideoPrefs(context: Context) {
     val sp = context.getSharedPreferences(PREFS_VIDEO, Context.MODE_PRIVATE)
     // 早读「所处页面」：不依赖视频 Uri，供启动恢复 page（即使在 PLAYER/READING 音频源，Uri 可能为空也要能恢复）。
     sessionPage = runCatching { Page.valueOf(sp.getString("mode", "PLAYER") ?: "PLAYER") }.getOrDefault(Page.PLAYER)
+    // Phase3-步骤1：冷启把「当前播放源」真值恢复到上次退出时的来源
+    // （视频模式，或从视频进阅读 → 源仍是视频），否则开局默认音频会记错
+    if (sessionPage == Page.VIDEO ||
+        (sessionPage == Page.READING && sp.getBoolean("reading_from_video", false))
+    ) {
+        PlaybackSession.restore(MediaKind.VIDEO)
+    }
     // 视频后台交接态：放在最前恢复，避免下方提前 return 漏掉（真机重建 Activity 后靠它接回后台音轨）
     videoHandedToBg = sp.getBoolean("handed_to_bg", false)
     videoBgResumePos = sp.getLong("bg_resume_pos", 0L)
@@ -422,6 +429,7 @@ private fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: Li
     videoFolderVideos = siblings
     // 打开/切换视频默认自动播放（暂停状态由返回时的续播逻辑尊重，不会在这里被误触发）
     videoPlaying = true
+    PlaybackSession.onVideoStarted()   // Phase3-步骤1：记「当前播放源=视频」（只记录，不参与判定）
     // 同目录字幕：优先 <基名>.srt，没有就退而取同目录第一个 .srt
     SrtParser.findBestSrtFile(item.path)?.let { f ->
         runCatching {
@@ -462,6 +470,7 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
     asrMsg = ""
     videoFolderVideos = siblings
     videoPlaying = true
+    PlaybackSession.onVideoStarted()   // Phase3-步骤1：本地文件视频（B站导入）同样记账
     SrtParser.findBestSrtFile(file.path)?.let { f ->
         runCatching {
             val parsed = SrtParser.parse(f.readText())
@@ -1786,6 +1795,7 @@ private fun videoTogglePlay() {
         currentPos = mp.currentPosition.toLong(); mp.pause(); videoPlaying = false
     } else {
         mp.start(); videoPlaying = true
+        PlaybackSession.onVideoStarted()   // Phase3-步骤1：手动点播放
         // 【0903 用户反馈】系统媒体中心一直显示音频、控制音频：之前 attach 只发生在「打开视频自动播放
         // (onPrepared && videoPlaying)」一条路径；从文件夹选视频后手动点播放走的是这里 → 视频在响但
         // PlayerService 仍以为是音频模式。任何「视频真正开始发声」的路径都必须接管媒体中心/通知/焦点。
@@ -1822,6 +1832,7 @@ private fun videoSeekToSentence(idx: Int) {
     Log.d("XJ_SEEK", "videoSeekToSentence idx=$idx target=$target")
     videoSeek(target, "sentenceJump(idx=$idx)")
     mp.start(); videoPlaying = true
+    PlaybackSession.onVideoStarted()   // Phase3-步骤1：视频跳句
     attachVideoPlayback()   // 跳句也会发声：同步接管媒体中心/焦点
     currentPos = target
     videoSentenceIndexGlobal = idx
@@ -1965,7 +1976,7 @@ private fun VideoPage(readingMode: Boolean = false) {
     // 实时快进：按住下一句时把播放速度提到 2x，画面跟着实时快放；松手由 stopFast 恢复。
     fun startFastForward() {
         val mp = videoMpRef[0] ?: return
-        if (!videoPlaying) { runCatching { mp.start() }; videoPlaying = true; attachVideoPlayback() }
+        if (!videoPlaying) { runCatching { mp.start() }; videoPlaying = true; PlaybackSession.onVideoStarted(); attachVideoPlayback() }
         runCatching { mp.playbackParams = mp.playbackParams.setSpeed(FF_SPEED) }
         fastScrubbing = true
     }
