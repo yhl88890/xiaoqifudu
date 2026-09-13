@@ -340,13 +340,10 @@ private fun loadVideoPrefs(context: Context) {
     val sp = context.getSharedPreferences(PREFS_VIDEO, Context.MODE_PRIVATE)
     // 早读「所处页面」：不依赖视频 Uri，供启动恢复 page（即使在 PLAYER/READING 音频源，Uri 可能为空也要能恢复）。
     sessionPage = runCatching { Page.valueOf(sp.getString("mode", "PLAYER") ?: "PLAYER") }.getOrDefault(Page.PLAYER)
-    // Phase3-步骤1：冷启把「当前播放源」真值恢复到上次退出时的来源
-    // （视频模式，或从视频进阅读 → 源仍是视频），否则开局默认音频会记错
-    if (sessionPage == Page.VIDEO ||
-        (sessionPage == Page.READING && sp.getBoolean("reading_from_video", false))
-    ) {
-        PlaybackSession.restore(MediaKind.VIDEO)
-    }
+    // 【已移除・步骤2】原先这里按持久化的 sessionPage/reading_from_video 调 PlaybackSession.restore(VIDEO)，
+    // 与「按实际 page 推导」的 setSessionSource 规则打架：sp 里 reading_from_video=true，但
+    // 因视频 Uri 失效在下方提前 return，实际变量停在 false、页面是空白音频阅读 —— 于是 restore 先写
+    // VIDEO、60ms 后被纠正回 AUDIO（实机日志实测）。真值只能有一个裁决者：以实际页面状态为准。
     // 视频后台交接态：放在最前恢复，避免下方提前 return 漏掉（真机重建 Activity 后靠它接回后台音轨）
     videoHandedToBg = sp.getBoolean("handed_to_bg", false)
     videoBgResumePos = sp.getLong("bg_resume_pos", 0L)
@@ -1037,6 +1034,17 @@ class MainActivity : ComponentActivity() {
         }
         LaunchedEffect(videoPlaying) { saveVideoPrefs(context) }
 
+        // Phase3-步骤2：把「当前会话是不是视频源」的推导收敛进唯一真值 PlaybackSession。
+        // 这段推导以前在页面里被抄了 6 遍、写法还不一样；顶栏「生成字幕」按钮那处漏了
+        // 「从视频进阅读/生词本」，于是按钮错判成音频（显示禁用、或点下去给音频生成字幕）。
+        // 统一规则：视频模式，或「从视频来源进入的阅读/生词本」→ 视频；其余 → 音频。
+        LaunchedEffect(page, readingFromVideo) {
+            PlaybackSession.setSessionSource(
+                page == Page.VIDEO ||
+                    ((page == Page.READING || page == Page.VOCAB) && readingFromVideo)
+            )
+        }
+
         // 音频模式字幕落库：句子就绪（断句/ASR/缓存任一路径）→ 归档字幕库，供阅读模式「全部」汇总复习
         LaunchedEffect(state.sentences, state.currentItem) {
             val item = state.currentItem
@@ -1070,6 +1078,10 @@ class MainActivity : ComponentActivity() {
             // （反向：离开视频模式时 VideoPage 的 onDispose 会 stopPlayback 停掉视频，无需这里再处理）
             if (page == Page.VIDEO) PlayerService.instance?.pause()
         }
+
+        // Phase3-步骤2：订阅「当前播放源」唯一真值。
+        // 注意 StateFlow 必须 collect 才能触发重组，直接读 PlaybackSession.current 是不会重组的。
+        val activeKind by PlaybackSession.activeKind.collectAsStateWithLifecycle()
 
         Surface(modifier = Modifier.fillMaxSize()) {
             androidx.compose.foundation.layout.Column(modifier = Modifier.fillMaxSize()) {
@@ -1146,7 +1158,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                val isVideoMode = page == Page.VIDEO
+                // Phase3-步骤2：改用「当前播放源」唯一真值判定。
+                // 原先写死 page == Page.VIDEO，漏了「从视频进阅读/生词本」→ 按钮错判成音频。
+                val isVideoMode = activeKind == MediaKind.VIDEO
                 val genActive = if (isVideoMode) recognizing else state.recognizing
                 val genDisabled = if (isVideoMode) (videoUri == null) else (state.currentItem == null)
                 Surface(

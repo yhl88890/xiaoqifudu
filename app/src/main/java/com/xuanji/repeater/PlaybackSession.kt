@@ -39,8 +39,26 @@ object PlaybackSession {
     /** 视频开始播放 / 被打开时调用（MainActivity 内视频发声路径） */
     fun onVideoStarted() = mark(MediaKind.VIDEO, "video")
 
-    /** 冷启恢复：上次退出时停在视频模式，真值也要跟过去，否则开局就记错 */
-    fun restore(kind: MediaKind) = mark(kind, "restore")
+    // 【已删除 restore(kind)】原打算用持久化的「上次页面」在冷启早期先恢复真值，但实测它与
+    // setSessionSource 的推导打架：持久化值未必被实际采纳（视频 Uri 失效时页面会回落到音频阅读），
+    // 结果先写 VIDEO 再被纠正为 AUDIO，白闪一次。真值只留一个裁决者：setSessionSource。
+
+    /**
+     * 会话源同步（步骤2）：页面/来源一变就写。
+     *
+     * 【为什么需要】「当前是不是视频源」这段推导原先在 MainActivity 里被抄了 6 遍，
+     * 写法还各不相同 —— `page == VIDEO`、`page == VIDEO || READING && readingFromVideo`…
+     * 顶栏「生成字幕」按钮那处只写了 `page == VIDEO`，漏掉「从视频进阅读 / 生词本」，
+     * 结果按钮错判成音频：显示禁用、或点下去给音频生成字幕。抄多遍必漏，这就是收敛的理由。
+     *
+     * 统一的推导规则（与选集/常驻视频层保持一致）：
+     *   视频模式，或「从视频来源进入的阅读/生词本」→ VIDEO；其余 → AUDIO。
+     *
+     * 边界：文件夹页刻意不进推导 —— 它只是「选择器」还不是会话（真值会在进文件夹时短暂回落 AUDIO，
+     * 选中视频后立刻由 onVideoStarted 纠正为 VIDEO）。这样做保证本次改动对文件夹页行为零影响。
+     */
+    fun setSessionSource(isVideo: Boolean) =
+        mark(if (isVideo) MediaKind.VIDEO else MediaKind.AUDIO, "session")
 
     private fun mark(kind: MediaKind, whence: String) {
         if (_activeKind.value == kind) return
