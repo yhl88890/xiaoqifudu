@@ -1099,11 +1099,12 @@ class MainActivity : ComponentActivity() {
                 // 【0903 用户反馈】文件夹页里顶栏按钮死写「音频选集」很怪。改成按「当前选集的来源语境」
                 // 显示：视频来源=视频选集 / 音频来源=音频选集；且点它=回到来源模式（folderReturnPage），
                 // 避免在文件夹里点一下反而跳去了别的选集。
+                // Phase3-步骤3：除文件夹页有它自己的「类型记忆」外，一律读「当前播放源」唯一真值。
+                // 原先这里把 page==VIDEO / readingFromVideo 又抄了一遍 —— 与 PlaybackSession 同源不同写，
+                // 抄漏一处就是顶栏按钮那个 bug。收敛后规则只在一处定义。
                 val selectionIsVideo = when {
-                    page == Page.VIDEO -> true
                     page == Page.FOLDER -> folderInitType == MediaType.VIDEO
-                    page == Page.READING || page == Page.VOCAB -> readingFromVideo
-                    else -> false
+                    else -> activeKind == MediaKind.VIDEO
                 }
                 val isReadingSel = page == Page.READING || page == Page.VOCAB
                 Surface(
@@ -1202,8 +1203,8 @@ class MainActivity : ComponentActivity() {
                     videoSelectJump = false
                     folderReturnPage = page
                     // 文件夹 icon 从视频模式/阅读(视频来源)点入时默认看视频，其余看音频
-                    folderInitType = if (page == Page.VIDEO || ((page == Page.READING || page == Page.VOCAB) && readingFromVideo))
-                        MediaType.VIDEO else MediaType.AUDIO
+                    // Phase3-步骤3：读唯一真值（原先这里把 page==VIDEO && readingFromVideo 整段重抄了一遍）
+                    folderInitType = if (activeKind == MediaKind.VIDEO) MediaType.VIDEO else MediaType.AUDIO
                     page = Page.FOLDER
                 }) {
                     Icon(XuanjiIcons.Folder, contentDescription = "文件夹")
