@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<map>
+<string name="uri">content://media/external/video/media/1000000150</string>
+<string name="path">/sdcard/Download/vshort.mp4</string>
+<string name="name">vshort</string>
+<long name="pos" value="30000" />
+<string name="srt">vshort.srt</string>
+<string name="sentences"></string>
+<string name="mode">VIDEO</string>
+<boolean name="reading_from_video" value="false" />
+<boolean name="playing" value="true" />
+<boolean name="handed_to_bg" value="false" />
+<long name="bg_resume_pos" value="0" />
+<boolean name="bg_was_playing" value="false" />
+<long name="resume_pos" value="0" />
+<long name="bg_handoff_time" value="0" />
+</map>

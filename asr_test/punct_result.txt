@@ -1,0 +1,50 @@
+音频：C:\Users\yhl888\Desktop\xiaoqifudu\xuanji-devkit\xuanji-app-fixed\asr_test\vshort_16k.wav  (4061 KB)
+
+============================================================
+A) 默认（不加 punctuation）  (HTTP 200)
+============================================================
+返回 16 个 segment：
+  [00] (✗无尾标点) Lesson i a puma at large
+  [01] (✓标点) listen to the tape then answer the question below.
+  [02] (✓标点) Where must the puma have come from.
+  [03] (✗无尾标点) Pumas are large cat like animals which are found in america
+  [04] (✗无尾标点) when reports came into london zoo that a wild puma had been spotted forty five miles south of london they were not taken seriously
+  [05] (✗无尾标点) however as the evidence began to accumulate experts from the zoo felt obliged to investigate for the descriptions given by people who claimed to have seen the puma were extraordinarily similar
+  [06] (✓标点) the hunt for the puma began in a small village where a woman picking blackberries saw a large cat only five yards away from her.
+  [07] (✓标点) It immediately ran away when she saw it and experts confirmed that a puma will not attack a human being unless it is cornered.
+  [08] (✓标点) The search proved difficult for the puma was often observed at one place in the morning and at another place twenty miles away in the evening.
+  [09] (✗无尾标点) Wherever it went it left behind a trail of dead deer and small animals like rabbits
+  [10] (✓标点) pawprints were seen in a number of places and pumafer was found clinging to bushes.
+  [11] (✓标点) Several people complained of cat like noises at night and a business man on a fishing trip saw the puma up a tree.
+  [12] (✓标点) The experts were now fully convinced that the animal was a puma but where had it come from.
+  [13] (✓标点) As no pumas had been reported missing from any zoo in the country this one must have been in the possession of a private collector and somehow managed to escape.
+  [14] (✓标点) The hunt went on for several weeks but the puma was not caught.
+  [15] (✓标点) It is disturbing to think that a dangerous wild animal is still at large in the quiet countryside.
+
+============================================================
+B) 加 punctuation=True  (HTTP 200)
+============================================================
+返回 16 个 segment：
+  [00] (✗无尾标点) Lesson i a puma at large
+  [01] (✓标点) listen to the tape then answer the question below.
+  [02] (✓标点) Where must the puma have come from.
+  [03] (✗无尾标点) Pumas are large cat like animals which are found in america
+  [04] (✗无尾标点) when reports came into london zoo that a wild puma had been spotted forty five miles south of london they were not taken seriously
+  [05] (✗无尾标点) however as the evidence began to accumulate experts from the zoo felt obliged to investigate for the descriptions given by people who claimed to have seen the puma were extraordinarily similar
+  [06] (✓标点) the hunt for the puma began in a small village where a woman picking blackberries saw a large cat only five yards away from her.
+  [07] (✓标点) It immediately ran away when she saw it and experts confirmed that a puma will not attack a human being unless it is cornered.
+  [08] (✓标点) The search proved difficult for the puma was often observed at one place in the morning and at another place twenty miles away in the evening.
+  [09] (✗无尾标点) Wherever it went it left behind a trail of dead deer and small animals like rabbits
+  [10] (✓标点) pawprints were seen in a number of places and pumafer was found clinging to bushes.
+  [11] (✓标点) Several people complained of cat like noises at night and a business man on a fishing trip saw the puma up a tree.
+  [12] (✓标点) The experts were now fully convinced that the animal was a puma but where had it come from.
+  [13] (✓标点) As no pumas had been reported missing from any zoo in the country this one must have been in the possession of a private collector and somehow managed to escape.
+  [14] (✓标点) The hunt went on for several weeks but the puma was not caught.
+  [15] (✓标点) It is disturbing to think that a dangerous wild animal is still at large in the quiet countryside.
+
+============================================================
+结论对照
+============================================================
+A 默认：11/16 句有末尾标点
+B 强制：11/16 句有末尾标点
+=> 两种返回标点数量一致，punctuation 未改变行为（可能该模型标点已默认开启，或该参数对此模型无效）。

@@ -1,0 +1,31 @@
+# 构建产物
+build/
+.gradle/
+.kotlin/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# IDE
+.idea/
+*.iml
+captures/
+
+# 本机专属（含 SDK 路径），不进版本库
+local.properties
+
+# 签名文件：绝不入库（放本地 + 文件快照里）
+*.keystore
+*.jks
+
+# 历史手工备份副本（已在 backups 快照里留档）
+*.bak
+*.bak-*
+*.bak_*
+*.bak.*
+
+# 测试脚本的临时产物
+asr_test/out/
+video_bg_verify/out/

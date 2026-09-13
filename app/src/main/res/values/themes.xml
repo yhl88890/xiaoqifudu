@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Xuanji" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <!-- 启动画面：深色背景（消除白闪），Compose 首帧用照片动画接管 -->
+        <item name="android:windowBackground">#ABB1A8</item>
+        <item name="android:windowSplashScreenBackground">#ABB1A8</item>
+    </style>
+</resources>
