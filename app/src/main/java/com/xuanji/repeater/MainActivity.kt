@@ -96,6 +96,8 @@ import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -110,6 +112,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material3.Surface
@@ -2298,11 +2301,16 @@ private fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false)
 
     // 【0915 宽度对齐】水平内边距 12→16dp，与音频页（PlayerPage 外层 padding horizontal = 16.dp）
     // 完全一致：实测音频模块统一 996px 宽（1080-42*2），视频页原来 12dp 只有 1016px，
-    // 两个页面切换时模块左右边缘差 20px，看着"视频这边胖一圈"。垂直方向仍保持 12dp 不改。
+    // 两个页面切换时模块左右边缘差 20px，看着"视频这边胖一圈"。
+    // 【0915 底部不再留白】原来垂直 12dp 四边都有，底部那 12dp 叠在底栏上方形成一道大空档
+    // （实测控制排卡底边 y2143、底栏 y2250，中间空 107px；音频页无垂直边距只空 62px）。
+    // 阿亮："跟底栏之间距离太高了，参照音频模式" ⇒ 只留顶部 12dp，底部交还给底栏自己收。
     Column(
         modifier = Modifier.fillMaxSize().padding(
-            horizontal = if (videoFullscreen) 0.dp else 16.dp,
-            vertical = if (videoFullscreen) 0.dp else 12.dp,
+            start = if (videoFullscreen) 0.dp else 16.dp,
+            end = if (videoFullscreen) 0.dp else 16.dp,
+            top = if (videoFullscreen) 0.dp else 12.dp,
+            bottom = 0.dp,
         )
     ) {
         Surface(
@@ -2912,24 +2920,64 @@ private fun BiliLinkInput(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                OutlinedTextField(
-                    value = value,
-                    onValueChange = onValueChange,
-                    placeholder = { Text("粘贴 B站 链接", style = MaterialTheme.typography.labelSmall) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { onSubmit(value) }),
-                    textStyle = MaterialTheme.typography.labelSmall,
-                    // 【0915 等高】OutlinedTextField 默认按内容撑高（约 56dp），会把卡片顶得比
-                    // 功能键态高一截。固定 48dp 后它成为固定项，卡片高度完全由外层 Box 决定
-                    // ⇒ 与功能键态逐像素一致（实测两态差从 5px 降到 0）。
-                    modifier = Modifier.weight(1f).height(48.dp),
-                )
-                IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
+                // 【0915 美化】原来是 OutlinedTextField（自带描边框）套在粉色卡片里，
+                // 形成"框里框"、且固定高度会裁掉文字下半截。改成自绘输入槽：
+                // 一个比卡片深一档的同色系圆角浅槽 + 左侧链接图标 + 无边框 BasicTextField，
+                // 视觉上就是"卡片里的一个输入位"，而不是一个独立控件叠上来。
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.75f),
+                            RoundedCornerShape(14.dp),
+                        )
+                        .padding(horizontal = 12.dp),
+                ) {
                     Icon(
-                        Icons.Filled.Close, contentDescription = "收起",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp)
+                        Icons.Filled.Link,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp),
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (value.isEmpty()) {
+                            Text(
+                                "粘贴 B站 链接",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            )
+                        }
+                        BasicTextField(
+                            value = value,
+                            onValueChange = onValueChange,
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurface,
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { onSubmit(value) }),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                // 关闭钮：与功能键同样的圆形浅色底，整排风格一致
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    IconButton(onClick = onClose, modifier = Modifier.fillMaxSize()) {
+                        Icon(
+                            Icons.Filled.Close, contentDescription = "收起",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
                 }
             }
             if (status.isNotEmpty()) {
@@ -3117,6 +3165,10 @@ private fun VideoTransportRow(
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                // ⚠️ 这里**不能**用 fillMaxSize()：外层 Box 由 ModuleColumnHost 给了
+                // heightIn(min = 偏好高度)，只约束下限、上限仍是父级全高，fillMaxSize 会把卡片
+                // 直接撑到整页高（实测控制排吃掉大半个屏、字幕被挤没）。
+                // 卡片就按内容自然高即可，尾部余量靠 api 的默认高度收紧（见 VideoLayoutPrefs）。
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Row(

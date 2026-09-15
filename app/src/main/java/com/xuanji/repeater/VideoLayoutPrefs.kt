@@ -25,14 +25,28 @@ object VideoLayoutPrefs {
     val defaultOrder = listOf(VideoModule.SUBTITLES, VideoModule.TRANSPORT)
 
     /** 固定高度模块的默认高度（dp）；字幕列表为弹性模块，不在此列。
-     *  控制排里最大的是 72dp 播放键，再加编辑模式的高度把手（26dp）与余量 ⇒ 110 起步不挤。 */
+     *  【0915 收紧】110 → 88：控制排实际内容就是 88dp（72dp 播放键 + 上下各 8dp 内边距），
+     *  模块按 110dp 排版时下面白白多出 22dp 空档 —— 阿亮说的"跟底栏之间距离太高"就是它。
+     *  88dp = 内容自然高，卡片底边贴住模块底边，模块底边即紧邻底栏。 */
     val defaultHeights = mapOf(
-        VideoModule.TRANSPORT to 110,
+        VideoModule.TRANSPORT to 88,
     )
 
     /** 控制排最小高度（dp）：里面最大的是 72dp 播放键，压到 76 已到极限（再矮会切边） */
     const val MIN_HEIGHT_TRANSPORT = 76
     const val MAX_HEIGHT = 340
+
+    /** 【0915】偏好键版本：改动默认高度后，老装机里存的旧值会顶掉新默认。
+     *  版本号对不上就清掉存的高度、回落新默认（顺序保留，不打扰用户排好的模块顺序）。 */
+    private const val KEY_HEIGHT_VER = "height_ver"
+    private const val HEIGHT_VER = 2
+
+    private fun migrateHeightsIfNeeded(p: android.content.SharedPreferences) {
+        if (p.getInt(KEY_HEIGHT_VER, 0) >= HEIGHT_VER) return
+        val e = p.edit()
+        for (m in VideoModule.values()) e.remove(heightKey(m))
+        e.putInt(KEY_HEIGHT_VER, HEIGHT_VER).apply()
+    }
 
     fun loadOrder(context: Context): List<VideoModule> {
         val p = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -50,9 +64,11 @@ object VideoLayoutPrefs {
             .edit().putString(KEY_ORDER, order.joinToString(",") { it.id }).apply()
     }
 
-    fun loadHeight(context: Context, module: VideoModule, default: Int): Int =
-        context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
-            .getInt(heightKey(module), default)
+    fun loadHeight(context: Context, module: VideoModule, default: Int): Int {
+        val p = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+        migrateHeightsIfNeeded(p)
+        return p.getInt(heightKey(module), default)
+    }
 
     fun saveHeight(context: Context, module: VideoModule, heightDp: Int) {
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE)

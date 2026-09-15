@@ -5,6 +5,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -52,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -512,6 +514,14 @@ private fun SeekBar(
     enabled: Boolean,
     modifier: Modifier = Modifier,
     barHeight: Dp = 32.dp,
+    /** 【0915】轨道垂直位置：false=居中（原行为）；true=贴着顶部 thumb 半径处。
+     *  阿亮第二次要求"进度条和功能键中间那块空白再近一点"：轨道居中时盒子下半部
+     *  那一半高度全是纯空白，贴上后这段空白直接消失，时间文字能再上提。 */
+    trackAtTop: Boolean = false,
+    /** 【0915 三次收紧】thumb 半径随模块缩放。原来固定 9dp，模块压缩到 scale<1 时
+     *  盒子(18*scale dp)比 thumb 直径还矮，thumb 溢出、盒子却按矮的高度排版，
+     *  中间白白多出一段。现在 thumb 与盒子同步缩，盒子 = 2*thumbR 精确贴合。 */
+    thumbRadius: Dp = 9.dp,
 ) {
     val totalMs = durationMs.coerceAtLeast(1L)
     val fraction = positionMs.coerceIn(0L, totalMs).toFloat() / totalMs
@@ -546,9 +556,11 @@ private fun SeekBar(
         contentAlignment = Alignment.Center,
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val centerY = size.height / 2f
+            val thumbR = thumbRadius.toPx()
+            // trackAtTop：轨道放在距顶 thumbR 处，盒子余下的高度全部让给下方内容，
+            // 让"轨道→时间→按钮"三段贴在一起（上方呼吸由外层 Column 的 top padding 负责）。
+            val centerY = if (trackAtTop) thumbR else size.height / 2f
             val trackH = 4.dp.toPx()
-            val thumbR = 9.dp.toPx()
             val thumbX = fraction * size.width
             // 未播放轨道（圆头）
             drawLine(
@@ -586,6 +598,29 @@ private fun SeekBar(
     }
 }
 
+/** 【0915 三次收紧】自绘圆形功能键：替代 Material3 IconButton/FilledIconButton。
+ *  IconButton 自带 48dp 最小触摸目标与内部 padding，会把所在 Row 撑高 —— 可见圆
+ *  只有 48*scale dp 时，上方多出来的那层空白就是它撑的。这里圆的尺寸即 Row 高度，
+ *  进度条到按钮之间不再有夹层空白。（触摸目标随圆一起变大变小，键本身 ≥36dp，
+ *  实际手指够用；这是阿亮明确要的"贴紧"。） */
+@Composable
+private fun CircleIconBtn(
+    size: Dp,
+    bg: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(if (enabled) bg else bg.copy(alpha = 0.35f))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
 /** 传输模块：进度条 + 时间 + 五键控制条（合并），整体卡片化，内容随高度自适应缩放 */
 @Composable
 private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Boolean) {
@@ -601,9 +636,13 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
             modifier = Modifier.fillMaxSize(),
         ) {
             Column(
-                // 【0915 收紧】竖向内边距 6→3、行距收紧：进度条/时间/按键逐层贴紧，
-                // 整块更矮更紧凑（阿亮要求"上下更窄、相对位置再近一点"）。
-                modifier = Modifier.fillMaxSize().padding(vertical = (3 * scale).dp),
+                // 【0915 二次收紧】阿亮再提"进度条和功能键中间还有块空白"，这次直接量了像素：
+                // 轨道→时间文字那段空约 50px、时间→按钮圆顶还有约 15px。根因是 SeekBar 盒子
+                // 24dp 里轨道居中（上下各空 ~10dp），加上时间行自带的行高富余。
+                // 改法：盒子 24→18dp + 轨道贴顶（trackAtTop）把盒内下半格空白消掉；
+                // 时间行 lineHeight 压到等于字号；顶部留 4dp 呼吸（否则轨道贴死在卡片上边缘）。
+                modifier = Modifier.fillMaxSize()
+                    .padding(top = (4 * scale).dp, bottom = (2 * scale).dp),
                 verticalArrangement = Arrangement.Center,
             ) {
                 SeekBar(
@@ -612,9 +651,11 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     onSeek = { svc?.seekTo(it) },
                     enabled = !editing,
                     modifier = Modifier.fillMaxWidth(),
-                    // 【0915 收紧】盒子 32→24dp：轨道实际只有 4dp、thumb 光晕 ~13dp 半径，
-                    // 32dp 里大半是空的；24dp 仍容得下光晕并保住触摸区。
-                    barHeight = (24 * scale).dp,
+                    // 【0915 三次收紧】盒子高度 = thumb 直径（2 * 9*scale），轨道贴顶画。
+                    // 这样盒子上下都零富余，轨道→时间→按钮三段真正贴在一起。
+                    barHeight = (18 * scale).dp,
+                    trackAtTop = true,
+                    thumbRadius = (9 * scale).dp,
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
@@ -624,7 +665,9 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                         formatDuration(state.positionMs),
                         style = MaterialTheme.typography.labelSmall,
                         fontSize = (11 * scale).sp,
-                        lineHeight = (13 * scale).sp,
+                        // 【0915 二次收紧】lineHeight 13→11sp：文字行不再比字号本身高，
+                        // 时间紧贴进度条下方（阿亮要的"相对位置再近一点"）。
+                        lineHeight = (11 * scale).sp,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Medium,
                     )
@@ -632,7 +675,7 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                         formatDuration(state.durationMs),
                         style = MaterialTheme.typography.labelSmall,
                         fontSize = (11 * scale).sp,
-                        lineHeight = (13 * scale).sp,
+                        lineHeight = (11 * scale).sp,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Medium,
                     )
@@ -642,75 +685,52 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 辅助键：圆形浅色底（与工具条卡片同色系），与实心播放键形成主次层级
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        modifier = Modifier.size((48 * scale).dp),
-                    ) {
-                        IconButton(
-                            onClick = { svc?.prev() },
-                            enabled = !editing,
-                            modifier = Modifier.fillMaxSize(),
-                        ) {
-                            Icon(XuanjiIcons.PrevTrack, contentDescription = "上一曲", modifier = Modifier.size((28 * scale).dp))
-                        }
-                    }
+                    // 【0915 三次收紧】全部改用自绘圆 + clickable，替掉 IconButton / FilledIconButton。
+                    // 根因：Material3 的 IconButton 自带 48dp 最小触摸目标 + 内部 padding，
+                    // 会把所在 Row 撑高；可见圆只有 48*scale(~38dp)，上面那层"空"就是它撑出来的。
+                    // 现在圆的尺寸 == Row 的高度，进度条到按钮之间不再有夹层空白。
+                    CircleIconBtn(
+                        size = (48 * scale).dp,
+                        bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        enabled = !editing,
+                        onClick = { svc?.prev() },
+                    ) { Icon(XuanjiIcons.PrevTrack, contentDescription = "上一曲", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size((28 * scale).dp)) }
                     Spacer(modifier = Modifier.width((12 * scale).dp))
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        modifier = Modifier.size((52 * scale).dp),
-                    ) {
-                        IconButton(
-                            onClick = { svc?.prevSentence() },
-                            enabled = !editing,
-                            modifier = Modifier.fillMaxSize(),
-                        ) {
-                            Icon(XuanjiIcons.Prev, contentDescription = "上一句", modifier = Modifier.size((32 * scale).dp))
-                        }
-                    }
+                    CircleIconBtn(
+                        size = (52 * scale).dp,
+                        bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        enabled = !editing,
+                        onClick = { svc?.prevSentence() },
+                    ) { Icon(XuanjiIcons.Prev, contentDescription = "上一句", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size((32 * scale).dp)) }
                     Spacer(modifier = Modifier.width((20 * scale).dp))
                     // 播放键：实心主色，视觉焦点
-                    FilledIconButton(
-                        onClick = { svc?.togglePlayPause() },
+                    CircleIconBtn(
+                        size = (72 * scale).dp,
+                        bg = MaterialTheme.colorScheme.primary,
                         enabled = !editing,
-                        modifier = Modifier.size((72 * scale).dp),
+                        onClick = { svc?.togglePlayPause() },
                     ) {
                         Icon(
                             if (state.isPlaying) XuanjiIcons.Pause else Icons.Filled.PlayArrow,
                             contentDescription = if (state.isPlaying) "暂停" else "播放",
+                            tint = MaterialTheme.colorScheme.onPrimary,
                             modifier = Modifier.size((38 * scale).dp),
                         )
                     }
                     Spacer(modifier = Modifier.width((20 * scale).dp))
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        modifier = Modifier.size((52 * scale).dp),
-                    ) {
-                        IconButton(
-                            onClick = { svc?.nextSentence() },
-                            enabled = !editing,
-                            modifier = Modifier.fillMaxSize(),
-                        ) {
-                            Icon(XuanjiIcons.Next, contentDescription = "下一句", modifier = Modifier.size((32 * scale).dp))
-                        }
-                    }
+                    CircleIconBtn(
+                        size = (52 * scale).dp,
+                        bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        enabled = !editing,
+                        onClick = { svc?.nextSentence() },
+                    ) { Icon(XuanjiIcons.Next, contentDescription = "下一句", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size((32 * scale).dp)) }
                     Spacer(modifier = Modifier.width((12 * scale).dp))
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        modifier = Modifier.size((48 * scale).dp),
-                    ) {
-                        IconButton(
-                            onClick = { svc?.next() },
-                            enabled = !editing,
-                            modifier = Modifier.fillMaxSize(),
-                        ) {
-                            Icon(XuanjiIcons.NextTrack, contentDescription = "下一曲", modifier = Modifier.size((28 * scale).dp))
-                        }
-                    }
+                    CircleIconBtn(
+                        size = (48 * scale).dp,
+                        bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        enabled = !editing,
+                        onClick = { svc?.next() },
+                    ) { Icon(XuanjiIcons.NextTrack, contentDescription = "下一曲", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size((28 * scale).dp)) }
                 }
             }
         }
