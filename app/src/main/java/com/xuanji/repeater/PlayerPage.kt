@@ -39,7 +39,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalContentColor
-import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -62,6 +61,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -525,6 +525,10 @@ private fun SeekBar(
      *  盒子(18*scale dp)比 thumb 直径还矮，thumb 溢出、盒子却按矮的高度排版，
      *  中间白白多出一段。现在 thumb 与盒子同步缩，盒子 = 2*thumbR 精确贴合。 */
     thumbRadius: Dp = 9.dp,
+    /** 【0915 四次收紧】轨道中心距盒子顶的距离（独立于 thumbRadius）。
+     *  默认 null = 跟随 thumbRadius（原行为，轨道贴顶画在 thumb 圆心高度）。
+     *  指定数值时轨道钉在该位置不动 —— 用于"缩 thumb 但轨道位置纹丝不动"的场景。 */
+    trackTopOffset: Dp? = null,
 ) {
     val totalMs = durationMs.coerceAtLeast(1L)
     val fraction = positionMs.coerceIn(0L, totalMs).toFloat() / totalMs
@@ -562,7 +566,12 @@ private fun SeekBar(
             val thumbR = thumbRadius.toPx()
             // trackAtTop：轨道放在距顶 thumbR 处，盒子余下的高度全部让给下方内容，
             // 让"轨道→时间→按钮"三段贴在一起（上方呼吸由外层 Column 的 top padding 负责）。
-            val centerY = if (trackAtTop) thumbR else size.height / 2f
+            // trackTopOffset 优先：调用方要"缩 thumb 但轨道钉住不动"时给死值。
+            val centerY = when {
+                trackTopOffset != null -> trackTopOffset.toPx()
+                trackAtTop -> thumbR
+                else -> size.height / 2f
+            }
             val trackH = 4.dp.toPx()
             val thumbX = fraction * size.width
             // 未播放轨道（圆头）
@@ -606,10 +615,15 @@ private fun SeekBar(
  *  只有 48*scale dp 时，上方多出来的那层空白就是它撑的。这里圆的尺寸即 Row 高度，
  *  进度条到按钮之间不再有夹层空白。
  *
- *  ⚠️【0915 颜色回滚】必须用 CompositionLocalProvider 注入 contentColor，
- *  让里面的 Icon **不写 tint** 也能拿到正确颜色 —— 这正是旧版 Surface/IconButton 的行为。
- *  上一版我图省事给每个 Icon 手写 `tint = primary`，结果辅助键图标从深色(onPrimaryContainer)
- *  变成浅粉，"颜色跟原来不一样了"（阿亮反馈）。改回按容器色自动染。 */
+ *  ⚠️【0915 五次定稿·颜色对齐视频模式】图标色必须**手写注入**，不能靠容器自动色：
+ *  视频模式那几个键是 `Surface(color = primaryContainer.copy(alpha = 0.5f))` 里套
+ *  IconButton —— Surface 的 contentColorFor 只认**完全相等**的颜色，带 alpha 的副本
+ *  匹配不上 primaryContainer ⇒ 回落到 LocalContentColor = onSurface，也就是**黑色**。
+ *  实测视频模式辅助键图标最深像素 = (29,27,32)，就是 onSurface。（这是"歪打正着"，
+ *  但阿亮看着顺眼，就是它。）
+ *  而我上一版用 contentColorFor(primaryContainer) = onPrimaryContainer（深紫 173,93,127），
+ *  所以"颜色还是不对"。现在照视频模式走：启用 = onSurface（黑）；禁用 = 同色降透明度，
+ *  看起来是"浅黑"（阿亮原话："不能按的时候它是浅。浅黑色吧"）。 */
 @Composable
 private fun CircleIconBtn(
     size: Dp,
@@ -630,7 +644,9 @@ private fun CircleIconBtn(
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        CompositionLocalProvider(LocalContentColor provides iconTint) { content() }
+        // 禁用态：颜色整体降到 40% 透明 —— 落在淡粉圆底上就是"浅黑"，与视频模式观感一致。
+        val tint = if (enabled) iconTint else iconTint.copy(alpha = 0.4f)
+        CompositionLocalProvider(LocalContentColor provides tint) { content() }
     }
 }
 
@@ -654,8 +670,11 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                 // 24dp 里轨道居中（上下各空 ~10dp），加上时间行自带的行高富余。
                 // 改法：盒子 24→18dp + 轨道贴顶（trackAtTop）把盒内下半格空白消掉；
                 // 时间行 lineHeight 压到等于字号；顶部留 4dp 呼吸（否则轨道贴死在卡片上边缘）。
+                // 【0915 五次收紧】底部 padding 2dp→0：阿亮"进度条到按键那 57px 再小一点"，
+                // 盒子(SeekBar)已收到 14dp(=thumb 直径，无富余)，这里再把整块下方那 2dp 抹掉。
+                // 顶部保留 4dp 呼吸，否则轨道贴死在卡片上边缘、显脏。
                 modifier = Modifier.fillMaxSize()
-                    .padding(top = (4 * scale).dp, bottom = (2 * scale).dp),
+                    .padding(top = (4 * scale).dp, bottom = 0.dp),
                 verticalArrangement = Arrangement.Center,
             ) {
                 SeekBar(
@@ -664,31 +683,65 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     onSeek = { svc?.seekTo(it) },
                     enabled = !editing,
                     modifier = Modifier.fillMaxWidth(),
-                    // 【0915 三次收紧】盒子高度 = thumb 直径（2 * 9*scale），轨道贴顶画。
-                    // 这样盒子上下都零富余，轨道→时间→按钮三段真正贴在一起。
-                    barHeight = (18 * scale).dp,
+                    // 【0915 五次收紧·阿亮第三次提】他明确只要"进度条到按键那 57px 再小"，
+                    // 且**时间位置绝对不许动**（"时间就放在那里，很好"）。逐像素拆过那 57px：
+                    //   轨道线底(1023) → 时间文字顶(1048) = 25px
+                    //   时间文字本体 1048..1068               = 21px ← 不能压（阿亮红线）
+                    //   文字底(1068) → 播放键圆顶(1077)        =  9px ← 已到极限
+                    // 那 25px 的构成：轨道线半宽(5px) + thumb 下半圆(19px) + 文字行框上留白(6px)
+                    // —— 主体是 thumb 下半圆。盒子高 = 2*thumbR，thumb 越小盒子越矮，整块越紧凑；
+                    //   但 thumb 太小会抓不住，7dp(≈18px 直径) 是手感下限。
+                    // 本轮：盒子 14dp == thumb 直径(2*7dp)，thumb 恰好占满、无裁切、无富余；
+                    //   轨道钉在 7dp（= thumb 圆心），与上一版同高 ⇒ 视觉上轨道不动，
+                    //   只有盒子底与时间行整体上提 ~5px。再把 Column 底部 padding 2→0，
+                    //   时间行与按键之间那 9px 也一并吃掉一点。
+                    barHeight = (14 * scale).dp,
                     trackAtTop = true,
-                    thumbRadius = (9 * scale).dp,
+                    thumbRadius = (7 * scale).dp,
+                    trackTopOffset = (7 * scale).dp,
                 )
+                // 【0915 六次收紧·量出真身】阿亮第三次要"进度条到按键那 64px 再小"。
+                // 五次那版改 thumb/盒子只是把整块**平移**了 2px，间距纹丝不动（64px 进 64px 出）。
+                // uiautomator 量出真身：时间文字**布局盒** 34px，墨迹只有 21px，多出的 ~13px
+                // 是字体 ascent/descent 自带的白（includeFontPadding=false 只吃掉了 2px）。
+                // 现状拆解（轨道底 1026 → 播放圆顶 1089 = 63px）：
+                //   1026→1040 = 14px ← SeekBar 盒下半（=thumb 下半圆，缩 thumb 才能减）
+                //   1040→1074 = 34px ← 时间盒（21px 墨 + 13px 字白，阿亮红线：不许动时间）
+                //   1074→1089 = 15px ← 文字盒底到圆顶
+                // 阿亮说"你可以把它改小，但位置不要动" ⇒ 允许缩字号：11sp→10sp。
+                // 10sp 墨迹约 19px，盒约 31px；三处合计可再省约 8px，而文字**垂直居中**，
+                // 墨迹位置几乎不变（他只在意"别挪位置"，不是说不能变小）。
+                val timeFontSp = (10 * scale).sp
+                val timeBoxH = (11 * scale).dp
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(horizontal = 8.dp)
+                        .height(timeBoxH),
                     horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
                         formatDuration(state.positionMs),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontSize = (11 * scale).sp,
-                        // 【0915 二次收紧】lineHeight 13→11sp：文字行不再比字号本身高，
-                        // 时间紧贴进度条下方（阿亮要的"相对位置再近一点"）。
-                        lineHeight = (11 * scale).sp,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            // 去掉 Material 文字默认的字体上下白（ascent/descent padding）。
+                            // 这是 36px 布局盒里那 ~15px 空白的来源。
+                            platformStyle = PlatformTextStyle(includeFontPadding = false),
+                        ),
+                        fontSize = timeFontSp,
+                        // lineHeight = 字号：文字行不再比字号本身高。
+                        lineHeight = timeFontSp,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Medium,
                     )
                     Text(
                         formatDuration(state.durationMs),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontSize = (11 * scale).sp,
-                        lineHeight = (11 * scale).sp,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            // 去掉 Material 文字默认的字体上下白（ascent/descent padding）。
+                            // 这是 36px 布局盒里那 ~15px 空白的来源。
+                            platformStyle = PlatformTextStyle(includeFontPadding = false),
+                        ),
+                        fontSize = timeFontSp,
+                        lineHeight = timeFontSp,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Medium,
                     )
@@ -705,11 +758,11 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     CircleIconBtn(
                         size = (48 * scale).dp,
                         bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        // 【0915 颜色回滚】必须用 contentColorFor：原来 Surface 里的 IconButton
-                        // 会自动把图标染成容器的 contentColor(onPrimaryContainer=深色)。上一版我
-                        // 手写成 primary ⇒ 图标变成浅粉、"颜色跟原来不一样"（阿亮反馈）。这里显式
-                        // 取容器色，跟旧版逐像素一致。
-                        iconTint = contentColorFor(MaterialTheme.colorScheme.primaryContainer),
+                        // 【0915 五次定稿·对齐视频模式】图标色 = onSurface（实测 (29,27,32)，即黑色）。
+                        // 视频模式那几个键底色是 primaryContainer.copy(alpha=0.5f)，Surface 的
+                        // contentColorFor 只认完全相等色 ⇒ 匹配不上、回落 onSurface，凑巧就是黑色；
+                        // 阿亮看着顺眼，就照它做。禁用态在 CircleIconBtn 里降透明度成"浅黑"。
+                        iconTint = MaterialTheme.colorScheme.onSurface,
                         enabled = !editing,
                         onClick = { svc?.prev() },
                     ) { Icon(XuanjiIcons.PrevTrack, contentDescription = "上一曲", modifier = Modifier.size((28 * scale).dp)) }
@@ -717,7 +770,7 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     CircleIconBtn(
                         size = (52 * scale).dp,
                         bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        iconTint = contentColorFor(MaterialTheme.colorScheme.primaryContainer),
+                        iconTint = MaterialTheme.colorScheme.onSurface,
                         enabled = !editing,
                         onClick = { svc?.prevSentence() },
                     ) { Icon(XuanjiIcons.Prev, contentDescription = "上一句", modifier = Modifier.size((32 * scale).dp)) }
@@ -740,7 +793,7 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     CircleIconBtn(
                         size = (52 * scale).dp,
                         bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        iconTint = contentColorFor(MaterialTheme.colorScheme.primaryContainer),
+                        iconTint = MaterialTheme.colorScheme.onSurface,
                         enabled = !editing,
                         onClick = { svc?.nextSentence() },
                     ) { Icon(XuanjiIcons.Next, contentDescription = "下一句", modifier = Modifier.size((32 * scale).dp)) }
@@ -748,7 +801,7 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     CircleIconBtn(
                         size = (48 * scale).dp,
                         bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        iconTint = contentColorFor(MaterialTheme.colorScheme.primaryContainer),
+                        iconTint = MaterialTheme.colorScheme.onSurface,
                         enabled = !editing,
                         onClick = { svc?.next() },
                     ) { Icon(XuanjiIcons.NextTrack, contentDescription = "下一曲", modifier = Modifier.size((28 * scale).dp)) }
