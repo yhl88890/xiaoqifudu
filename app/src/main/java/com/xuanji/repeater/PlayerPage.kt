@@ -134,64 +134,109 @@ private fun PlayerModuleHost(
     onHeightChange: (PlayerModule, Int) -> Unit,
     content: @Composable (PlayerModule) -> Unit,
 ) {
+    ModuleColumnHost(
+        modules = modules,
+        heights = heights,
+        layoutEdit = layoutEdit,
+        onMove = onMove,
+        onHeightChange = onHeightChange,
+        idOf = { it.id },
+        flexible = { it == PlayerModule.SENTENCES },
+        // 波形条允许压得更矮，控制行可用更矮的 44dp，其他模块保持全局最小值
+        minHeightOf = {
+            when (it) {
+                PlayerModule.WAVEFORM -> PlayerLayoutPrefs.MIN_HEIGHT_WAVEFORM
+                PlayerModule.TOOLBAR -> PlayerLayoutPrefs.MIN_HEIGHT_TOOLBAR
+                else -> PlayerLayoutPrefs.MIN_HEIGHT
+            }
+        },
+        maxHeight = PlayerLayoutPrefs.MAX_HEIGHT,
+        content = content,
+    )
+}
+
+/**
+ * 通用模块宿主：与音频播放页共用的「拖拽换位 + 拖底边调高」机制。
+ * 视频页也走这套（模块类型不同、偏好分开存），保证两处手感完全一致。
+ *
+ * @param idOf         取模块唯一字符串 id（既作 Compose key 也作高度表键）
+ * @param flexible     是否弹性模块（占满剩余空间、无高度把手、不参与调高）
+ * @param minHeightOf  各模块的最小高度（dp）
+ */
+@Composable
+fun <T> ModuleColumnHost(
+    modules: List<T>,
+    heights: Map<T, Int>,
+    layoutEdit: Boolean,
+    onMove: (Int, Int) -> Unit,
+    onHeightChange: (T, Int) -> Unit,
+    idOf: (T) -> String,
+    flexible: (T) -> Boolean,
+    minHeightOf: (T) -> Int,
+    maxHeight: Int = PlayerLayoutPrefs.MAX_HEIGHT,
+    gap: Dp = 8.dp,
+    editHint: String = "拖动移动 · 拖底部≡调高 · 返回退出",
+    content: @Composable (T) -> Unit,
+) {
     val itemHeights = remember { HashMap<String, Int>() }
     var draggingId by remember { mutableStateOf<String?>(null) }
     var dragOffset by remember { mutableStateOf(0f) }
     val latestModules by rememberUpdatedState(modules)
-    // 模块间距 8.dp 转 px（交换补偿需要算上间距，保证视觉连续）
-    val gapPx = with(LocalDensity.current) { 8.dp.toPx() }
+    // 模块间距转 px（交换补偿需要算上间距，保证视觉连续）
+    val gapPx = with(LocalDensity.current) { gap.toPx() }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(gap),
     ) {
         modules.forEachIndexed { index, module ->
             // 显式 key：模块换位时 Compose 移动节点而非按位置复用，
             // 否则 pointerInput 会被销毁重建 → 拖动手势中断、draggingId 残留 → 卡死
-            key(module.id) {
+            key(idOf(module)) {
+            val mid = idOf(module)
             val isEdit = layoutEdit
-            val isDragging = draggingId == module.id
+            val isDragging = draggingId == mid
             val moduleHeight = heights[module]
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .then(
-                        if (module == PlayerModule.SENTENCES) Modifier.weight(1f)
+                        if (flexible(module)) Modifier.weight(1f)
                         else Modifier.height((moduleHeight ?: 100).dp)
                     )
-                    .onSizeChanged { itemHeights[module.id] = it.height }
+                    .onSizeChanged { itemHeights[mid] = it.height }
                     .zIndex(if (isDragging || isEdit) 2f else 0f)
                     .then(if (isDragging) Modifier.offset { IntOffset(0, dragOffset.roundToInt()) } else Modifier)
                     // 编辑模式：模块任意位置直接拖动换位（无需长按）；非编辑模式不挂手势
-                    .pointerInput(module, layoutEdit) {
+                    .pointerInput(mid, layoutEdit) {
                         if (!layoutEdit) return@pointerInput
                         detectDragGestures(
                             onDragStart = {
-                                draggingId = module.id
+                                draggingId = mid
                                 dragOffset = 0f
                             },
                             onDrag = { change, dragAmount ->
                                 change.consume()
                                 dragOffset += dragAmount.y
-                                val di = latestModules.indexOfFirst { it.id == draggingId }
+                                val di = latestModules.indexOfFirst { idOf(it) == draggingId }
                                 if (di >= 0) {
-                                    val selfH = itemHeights[module.id] ?: 0
+                                    val selfH = itemHeights[mid] ?: 0
                                     // 下移：拖动模块中心越过下一模块中心才交换（(selfH+nextH)/2 + gap）
                                     // ——窄模块必须拖过宽模块中心，避免"卡在宽模块中间"
-                                    if (dragOffset > (selfH + (itemHeights[latestModules.getOrNull(di + 1)?.id] ?: selfH)) / 2f + gapPx
+                                    if (dragOffset > (selfH + (itemHeights[latestModules.getOrNull(di + 1)?.let { idOf(it) }] ?: selfH)) / 2f + gapPx
                                         && di < latestModules.size - 1
                                     ) {
-                                        val nextH = itemHeights[latestModules[di + 1].id] ?: selfH
+                                        val nextH = itemHeights[idOf(latestModules[di + 1])] ?: selfH
                                         onMove(di, di + 1)
                                         // 补偿对方高度+间距：交换后模块视觉位置连续跟随手指；
                                         // 补偿量 (selfH-nextH)/2 恰好不超过反向阈值，永不误判反向
                                         dragOffset -= (nextH + gapPx)
                                     }
                                     // 上移：中心越过上一模块中心才交换
-                                    else if (dragOffset < -((selfH + (itemHeights[latestModules.getOrNull(di - 1)?.id] ?: selfH)) / 2f + gapPx)
+                                    else if (dragOffset < -((selfH + (itemHeights[latestModules.getOrNull(di - 1)?.let { idOf(it) }] ?: selfH)) / 2f + gapPx)
                                         && di > 0
                                     ) {
-                                        val prevH = itemHeights[latestModules[di - 1].id] ?: selfH
+                                        val prevH = itemHeights[idOf(latestModules[di - 1])] ?: selfH
                                         onMove(di, di - 1)
                                         dragOffset += (prevH + gapPx)
                                     }
@@ -207,17 +252,13 @@ private fun PlayerModuleHost(
                         content(module)
                     }
                 }
-                // 编辑模式：高度把手（句子列表为弹性模块，无把手），zIndex 高于覆盖层
-                if (isEdit && module != PlayerModule.SENTENCES) {
+                // 编辑模式：高度把手（弹性模块无把手），zIndex 高于覆盖层
+                if (isEdit && !flexible(module)) {
                     HeightHandle(
                         heightDp = moduleHeight ?: 100,
                         onHeightChange = { h -> onHeightChange(module, h) },
-                        // 波形条允许压得更矮，其他模块保持全局最小值
-                        minHeight = when (module) {
-                            PlayerModule.WAVEFORM -> PlayerLayoutPrefs.MIN_HEIGHT_WAVEFORM
-                            PlayerModule.TOOLBAR -> PlayerLayoutPrefs.MIN_HEIGHT_TOOLBAR
-                            else -> PlayerLayoutPrefs.MIN_HEIGHT
-                        },
+                        minHeight = minHeightOf(module),
+                        maxHeight = maxHeight,
                         modifier = Modifier.align(Alignment.BottomCenter).zIndex(4f),
                     )
                 }
@@ -233,14 +274,14 @@ private fun PlayerModuleHost(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            "拖动移动 · 拖底部≡调高 · 返回退出",
+                            editHint,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
                     }
                 }
             }
-            } // key(module.id) 结束
+            } // key(id) 结束
         }
     }
 }
@@ -251,6 +292,7 @@ private fun HeightHandle(
     heightDp: Int,
     onHeightChange: (Int) -> Unit,
     minHeight: Int = PlayerLayoutPrefs.MIN_HEIGHT,
+    maxHeight: Int = PlayerLayoutPrefs.MAX_HEIGHT,
     modifier: Modifier = Modifier,
 ) {
     val currentHeight by rememberUpdatedState(heightDp)
@@ -273,7 +315,7 @@ private fun HeightHandle(
                         if (dy != 0f) {
                             onHeightChange(
                                 (currentHeight + (dy / density).roundToInt())
-                                    .coerceIn(minHeight, PlayerLayoutPrefs.MAX_HEIGHT)
+                                    .coerceIn(minHeight, maxHeight)
                             )
                             lastY = change.position.y
                         }
