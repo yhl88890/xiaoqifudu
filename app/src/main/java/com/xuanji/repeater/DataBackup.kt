@@ -92,6 +92,37 @@ object DataBackup {
     }
 
     /**
+     * 单词表（TXT）：**只取单词，不取整句**，一行一个。
+     *
+     * 为什么剔除 `isSentence`：整句塞进欧路 / 有道的单词本，人家会当成"一个词"来查，
+     * 结果全是查不到的废条目。整句另有用途（跟读 / Anki 例句卡），不该混进来。
+     *
+     * 为什么不带中文释义：国内的单词本只吃"一行一个词"的纯词表，
+     * 导进去之后释义和发音由它们自己的词典补，反而比我们存的更全。
+     */
+    fun buildWordList(context: Context): String {
+        VocabStore.ensureLoaded(context)
+        return VocabStore.entries.value
+            .filter { !it.isSentence }
+            .map { it.text.trim() }
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
+            .joinToString("\n")
+    }
+
+    /** 单词表文件名：小七复读机-单词表-20260916-0400.txt */
+    fun wordListFileName(): String {
+        val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
+        return "小七复读机-单词表-$ts.txt"
+    }
+
+    /** 单词条数（给 UI 显示"当前 N 个单词"，避免导出一个空文件还提示成功） */
+    fun wordCount(context: Context): Int {
+        VocabStore.ensureLoaded(context)
+        return VocabStore.entries.value.count { !it.isSentence }
+    }
+
+    /**
      * 把备份写到用户选中的 Uri（SAF `ACTION_CREATE_DOCUMENT` 回调给回来的）。
      * @return 是否写成功
      */
@@ -105,5 +136,141 @@ object DataBackup {
         true
     } catch (_: Exception) {
         false
+    }
+
+    /** 把单词表写到用户选中的 Uri（SAF `ACTION_CREATE_DOCUMENT`） */
+    fun writeWordListTo(context: Context, uri: Uri): Boolean = try {
+        val txt = buildWordList(context)
+        val os = context.contentResolver.openOutputStream(uri) ?: return false
+        os.use {
+            it.write(txt.toByteArray(Charsets.UTF_8))
+            it.flush()
+        }
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    // ------------------------------------------------------------------
+    // 导入（让"留底"真正能搬家）
+    // ------------------------------------------------------------------
+
+    /** 一次导入的结果，给 UI 拼提示语 */
+    data class ImportResult(
+        val ok: Boolean,
+        val vocabAdded: Int = 0,
+        val vocabSkipped: Int = 0,
+        val subtitleNew: Int = 0,
+        val subtitleUpdated: Int = 0,
+        val message: String = "",
+    )
+
+    /**
+     * 从用户选中的备份 JSON 恢复数据。
+     *
+     * **只合并、不覆盖**：
+     * - 生词：按 text 大小写不敏感比对，已存在的跳过（保住你现有的翻译 / 音标）
+     * - 字幕：按 `source + title` 比对，已有的用备份里的**更新**，没有的新增
+     * - 全程不删任何现有条目 —— 导错了也不会让你丢东西
+     */
+    fun importFrom(context: Context, uri: Uri): ImportResult {
+        val raw = try {
+            context.contentResolver.openInputStream(uri)?.use {
+                it.readBytes().toString(Charsets.UTF_8)
+            }
+        } catch (_: Exception) {
+            null
+        }
+        if (raw.isNullOrBlank()) return ImportResult(false, message = "读不到这个文件")
+
+        val root = try {
+            JSONObject(raw)
+        } catch (_: Exception) {
+            return ImportResult(false, message = "这不是备份文件（解析失败）")
+        }
+
+        val ver = root.optInt("formatVersion", 0)
+        if (ver <= 0) return ImportResult(false, message = "这不是小七的备份文件")
+        if (ver > FORMAT_VERSION) {
+            return ImportResult(false, message = "备份来自更新的版本（v$ver），请先升级 App")
+        }
+
+        // ---- 生词 ----
+        VocabStore.ensureLoaded(context)
+        val incoming = mutableListOf<VocabEntry>()
+        root.optJSONArray("vocab")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val t = o.optString("text", "").trim()
+                if (t.isEmpty()) continue
+                incoming.add(
+                    VocabEntry(
+                        id = 0L, // 由 restoreAll 重新分配，保证不撞号
+                        text = t,
+                        translation = o.optString("translation", "").ifBlank { null },
+                        usphone = o.optString("usphone", "").ifBlank { null },
+                        ukphone = o.optString("ukphone", "").ifBlank { null },
+                        definition = o.optString("definition", "").ifBlank { null },
+                        source = o.optString("source", ""),
+                        addedAt = o.optLong("addedAt", System.currentTimeMillis()),
+                        isSentence = o.optBoolean("isSentence", false),
+                    )
+                )
+            }
+        }
+        val vocabAdded = VocabStore.restoreAll(context, incoming)
+        val vocabSkipped = incoming.size - vocabAdded
+
+        // ---- 字幕 ----
+        val existingKeys = SubtitleLibrary.loadAll(context)
+            .map { it.source to it.title }
+            .toSet()
+        var subNew = 0
+        var subUpdated = 0
+        root.optJSONArray("subtitles")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val source = o.optString("source", "").trim()
+                val title = o.optString("title", "").trim()
+                val sents = mutableListOf<Sentence>()
+                o.optJSONArray("sentences")?.let { sa ->
+                    for (j in 0 until sa.length()) {
+                        val so = sa.optJSONObject(j) ?: continue
+                        val txt = so.optString("text", "")
+                        if (txt.isBlank()) continue
+                        sents.add(
+                            Sentence(
+                                startMs = so.optLong("startMs", 0L),
+                                endMs = so.optLong("endMs", 0L),
+                                text = txt,
+                            )
+                        )
+                    }
+                }
+                if (title.isBlank() || sents.isEmpty()) continue
+                if ((source to title) in existingKeys) subUpdated++ else subNew++
+                SubtitleLibrary.save(context, source, title, sents, o.optString("path", "").ifBlank { null })
+            }
+        }
+
+        // 什么都没新增（重复导入 / 备份是空的）：别报"+0"这种让人犯糊涂的账，说清楚现状
+        if (vocabAdded == 0 && subNew == 0) {
+            val parts = mutableListOf<String>()
+            if (vocabSkipped > 0) parts.add("生词 $vocabSkipped 条你这儿已经有了")
+            if (subUpdated > 0) parts.add("字幕 $subUpdated 条已用备份里的覆盖")
+            return ImportResult(
+                true, 0, vocabSkipped, 0, subUpdated,
+                if (parts.isEmpty()) "这个备份里没有可导入的数据"
+                else "没有新东西要加：${parts.joinToString("，")}"
+            )
+        }
+
+        val sb = StringBuilder("已导入：生词 +$vocabAdded")
+        if (vocabSkipped > 0) sb.append("（跳过 $vocabSkipped 个重复的）")
+        if (subNew > 0 || subUpdated > 0) {
+            sb.append("，字幕 +$subNew")
+            if (subUpdated > 0) sb.append("（更新 $subUpdated）")
+        }
+        return ImportResult(true, vocabAdded, vocabSkipped, subNew, subUpdated, sb.toString())
     }
 }

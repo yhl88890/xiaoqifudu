@@ -260,30 +260,44 @@ fun SettingsPage(
                         Toast.LENGTH_LONG,
                     ).show()
                 }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { exportLauncher.launch(DataBackup.defaultFileName()) }
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "导出备份",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        text = "›",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+
+                // 导入：只合并不覆盖，导错了也不会丢东西
+                val importLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    if (uri == null) return@rememberLauncherForActivityResult
+                    val r = DataBackup.importFrom(context, uri)
+                    Toast.makeText(context, r.message, Toast.LENGTH_LONG).show()
                 }
-                Text(
-                    text = "把生词本和字幕库导出成一个 JSON 文件，存到你自己选的地方（网盘 / 电脑都行）。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
+
+                // 单词表（TXT）：只给国内单词本软件吃，一行一个词
+                val wordListLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("text/plain")
+                ) { uri ->
+                    if (uri == null) return@rememberLauncherForActivityResult
+                    val n = DataBackup.wordCount(context)
+                    val msg = when {
+                        n == 0 -> "生词本里还没有单词"
+                        DataBackup.writeWordListTo(context, uri) -> "已导出 $n 个单词"
+                        else -> "导出失败，换个位置再试"
+                    }
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+
+                DataRow(
+                    title = "导出备份",
+                    note = "生词本 + 字幕库打包成一个 JSON，存到你自己选的地方（网盘 / 电脑都行）。换手机、清数据前先来这一下。",
+                ) { exportLauncher.launch(DataBackup.defaultFileName()) }
+
+                DataRow(
+                    title = "导入备份",
+                    note = "从以前导出的 JSON 恢复。已有的不会重复加，也不会删你现在的任何东西。",
+                ) { importLauncher.launch(arrayOf("application/json", "text/plain")) }
+
+                DataRow(
+                    title = "导出单词表（TXT）",
+                    note = "只导出单词（不含收藏的整句），一行一个，可以直接导入欧路 / 有道 / 不背单词的生词本。",
+                ) { wordListLauncher.launch(DataBackup.wordListFileName()) }
             }
 
             // ---------------- 关于 ----------------
@@ -462,6 +476,38 @@ private fun SettingsSwitch(
                 modifier = Modifier.padding(top = 2.dp, end = 52.dp),
             )
         }
+    }
+}
+
+/** 「数据」分组里的一条：标题（可点）+ 下方灰字说明 */
+@Composable
+private fun DataRow(title: String, note: String, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "›",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            text = note,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp, bottom = 4.dp),
+        )
     }
 }
 

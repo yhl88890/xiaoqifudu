@@ -127,6 +127,32 @@ object VocabStore {
         scope.launch { persist(context) }
     }
 
+    /**
+     * 【0916】从备份批量恢复，返回**实际新增**的条数。
+     *
+     * 为什么不用循环调 [add]：
+     * 1. [add] 里 id 取 `System.currentTimeMillis()`，连续导入会撞 id ——
+     *    id 是 `remove()` / 补音标回写的唯一依据，撞了会张冠李戴。
+     * 2. [add] 会把备份里已带全的音标、释义丢掉，重新走一遍网络查询。
+     *
+     * 这里的 id 保证**严格大于现有最大值**，且批次内不重复。
+     * 已存在的（按 text 小写比对）跳过，不覆盖、不删任何现有数据。
+     */
+    fun restoreAll(context: Context, incoming: List<VocabEntry>): Int {
+        ensureLoaded(context)
+        val existKeys = _entries.value.map { it.text.trim().lowercase() }.toSet()
+        val fresh = incoming
+            .filter { it.text.isNotBlank() && it.text.trim().lowercase() !in existKeys }
+            .distinctBy { it.text.trim().lowercase() }
+        if (fresh.isEmpty()) return 0
+        val base = (_entries.value.maxOfOrNull { it.id } ?: 0L)
+            .coerceAtLeast(System.currentTimeMillis())
+        val withIds = fresh.mapIndexed { i, e -> e.copy(id = base + i + 1) }
+        _entries.value = withIds + _entries.value
+        scope.launch { persist(context) }
+        return withIds.size
+    }
+
     private suspend fun persist(context: Context) = withContext(Dispatchers.IO) {
         try {
             val arr = JSONArray()
