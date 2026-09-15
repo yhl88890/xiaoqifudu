@@ -69,6 +69,21 @@ object PlayerLayoutPrefs {
         return p.getInt(heightKey(module), default)
     }
 
+    /**
+     * 【0915 修复】一次性把所有模块高度读完 —— **必须走这个入口**，别逐个调 loadHeight。
+     *
+     * 为什么：`migrateHeightsIfNeeded` 是"读的时候顺手迁移"。如果调用方用
+     * `defaultHeights.mapValues { loadHeight(...) }` 逐模块读，第一个模块触发迁移、
+     * 但 SharedPreferences 的 apply() 是**异步落盘**，后续模块的 getInt 可能仍读到旧值
+     * ⇒ 迁移"半生效"，出现"波形条被拉长、某栏被压扁"这种局部错乱。
+     * 这里先同步迁移一次，再统一读，方向明确、无竞态。
+     */
+    fun loadAllHeights(context: Context): Map<PlayerModule, Int> {
+        val p = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+        migrateHeightsIfNeeded(p)
+        return defaultHeights.mapValues { (m, d) -> p.getInt(heightKey(m), d) }
+    }
+
     fun saveHeight(context: Context, module: PlayerModule, heightDp: Int) {
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
             .edit().putInt(heightKey(module), heightDp).apply()
@@ -87,7 +102,10 @@ object PlayerLayoutPrefs {
         if (p.getInt(KEY_HEIGHT_VER, 1) == HEIGHT_VER) return
         val e = p.edit()
         for (m in PlayerModule.values()) e.remove(heightKey(m))
-        e.putInt(KEY_HEIGHT_VER, HEIGHT_VER).apply()
+        e.putInt(KEY_HEIGHT_VER, HEIGHT_VER)
+        // ⚠️ 必须 commit() 而非 apply()：迁移要**立刻可见**，否则同一次启动内的读取
+        // 还会拿到旧值（apply 异步落盘，紧接着 getInt 可能读到旧数据）。
+        e.commit()
     }
 
     private fun heightKey(module: PlayerModule) = "height_" + module.id

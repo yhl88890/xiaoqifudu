@@ -82,11 +82,11 @@ fun PlayerPage(
 ) {
     val ctx = LocalContext.current
     var moduleOrder by remember { mutableStateOf(PlayerLayoutPrefs.loadOrder(ctx)) }
-    var moduleHeights by remember {
-        mutableStateOf(
-            PlayerLayoutPrefs.defaultHeights.mapValues { (m, d) -> PlayerLayoutPrefs.loadHeight(ctx, m, d) }
-        )
-    }
+    // 【0915 修复】改为 loadAllHeights()：内部先同步迁移一次再统一读。
+    // 原来写 `defaultHeights.mapValues { loadHeight(...) }` 是**逐模块读**，
+    // 第一个模块触发迁移、apply() 异步落盘，后面模块可能仍读到旧值
+    // ⇒ 老装机上出现"波形条被拉长、重播速度那栏被压扁"这种局部错乱。
+    var moduleHeights by remember { mutableStateOf(PlayerLayoutPrefs.loadAllHeights(ctx)) }
 
     // 编辑模式：返回键退出
     BackHandler(enabled = layoutEdit) { onExitEdit() }
@@ -161,6 +161,15 @@ private fun PlayerModuleHost(
             }
         },
         maxHeight = PlayerLayoutPrefs.MAX_HEIGHT,
+        // 【0915】控制行 chip 本体高 = 52*scale，模块却给了 50dp ⇒ 富余高度被 Arrangement.Center
+        // 均分到上下。编辑框按这个富余量内缩，阿亮说的"上下白边宽"就没了。
+        editInsetOf = { m ->
+            if (m == PlayerModule.TOOLBAR) {
+                val h = (heights[m] ?: PlayerLayoutPrefs.defaultHeights[m] ?: 50).toFloat()
+                val chipH = 52f * (h / 72f).coerceIn(0.55f, 1.8f)
+                (((h - chipH) / 2f).coerceAtLeast(0f)).dp
+            } else 0.dp
+        },
         content = content,
     )
 }
@@ -194,6 +203,13 @@ fun <T> ModuleColumnHost(
     gap: Dp = 8.dp,
     autoFit: (T) -> Boolean = { false },
     editHint: String = "拖动移动 · 拖底部≡调高 · 返回退出",
+    /**
+     * 编辑态高亮框相对模块内缩多少（dp，四边同值）。
+     * 【0915 阿亮反馈】控制行模块高 50dp，chip 本体只有 ~36dp，`Arrangement.Center`
+     * 把富余高度均分到上下 ⇒ 高亮框比 chip 上下各多 ~7dp 粉边，阿亮说"框比按钮宽/上下白边宽"。
+     * 传入这个内缩量，框就贴在 chip 本体上。默认 0 = 撑满模块（波形条/句子列表等本来就没有富余）。
+     */
+    editInsetOf: (T) -> Dp = { 0.dp },
     content: @Composable (T) -> Unit,
 ) {
     val autoFitModule = autoFit
@@ -289,10 +305,13 @@ fun <T> ModuleColumnHost(
                     )
                 }
                 // 编辑覆盖层：高亮边框 + 提示（编辑模式由设置开关控制，返回键退出）
+                // 【0915】按 editInsetOf 内缩，让框贴住内容本体（控制行 chip 上下不再多出粉边）。
                 if (isEdit) {
+                    val inset = editInsetOf(module)
                     Box(
                         modifier = Modifier
                             .matchParentSize()
+                            .padding(inset)
                             .zIndex(1f)
                             .clip(RoundedCornerShape(16.dp))
                             .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.06f))
@@ -393,7 +412,9 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
             verticalArrangement = Arrangement.Center,
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp),
+                // 【0915】原来这里 padding(horizontal = 2.dp)，会让编辑高亮框比 chip **左右各宽 2dp**
+                // （实测：框 x 42→1037，chip x 48→1031）。阿亮说"框比按钮宽"包含这一条，故去掉。
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy((8 * scale).dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -708,11 +729,17 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                 // （阿亮截图："0:14 只能显示一半"）。
                 // ⚠️ 教训：includeFontPadding=false 只是去掉字体**自带的白**，不是让字形变矮；
                 //   盒子高度必须 ≥ 字号 ×1.25，否则必裁。
-                // 现在：盒子 = 字号 ×1.3（留足呼吸），字号回到 **11sp**（阿亮原本看着舒服的大小，
-                //   10sp 时他嫌小/被裁）。靠`CenterVertically`居中，位置仍钉在原地。
-                // 间距让出来的那几 px 不再从这里抠 —— 这轮改从**模块间 gap** 抠（见下方/上层布局）。
-                val timeFontSp = (11 * scale).sp
-                val timeBoxH = (14 * scale).dp
+                // 🔴 【0915 二次修复·真根因】之前盒子高度写的是 `(14*scale).dp`，字号写 `(11*scale).sp`。
+                //   问题：**sp 会跟着系统字体缩放走，dp 不会**。阿亮的手机系统字体放大过（常见 1.1~1.3），
+                //   于是 11sp 实际渲染成 ~14sp 高，而盒子仍只有 14dp ⇒ 文字底部被裁掉一半
+                //   （他原话"时间只能显示一半，底部看不见"）。我这边模拟器字体缩放=1.0，所以看不到。
+                //   修法：盒子高度**从字号的真实像素高度推导**，不再用固定的 dp 常量 ⇒ 任何字体缩放都不裁。
+                val timeFontSize = (11 * scale).sp
+                val timeFontPx = with(LocalDensity.current) { timeFontSize.toPx() }
+                // 盒高 = 字形高 × 1.32（留呼吸），并保证不小于原来的 14dp，视觉大小不变。
+                val timeBoxH = with(LocalDensity.current) {
+                    maxOf(timeFontPx * 1.32f, 14.dp.toPx() * scale).toDp()
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth()
                         .padding(horizontal = 8.dp)
@@ -724,12 +751,12 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                         formatDuration(state.positionMs),
                         style = MaterialTheme.typography.labelSmall.copy(
                             // 去掉字体自带的上白（ascent/descent padding）——让文字更贴盒顶，
-                            // 但盒子本身留足了高度（14dp vs 11sp 字），**不再裁字**。
+                            // 但盒子本身按真实字号算足了高度，**任何系统字体缩放都不裁字**。
                             platformStyle = PlatformTextStyle(includeFontPadding = false),
                         ),
-                        fontSize = timeFontSp,
-                        // lineHeight = 字号：文字行不再比字号本身高。
-                        lineHeight = timeFontSp,
+                        fontSize = timeFontSize,
+                        // lineHeight = 字号 ×1.2：行盒略高于字形，避免上下被切。
+                        lineHeight = (11 * scale * 1.2f).sp,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Medium,
                     )
@@ -737,11 +764,10 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                         formatDuration(state.durationMs),
                         style = MaterialTheme.typography.labelSmall.copy(
                             // 去掉 Material 文字默认的字体上下白（ascent/descent padding）。
-                            // 这是 36px 布局盒里那 ~15px 空白的来源。
                             platformStyle = PlatformTextStyle(includeFontPadding = false),
                         ),
-                        fontSize = timeFontSp,
-                        lineHeight = timeFontSp,
+                        fontSize = timeFontSize,
+                        lineHeight = (11 * scale * 1.2f).sp,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Medium,
                     )
