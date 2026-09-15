@@ -210,6 +210,22 @@ private var readingFromVideo by mutableStateOf(false)   // 阅读模式来源：
 // videoSentenceStopAt：点视频字幕进阅读时记一句尾，进度轮询到句尾自动停（对齐音频阅读「读一句停一句」）。
 private var videoSentenceStopAt by mutableStateOf<Long?>(null)
 
+// 【0915 上一句复读】视频「上一句」按音频模式「重播次数」设置，把该句复读 N 遍后再继续。
+// 规则与音频 PlayerService.playSentence(repeatTimes) 完全一致：共播 N 遍 = 1 次首播 + (N-1) 次回句首重播。
+// - videoRepeatStopAt：本句的句尾时间戳（= 复读目标句的 endMs）；null = 不在复读中。
+// - videoRepeatStartMs：本句的句首时间戳（回跳落点，直接记下来，不在轮询里反查句子列表）。
+// - videoRepeatLeft：还欠几次「回句首重播」，递减到 0 即结束。
+// 三者都是文件级（不是 VideoPage 的 remember）：切模式/Activity 重建后复读状态不能丢，否则会「读到一半被打断」。
+private var videoRepeatStopAt by mutableStateOf<Long?>(null)
+private var videoRepeatStartMs = 0L
+private var videoRepeatLeft by mutableStateOf(0)
+/** 结束/取消视频「上一句复读」：清掉句尾与剩余次数（句尾自然播完、用户手动跳走、换片都走这里）。 */
+private fun clearVideoSentenceRepeat() {
+    videoRepeatStopAt = null
+    videoRepeatStartMs = 0L
+    videoRepeatLeft = 0
+}
+
 // 视频切后台续播（0904）：onPause 把音轨交给前台服务，onResume 再交还 VideoView
 private var videoHandedToBg = false
 // 【0910 根治·后台存活】Activity 是否真正失去前台（onPause 置 true，onResume/onNewIntent 置 false）。
@@ -693,6 +709,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         installCrashGuard()   // 越早装越好：之后所有主线程异常都能被兜住，而不是直接闪退
         logLastCrash(this)    // 上次要是闪退过，把堆栈打进日志
+        // 【0915】把应用级 Context 挂到会话对象上：文件级顶层函数（如 videoJumpSentence）拿不到
+        // LocalContext，但「上一句复读」要读音频模式的 RepeatPrefs 重播次数。只存 Application Context，不泄漏。
+        PlaybackSession.attachContext(this)
         startForegroundService(Intent(this, PlayerService::class.java))
         bindService(Intent(this, PlayerService::class.java), connection, Context.BIND_AUTO_CREATE)
         // 恢复悬浮窗：上次开启过则自动拉起（应用在前台，可安全 startService）
@@ -1790,6 +1809,8 @@ private fun attachVideoPlayback() {
 
 /** 释放视频播放器（切出视频模式 / Activity 销毁时）。单播放器架构：只有一个播放器，无后台第二播放器。 */
     private fun releaseVideoPlayer() {
+        // 【0915】播放器都没了，复读任务自然作废；不清的话切回来会带着旧句尾乱跳。
+        clearVideoSentenceRepeat()
         runCatching { videoMpRef[0]?.setSurface(null) }
         runCatching { videoMpRef[0]?.release() }
         videoMpRef[0] = null
@@ -1869,10 +1890,35 @@ private fun videoSeekToSentence(idx: Int) {
 }
 
 private fun videoJumpSentence(step: Int) {
+    // 【0915】「上一句」要先落到目标句、再交出复读任务。
+    // 关键：videoSeekToSentence 里的落点异步复核协程一失败就会再叫一次 videoSeek（改 videoLastSeekAt），
+    // 若在它之后立即设 videoRepeatStopAt，轮询可能先把播放头判成「已过句尾」→ 当场误触发复读跳回。
+    // 但方向是反的：跳「上一句」时位置在目标句【之前】，复核只会往后微调，绝不会越过句尾；
+    // 所以先 seek、后设复读标记是安全的。而跳「下一句」时位置在目标句之后（有越过句尾风险），
+    // 故只在 step < 0 时挂复读，这也正是本功能要的范围 —— 只改上一句。
     if (sentences.isNotEmpty()) {
         val idx = (videoSentenceIndexGlobal + step).coerceIn(0, sentences.size - 1)
+        // 任何跳句都先撤掉上一次的复读任务（用户手动跳走 = 放弃复读；也是「连续点上一句」重置计数的地方）
+        clearVideoSentenceRepeat()
+        // seek 前就把当前位置挪到目标句起点：轮询每 200ms 读一次 mp.currentPosition，
+        // seek 是异步的，若不预置，seek 未落地前轮询仍读到旧位置（>目标句尾）会当场触发复读跳回。
+        currentPos = sentences[idx].startMs
         videoSeekToSentence(idx)
+        // 【与音频模式共用同一份设置】次数直接读 RepeatPrefs —— 就是音频模式「重播次数」那一栏写的那本账，
+        // 不新增任何设置项、不新增存储：音频调到 ×5，这里就是 ×5。
+        if (step < 0) {
+            val ctx = PlaybackSession.context
+            val times = if (ctx != null) RepeatPrefs.loadTimes(ctx) else 1
+            val s = sentences[idx]
+            if (times > 1 && s.endMs > s.startMs) {
+                videoRepeatStopAt = s.endMs
+                videoRepeatStartMs = s.startMs
+                videoRepeatLeft = times - 1
+                android.util.Log.d("XJ_REPEAT", "上一句复读 idx=$idx times=$times start=${s.startMs} end=${s.endMs}")
+            }
+        }
     } else {
+        clearVideoSentenceRepeat()
         videoSeekBy(if (step > 0) 10000 else -10000)
     }
 }
@@ -2051,6 +2097,24 @@ private fun VideoPage(readingMode: Boolean = false) {
                     videoSeek(list[idx].startMs, "tickerLoop(idx=$idx)")
                     currentPos = list[idx].startMs
                     videoLastSeekAt = now
+                }
+            }
+            // 【0915 上一句复读】播到目标句尾 → 回句首重播，直到把「重播次数」用完。
+            // 与上面单句循环的分工：单句循环开关（跟读用）优先级更高，开关打开时不走这里，
+            // 免得两套「回句首」逻辑同时抢播放头。两者同时生效时表现为单句循环（读个够）。
+            val repeatStop = videoRepeatStopAt
+            if (repeatStop != null && pos >= repeatStop) {
+                if (videoRepeatLeft > 0 && !loopState.value) {
+                    // 还欠着：回句首再播一遍（跟点句一样预置 currentPos，避免 seek 未落地时轮询读到旧位置连跳）
+                    videoRepeatLeft--
+                    val start = videoRepeatStartMs
+                    videoSeek(start, "tickerRepeat(left=${videoRepeatLeft + 1})")
+                    currentPos = start
+                    videoLastSeekAt = now
+                    android.util.Log.d("XJ_REPEAT", "复读回跳 start=$start 剩余=${videoRepeatLeft + 1}")
+                } else {
+                    // 复读完成（或遇单句循环）：撤掉复读任务，让播放自然往下走
+                    clearVideoSentenceRepeat()
                 }
             }
             // 阅读(视频源)：点句起播记一句尾，轮询到句尾自动暂停（对齐音频阅读「读一句停一句」体验）。

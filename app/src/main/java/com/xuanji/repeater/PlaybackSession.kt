@@ -25,6 +25,23 @@ enum class MediaKind { AUDIO, VIDEO }
  */
 object PlaybackSession {
 
+    /**
+     * 应用 Application Context（进程级，只存 Application Context，绝不存 Activity，避免泄漏）。
+     *
+     * 【为什么放这里】文件级/非 @Composable 的顶层函数（如 videoJumpSentence）拿不到 LocalContext，
+     * 但又需要读偏好设置（如 RepeatPrefs 的重播次数）。MainActivity 在 onCreate 里调 [attachContext]
+     * 挂上即可。放在「播放会话」这个对象里而不是新建一个单例，是因为这里本就是会话级共享状态的落脚点。
+     */
+    private var appContext: android.content.Context? = null
+
+    /** 挂载应用级 Context（MainActivity.onCreate 调用，幂等） */
+    fun attachContext(ctx: android.content.Context) {
+        appContext = ctx.applicationContext
+    }
+
+    /** 供文件级函数读偏好用；未挂载时返回 null（调用方需自行兜底） */
+    val context: android.content.Context? get() = appContext
+
     private val _activeKind = MutableStateFlow(MediaKind.AUDIO)
 
     /** 当前活动播放源（冷启默认音频，与启动页一致） */
