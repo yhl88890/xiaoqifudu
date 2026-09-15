@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -162,6 +163,13 @@ private fun PlayerModuleHost(
  * @param idOf         取模块唯一字符串 id（既作 Compose key 也作高度表键）
  * @param flexible     是否弹性模块（占满剩余空间、无高度把手、不参与调高）
  * @param minHeightOf  各模块的最小高度（dp）
+ * @param autoFit      内容撑不下时是否允许模块自动长高（默认 false = 高度被偏好钉死）
+ *
+ * ⚠️ **autoFit 的由来（0915 实测踩坑）**：视频控制排里除了 5 个按钮，还会临时出现状态文字
+ *    （「未配置识别 Key…」/「后台抓取中…」/识别进度/asrMsg）。如果高度被偏好**钉死**，
+ *    内容一超高就向上溢出、与按钮/字幕列表重叠（实测状态文字压在按钮圆钮上）。
+ *    ⇒ 这类"内容高度会变"的模块必须开 autoFit：**用户拖出来的高度当"下限"**，
+ *    内容真需要更高时让它长高；内容矮时仍按用户设定（保持可拖拽调高的手感）。
  */
 @Composable
 fun <T> ModuleColumnHost(
@@ -175,9 +183,11 @@ fun <T> ModuleColumnHost(
     minHeightOf: (T) -> Int,
     maxHeight: Int = PlayerLayoutPrefs.MAX_HEIGHT,
     gap: Dp = 8.dp,
+    autoFit: (T) -> Boolean = { false },
     editHint: String = "拖动移动 · 拖底部≡调高 · 返回退出",
     content: @Composable (T) -> Unit,
 ) {
+    val autoFitModule = autoFit
     val itemHeights = remember { HashMap<String, Int>() }
     var draggingId by remember { mutableStateOf<String?>(null) }
     var dragOffset by remember { mutableStateOf(0f) }
@@ -201,8 +211,12 @@ fun <T> ModuleColumnHost(
                 modifier = Modifier
                     .fillMaxWidth()
                     .then(
-                        if (flexible(module)) Modifier.weight(1f)
-                        else Modifier.height((moduleHeight ?: 100).dp)
+                        when {
+                            flexible(module) -> Modifier.weight(1f)
+                            // autoFit：偏好高度当"下限"，内容更高就自动撑开（防状态文字溢出重叠）
+                            autoFitModule(module) -> Modifier.heightIn(min = (moduleHeight ?: 100).dp)
+                            else -> Modifier.height((moduleHeight ?: 100).dp)
+                        }
                     )
                     .onSizeChanged { itemHeights[mid] = it.height }
                     .zIndex(if (isDragging || isEdit) 2f else 0f)
@@ -247,10 +261,13 @@ fun <T> ModuleColumnHost(
                         )
                     },
             ) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                        content(module)
-                    }
+                // ⚠️ 这里必须是 Column 而不是 Box：模块内容经常是**多个平级 composable**
+                // （视频控制排 = 按钮行 + B站状态 + 识别进度 + asrMsg）。
+                // Box 会把平级子元素**叠在同一位置**（实测：红色 asrMsg 直接压在按钮圆钮上）；
+                // 而它们在改造前是页面外层 Column 的直接子级、本来就是**纵向依次排列**的。
+                // 用 Column 才能保持"上下依次排列"的原行为，配合外层 heightIn 让内容撑高模块。
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    content(module)
                 }
                 // 编辑模式：高度把手（弹性模块无把手），zIndex 高于覆盖层
                 if (isEdit && !flexible(module)) {

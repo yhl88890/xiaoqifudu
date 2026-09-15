@@ -2514,6 +2514,9 @@ private fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false)
                 flexible = { it == VideoModule.SUBTITLES },
                 minHeightOf = { VideoLayoutPrefs.MIN_HEIGHT_TRANSPORT },
                 maxHeight = VideoLayoutPrefs.MAX_HEIGHT,
+                // 【0915】控制排会临时长出状态文字（未配置Key提示/抓取中/识别进度/asrMsg），
+                // 高度被钉死就会溢出重叠 ⇒ 让它带 autoFit：偏好高度当下限，内容更高就撑开。
+                autoFit = { it == VideoModule.TRANSPORT },
             ) { module ->
                 when (module) {
                     // ---- 5 键控制排（含 B站 输入行、导入/识别状态提示） ----
