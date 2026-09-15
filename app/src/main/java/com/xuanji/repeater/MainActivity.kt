@@ -1250,7 +1250,7 @@ class MainActivity : ComponentActivity() {
                     // 阅读(视频源)时 VideoPage 进入 readingMode：只留背后挂载的 VideoView（音频继续走），
                     // 由 ReadingPage 不透明覆盖层盖住画面、只露字幕。
                     if (page == Page.VIDEO || (page == Page.READING && readingFromVideo)) {
-                        VideoPage(readingMode = page == Page.READING && readingFromVideo)
+                        VideoPage(readingMode = page == Page.READING && readingFromVideo, layoutEdit = layoutEdit)
                     }
                     when (page) {
                         Page.PLAYER -> PlayerPage(
@@ -1946,7 +1946,7 @@ private fun videoJumpSentence(step: Int) {
  *  全屏模式（需求6）：视频填满页面，仅在全屏时把字幕叠在画面上，并提供字幕开关。 */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-private fun VideoPage(readingMode: Boolean = false) {
+private fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false) {
     val subtitleListState = rememberLazyListState()
     val context = LocalContext.current
 
@@ -2481,234 +2481,274 @@ private fun VideoPage(readingMode: Boolean = false) {
             }
         }
         // ===== 非全屏时的下方内容（全屏时隐藏，画面独占） =====
+        // 【0915 模块化】控制排与字幕列表都做成可拖拽换位/调高矮的模块，与音频模式同一套机制
+        // （复用 PlayerPage 里抽出的 ModuleColumnHost）。偏好独立存于 video_layout，
+        // 默认顺序 [SUBTITLES, TRANSPORT] ⇒ 字幕占满剩余、控制排正好贴着底栏上方。
         if (!readingMode && !videoFullscreen) {
-            Spacer(modifier = Modifier.height(12.dp))
-            // 主控制一排：与音频模式统一的 5 键（上一曲/上一句/播放/下一句/下一曲）
-            if (videoUri != null) {
-                // 【0903 v4 并排一体·跟手版】功能键 + B站 输入框：父容器宽 screenW，内含一个总宽
-                // screenW+inputW 的横排 Box（左=功能键，右=输入框），整体用 Animatable 横向平移：
-                //   - slideX=0：功能键填满整屏，输入框在屏外右侧（默认态）
-                //   - slideX=inputW：输入框整段在屏右，功能键右端在屏左露出（两半始终并排）
-                //   - 中间：两边各露一截，互相都是"抓手"
-                // 两个血泪坑（0903 实测）：
-                // 1) 超大容器必须 .align(Alignment.CenterStart) 强制贴左 —— 否则 Box 把比自身宽的
-                //    子元素水平居中，默认位整排左移约 inputW/2，最左的上一曲键被顶出屏外、输入框
-                //    在右边露出一半（这就是装机后"功能键少了/不对齐"的根因）。
-                // 2) 手势 draggable 实时把拖拽增量叠进 offset = 跟手；松手 settle() 先 snapTo 到
-                //    手指当前位置再动画到锚点 = 无回跳；不用 detectHorizontalDragGestures（吃点击）。
-                var biliInputRevealed by remember { mutableStateOf(false) }
-                var dragTotal by remember { mutableStateOf(0f) }   // 本次拖拽累计位移（左滑为负）
-                val scope = rememberCoroutineScope()
-                val slideX = remember { Animatable(0f) }
-                BoxWithConstraints(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clipToBounds(),
-                    // 强制子元素贴左：实测超大子元素会被按整屏宽水平居中（pos 变负、最左键顶出屏）
-                    contentAlignment = Alignment.TopStart,
-                ) {
-                    val screenW = maxWidth
-                    val inputW = minOf(280.dp, screenW - 150.dp)  // 输入框宽度自适应
-                    val inputWPx = with(LocalDensity.current) { inputW.toPx() }
-                    val screenWPx = with(LocalDensity.current) { screenW.toPx() }
-                    // 松手/收起/提交后统一回到锚点（0 或 inputW），不产生跳变
-                    fun settle() {
-                        val target = if (biliInputRevealed) inputWPx else 0f
-                        val from = (slideX.value + dragTotal).coerceIn(0f, inputWPx)
-                        dragTotal = 0f
-                        scope.launch {
-                            slideX.snapTo(from)
-                            slideX.animateTo(target, animationSpec = tween(250))
-                        }
+            val ctxLayout = context
+            var vModules by remember { mutableStateOf(VideoLayoutPrefs.loadOrder(ctxLayout)) }
+            var vHeights by remember {
+                mutableStateOf(
+                    VideoLayoutPrefs.defaultHeights.mapValues { (m, d) ->
+                        VideoLayoutPrefs.loadHeight(ctxLayout, m, d)
                     }
-                    fun onDragStopped() {
-                        // 松手：净位移过半 → 停在"输入框打开"，否则收回功能键
-                        val pull = (slideX.value + dragTotal).coerceIn(0f, inputWPx)
-                        biliInputRevealed = pull > inputWPx * 0.5f
-                        settle()
-                    }
-                    val draggableState = rememberDraggableState { delta ->
-                        // 【0903 用户反馈】原实现是「右滑唤出」（手指右拖 pull 才涨），反直觉；
-                        // 改成左滑唤出：手指左拖（delta<0）→ dragTotal 涨 → 输入框从右侧拉出来，
-                        // 跟手方向 = 内容随手指左移，与「把右边的输入框拉过来」的手势直觉一致。
-                        dragTotal -= delta
-                    }
-                    // 功能键（宽 screenW）与输入框（宽 inputW）作为两个独立子元素各自 offset 平移：
-                    // 功能键 x∈[0,-inputW] 左滑出屏，输入框 x=screenW→screenW-inputW 贴其右缘滑入。
-                    // 关键：两者宽度都不超过父容器 → 不会触发"Box 对超宽子元素一律居中"的框架行为
-                    // （0903 实测：单个 screenW+inputW 宽子元素被强制居中到 x=-279，最左键顶出屏外）。
-                    VideoTransportRow(
-                        modifier = Modifier
-                            .requiredWidth(screenW)
-                            .offset { IntOffset(-(slideX.value + dragTotal).coerceIn(0f, inputWPx).roundToInt(), 0) }
-                            .draggable(
-                                state = draggableState,
-                                orientation = Orientation.Horizontal,
-                                startDragImmediately = false,
-                                onDragStopped = { onDragStopped() },
-                            ),
-                        onPrevTrack = { prevVideo() },
-                        onPrevSentence = { videoJumpSentence(-1) },
-                        onPrevSentenceHoldChange = { held -> if (held) startRewind() else stopFast() },
-                        onToggle = { videoTogglePlay() },
-                        onNextSentence = { videoJumpSentence(1) },
-                        onNextSentenceHoldChange = { held -> if (held) startFastForward() else stopFast() },
-                        onNextTrack = { nextVideo() },
-                        prevTrackEnabled = hasPrevVideo,
-                        nextTrackEnabled = hasNextVideo,
-                        playing = videoPlaying,
-                    )
-                    // 输入框：默认在屏外右侧（x=screenW），左滑随功能键一起滑入、停在屏右
-                    BiliLinkInput(
-                        modifier = Modifier
-                            .requiredWidth(inputW)
-                            .offset { IntOffset((screenWPx - (slideX.value + dragTotal).coerceIn(0f, inputWPx)).roundToInt(), 0) }
-                            .draggable(
-                                state = draggableState,
-                                orientation = Orientation.Horizontal,
-                                startDragImmediately = false,
-                                onDragStopped = { onDragStopped() },
-                            )
-                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp),
-                        value = biliUrl,
-                        status = biliStatus,
-                        onValueChange = { biliUrl = it },
-                        onSubmit = { url ->
-                            val u = url.trim()
-                            if (u.isNotBlank()) {
-                                startBiliImport(context, u)
-                                biliInputRevealed = false
-                                biliUrl = ""
-                                biliStatus = "后台抓取中…"
-                                settle()
-                            }
-                        },
-                        onClose = {
-                            biliInputRevealed = false
-                            settle()
-                        },
-                    )
-                }
-
-                // 导入状态常驻显示
-                // 导入状态常驻显示（不随输入框收起而消失，让"后台抓取中 / 进度"始终可见）
-                if (biliStatus.isNotEmpty()) {
-                    Text(
-                        biliStatus,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 12.dp, top = 4.dp, bottom = 2.dp),
-                    )
-                }
-                if (biliError.isNotEmpty()) {
-                    Text(
-                        biliError,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFFFF6B6B),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 12.dp, top = 2.dp, bottom = 4.dp),
-                    )
-                }
-            }
-            if (recognizing) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                    CircularProgressIndicator(
-                        progress = if (asrProgress < 100) asrProgress / 100f else 1f,
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        if (asrProgress < 100) "抽音轨中… $asrProgress%" else "云端识别中…",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-            }
-            if (asrMsg.isNotEmpty()) {
-                Text(
-                    asrMsg,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
-            if (sentences.isNotEmpty()) {
-                // 字幕列表：点一句 -> 跳到该句开头播放；长按 -> 内联展开翻译 + 点词选词（对齐阅读模式）
-                LazyColumn(
-                    state = subtitleListState,
-                    modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 10.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp),
-                ) {
-                    itemsIndexed(sentences) { index, sentence ->
-                        val active = index == videoSentenceIndexGlobal
-                        val expanded = expandedVideoIndex == index
-                        var translation by remember(sentence.text) { mutableStateOf(Translator.cached(sentence.text)) }
-                        var translating by remember(sentence.text) { mutableStateOf(false) }
-                        var failed by remember(sentence.text) { mutableStateOf(false) }
-                        var selectedWord by remember { mutableStateOf<String?>(null) }
-                        LaunchedEffect(expanded, sentence.text) {
-                            if (expanded && translation == null && !translating) {
-                                translating = true; failed = false
-                                val t = Translator.translate(sentence.text)
-                                translation = t; failed = t == null; translating = false
-                            }
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = when {
-                                active -> MaterialTheme.colorScheme.primaryContainer
-                                expanded -> MaterialTheme.colorScheme.secondaryContainer
-                                else -> MaterialTheme.colorScheme.surface
-                            },
-                            tonalElevation = if (active || expanded) 0.dp else 1.dp,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                                .combinedClickable(
-                                    // 【0915】手动点句 = 放弃复读：先撤复读任务+高亮钉子，再跳句。
-                                    // （videoSeekToSentence 直接调、不过 videoJumpSentence，得自己清一次，
-                                    //  否则复读中点了别的句子，钉子会把高亮又拉回旧句。）
-                                    onClick = { clearVideoSentenceRepeat(); videoSeekToSentence(index) },
-                                    onLongClick = { expandedVideoIndex = if (expanded) -1 else index },
-                                ),
-                        ) {
-                            Column(modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp)) {
-                                if (expanded && sentence.text.isNotEmpty()) {
-                                    ClickableWordsRow(text = sentence.text, onWordClick = { selectedWord = it })
-                                } else {
-                                    Text(
-                                        sentence.text,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.fillMaxWidth(),
-                                    )
-                                }
-                                if (expanded && sentence.text.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    when {
-                                        translating -> Row(verticalAlignment = Alignment.CenterVertically) {
-                                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text("正在翻译…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                        failed -> Text("翻译失败，请检查网络后长按重试", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
-                                        else -> Text(translation ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+            ModuleColumnHost(
+                modules = vModules,
+                heights = vHeights,
+                layoutEdit = layoutEdit,
+                onMove = { from, to ->
+                    val list = vModules.toMutableList()
+                    val m = list.removeAt(from)
+                    list.add(to, m)
+                    vModules = list
+                    VideoLayoutPrefs.saveOrder(ctxLayout, list)
+                },
+                onHeightChange = { module, h ->
+                    vHeights = vHeights + (module to h)
+                    VideoLayoutPrefs.saveHeight(ctxLayout, module, h)
+                },
+                idOf = { it.id },
+                flexible = { it == VideoModule.SUBTITLES },
+                minHeightOf = { VideoLayoutPrefs.MIN_HEIGHT_TRANSPORT },
+                maxHeight = VideoLayoutPrefs.MAX_HEIGHT,
+            ) { module ->
+                when (module) {
+                    // ---- 5 键控制排（含 B站 输入行、导入/识别状态提示） ----
+                    VideoModule.TRANSPORT -> {
+                        // 主控制一排：与音频模式统一的 5 键（上一曲/上一句/播放/下一句/下一曲）
+                        if (videoUri != null) {
+                            // 【0903 v4 并排一体·跟手版】功能键 + B站 输入框：父容器宽 screenW，内含一个总宽
+                            // screenW+inputW 的横排 Box（左=功能键，右=输入框），整体用 Animatable 横向平移：
+                            //   - slideX=0：功能键填满整屏，输入框在屏外右侧（默认态）
+                            //   - slideX=inputW：输入框整段在屏右，功能键右端在屏左露出（两半始终并排）
+                            //   - 中间：两边各露一截，互相都是"抓手"
+                            // 两个血泪坑（0903 实测）：
+                            // 1) 超大容器必须 .align(Alignment.CenterStart) 强制贴左 —— 否则 Box 把比自身宽的
+                            //    子元素水平居中，默认位整排左移约 inputW/2，最左的上一曲键被顶出屏外、输入框
+                            //    在右边露出一半（这就是装机后"功能键少了/不对齐"的根因）。
+                            // 2) 手势 draggable 实时把拖拽增量叠进 offset = 跟手；松手 settle() 先 snapTo 到
+                            //    手指当前位置再动画到锚点 = 无回跳；不用 detectHorizontalDragGestures（吃点击）。
+                            var biliInputRevealed by remember { mutableStateOf(false) }
+                            var dragTotal by remember { mutableStateOf(0f) }   // 本次拖拽累计位移（左滑为负）
+                            val scope = rememberCoroutineScope()
+                            val slideX = remember { Animatable(0f) }
+                            BoxWithConstraints(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clipToBounds(),
+                                // 强制子元素贴左：实测超大子元素会被按整屏宽水平居中（pos 变负、最左键顶出屏）
+                                contentAlignment = Alignment.TopStart,
+                            ) {
+                                val screenW = maxWidth
+                                val inputW = minOf(280.dp, screenW - 150.dp)  // 输入框宽度自适应
+                                val inputWPx = with(LocalDensity.current) { inputW.toPx() }
+                                val screenWPx = with(LocalDensity.current) { screenW.toPx() }
+                                // 松手/收起/提交后统一回到锚点（0 或 inputW），不产生跳变
+                                fun settle() {
+                                    val target = if (biliInputRevealed) inputWPx else 0f
+                                    val from = (slideX.value + dragTotal).coerceIn(0f, inputWPx)
+                                    dragTotal = 0f
+                                    scope.launch {
+                                        slideX.snapTo(from)
+                                        slideX.animateTo(target, animationSpec = tween(250))
                                     }
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    AddSentenceButton(context = context, text = sentence.text, source = videoName)
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text("再长按可收起", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
+                                fun onDragStopped() {
+                                    // 松手：净位移过半 → 停在"输入框打开"，否则收回功能键
+                                    val pull = (slideX.value + dragTotal).coerceIn(0f, inputWPx)
+                                    biliInputRevealed = pull > inputWPx * 0.5f
+                                    settle()
+                                }
+                                val draggableState = rememberDraggableState { delta ->
+                                    // 【0903 用户反馈】原实现是「右滑唤出」（手指右拖 pull 才涨），反直觉；
+                                    // 改成左滑唤出：手指左拖（delta<0）→ dragTotal 涨 → 输入框从右侧拉出来，
+                                    // 跟手方向 = 内容随手指左移，与「把右边的输入框拉过来」的手势直觉一致。
+                                    dragTotal -= delta
+                                }
+                                // 功能键（宽 screenW）与输入框（宽 inputW）作为两个独立子元素各自 offset 平移：
+                                // 功能键 x∈[0,-inputW] 左滑出屏，输入框 x=screenW→screenW-inputW 贴其右缘滑入。
+                                // 关键：两者宽度都不超过父容器 → 不会触发"Box 对超宽子元素一律居中"的框架行为
+                                // （0903 实测：单个 screenW+inputW 宽子元素被强制居中到 x=-279，最左键顶出屏外）。
+                                VideoTransportRow(
+                                    modifier = Modifier
+                                        .requiredWidth(screenW)
+                                        .offset { IntOffset(-(slideX.value + dragTotal).coerceIn(0f, inputWPx).roundToInt(), 0) }
+                                        .draggable(
+                                            state = draggableState,
+                                            orientation = Orientation.Horizontal,
+                                            startDragImmediately = false,
+                                            onDragStopped = { onDragStopped() },
+                                        ),
+                                    onPrevTrack = { prevVideo() },
+                                    onPrevSentence = { videoJumpSentence(-1) },
+                                    onPrevSentenceHoldChange = { held -> if (held) startRewind() else stopFast() },
+                                    onToggle = { videoTogglePlay() },
+                                    onNextSentence = { videoJumpSentence(1) },
+                                    onNextSentenceHoldChange = { held -> if (held) startFastForward() else stopFast() },
+                                    onNextTrack = { nextVideo() },
+                                    prevTrackEnabled = hasPrevVideo,
+                                    nextTrackEnabled = hasNextVideo,
+                                    playing = videoPlaying,
+                                )
+                                // 输入框：默认在屏外右侧（x=screenW），左滑随功能键一起滑入、停在屏右
+                                BiliLinkInput(
+                                    modifier = Modifier
+                                        .requiredWidth(inputW)
+                                        .offset { IntOffset((screenWPx - (slideX.value + dragTotal).coerceIn(0f, inputWPx)).roundToInt(), 0) }
+                                        .draggable(
+                                            state = draggableState,
+                                            orientation = Orientation.Horizontal,
+                                            startDragImmediately = false,
+                                            onDragStopped = { onDragStopped() },
+                                        )
+                                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    value = biliUrl,
+                                    status = biliStatus,
+                                    onValueChange = { biliUrl = it },
+                                    onSubmit = { url ->
+                                        val u = url.trim()
+                                        if (u.isNotBlank()) {
+                                            startBiliImport(context, u)
+                                            biliInputRevealed = false
+                                            biliUrl = ""
+                                            biliStatus = "后台抓取中…"
+                                            settle()
+                                        }
+                                    },
+                                    onClose = {
+                                        biliInputRevealed = false
+                                        settle()
+                                    },
+                                )
+                            }
+
+                            // 导入状态常驻显示
+                            // 导入状态常驻显示（不随输入框收起而消失，让"后台抓取中 / 进度"始终可见）
+                            if (biliStatus.isNotEmpty()) {
+                                Text(
+                                    biliStatus,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 12.dp, top = 4.dp, bottom = 2.dp),
+                                )
+                            }
+                            if (biliError.isNotEmpty()) {
+                                Text(
+                                    biliError,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFFF6B6B),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 12.dp, top = 2.dp, bottom = 4.dp),
+                                )
                             }
                         }
-                        if (selectedWord != null) {
-                            WordCardDialog(word = selectedWord!!, source = videoName, onDismiss = { selectedWord = null })
+                        if (recognizing) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                                CircularProgressIndicator(
+                                    progress = if (asrProgress < 100) asrProgress / 100f else 1f,
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    if (asrProgress < 100) "抽音轨中… $asrProgress%" else "云端识别中…",
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                            }
+                        }
+                        if (asrMsg.isNotEmpty()) {
+                            Text(
+                                asrMsg,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 6.dp),
+                            )
+                        }
+                    }
+                    // ---- 字幕列表（弹性模块：占满剩余空间，不参与调高矮） ----
+                    VideoModule.SUBTITLES -> {
+                        if (sentences.isNotEmpty()) {
+                            // 字幕列表：点一句 -> 跳到该句开头播放；长按 -> 内联展开翻译 + 点词选词（对齐阅读模式）
+                            LazyColumn(
+                                state = subtitleListState,
+                                modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 10.dp),
+                                contentPadding = PaddingValues(vertical = 4.dp),
+                            ) {
+                                itemsIndexed(sentences) { index, sentence ->
+                                    val active = index == videoSentenceIndexGlobal
+                                    val expanded = expandedVideoIndex == index
+                                    var translation by remember(sentence.text) { mutableStateOf(Translator.cached(sentence.text)) }
+                                    var translating by remember(sentence.text) { mutableStateOf(false) }
+                                    var failed by remember(sentence.text) { mutableStateOf(false) }
+                                    var selectedWord by remember { mutableStateOf<String?>(null) }
+                                    LaunchedEffect(expanded, sentence.text) {
+                                        if (expanded && translation == null && !translating) {
+                                            translating = true; failed = false
+                                            val t = Translator.translate(sentence.text)
+                                            translation = t; failed = t == null; translating = false
+                                        }
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = when {
+                                            active -> MaterialTheme.colorScheme.primaryContainer
+                                            expanded -> MaterialTheme.colorScheme.secondaryContainer
+                                            else -> MaterialTheme.colorScheme.surface
+                                        },
+                                        tonalElevation = if (active || expanded) 0.dp else 1.dp,
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                                            .combinedClickable(
+                                                // 【0915】手动点句 = 放弃复读：先撤复读任务+高亮钉子，再跳句。
+                                                // （videoSeekToSentence 直接调、不过 videoJumpSentence，得自己清一次，
+                                                //  否则复读中点了别的句子，钉子会把高亮又拉回旧句。）
+                                                onClick = { clearVideoSentenceRepeat(); videoSeekToSentence(index) },
+                                                onLongClick = { expandedVideoIndex = if (expanded) -1 else index },
+                                            ),
+                                    ) {
+                                        Column(modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp)) {
+                                            if (expanded && sentence.text.isNotEmpty()) {
+                                                ClickableWordsRow(text = sentence.text, onWordClick = { selectedWord = it })
+                                            } else {
+                                                Text(
+                                                    sentence.text,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                )
+                                            }
+                                            if (expanded && sentence.text.isNotEmpty()) {
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                when {
+                                                    translating -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Text("正在翻译…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                    }
+                                                    failed -> Text("翻译失败，请检查网络后长按重试", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                                                    else -> Text(translation ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                                                }
+                                                Spacer(modifier = Modifier.height(10.dp))
+                                                AddSentenceButton(context = context, text = sentence.text, source = videoName)
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text("再长按可收起", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        }
+                                    }
+                                    if (selectedWord != null) {
+                                        WordCardDialog(word = selectedWord!!, source = videoName, onDismiss = { selectedWord = null })
+                                    }
+                                }
+                            }
                         }
                     }
                 }

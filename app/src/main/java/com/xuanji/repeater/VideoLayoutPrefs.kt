@@ -24,13 +24,14 @@ object VideoLayoutPrefs {
     /** 默认顺序：字幕列表在上（弹性）、控制排在下（贴底栏）。 */
     val defaultOrder = listOf(VideoModule.SUBTITLES, VideoModule.TRANSPORT)
 
-    /** 固定高度模块的默认高度（dp）；字幕列表为弹性模块，不在此列 */
+    /** 固定高度模块的默认高度（dp）；字幕列表为弹性模块，不在此列。
+     *  控制排里最大的是 72dp 播放键，再加编辑模式的高度把手（26dp）与余量 ⇒ 110 起步不挤。 */
     val defaultHeights = mapOf(
-        VideoModule.TRANSPORT to 88,
+        VideoModule.TRANSPORT to 110,
     )
 
-    /** 控制排最小高度（dp）：压到 44 也能放下 5 个圆形键 */
-    const val MIN_HEIGHT_TRANSPORT = 44
+    /** 控制排最小高度（dp）：里面最大的是 72dp 播放键，压到 76 已到极限（再矮会切边） */
+    const val MIN_HEIGHT_TRANSPORT = 76
     const val MAX_HEIGHT = 340
 
     fun loadOrder(context: Context): List<VideoModule> {
