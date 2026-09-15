@@ -38,9 +38,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -601,16 +604,24 @@ private fun SeekBar(
 /** 【0915 三次收紧】自绘圆形功能键：替代 Material3 IconButton/FilledIconButton。
  *  IconButton 自带 48dp 最小触摸目标与内部 padding，会把所在 Row 撑高 —— 可见圆
  *  只有 48*scale dp 时，上方多出来的那层空白就是它撑的。这里圆的尺寸即 Row 高度，
- *  进度条到按钮之间不再有夹层空白。（触摸目标随圆一起变大变小，键本身 ≥36dp，
- *  实际手指够用；这是阿亮明确要的"贴紧"。） */
+ *  进度条到按钮之间不再有夹层空白。
+ *
+ *  ⚠️【0915 颜色回滚】必须用 CompositionLocalProvider 注入 contentColor，
+ *  让里面的 Icon **不写 tint** 也能拿到正确颜色 —— 这正是旧版 Surface/IconButton 的行为。
+ *  上一版我图省事给每个 Icon 手写 `tint = primary`，结果辅助键图标从深色(onPrimaryContainer)
+ *  变成浅粉，"颜色跟原来不一样了"（阿亮反馈）。改回按容器色自动染。 */
 @Composable
 private fun CircleIconBtn(
     size: Dp,
     bg: Color,
+    iconTint: Color,
     enabled: Boolean,
     onClick: () -> Unit,
     content: @Composable () -> Unit,
 ) {
+    // 触摸热区 = 圆的尺寸本身（48/52/72dp，均 ≥ Android 建议的 48dp 最小触摸目标，够手指用）。
+    // 不能用 minimumInteractiveComponentSize：它作用于**布局**尺寸，会把 Row 撑高，
+    // 正是上一版要消掉的夹层空白。
     Box(
         modifier = Modifier
             .size(size)
@@ -618,7 +629,9 @@ private fun CircleIconBtn(
             .background(if (enabled) bg else bg.copy(alpha = 0.35f))
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
-    ) { content() }
+    ) {
+        CompositionLocalProvider(LocalContentColor provides iconTint) { content() }
+    }
 }
 
 /** 传输模块：进度条 + 时间 + 五键控制条（合并），整体卡片化，内容随高度自适应缩放 */
@@ -692,28 +705,34 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     CircleIconBtn(
                         size = (48 * scale).dp,
                         bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        // 【0915 颜色回滚】必须用 contentColorFor：原来 Surface 里的 IconButton
+                        // 会自动把图标染成容器的 contentColor(onPrimaryContainer=深色)。上一版我
+                        // 手写成 primary ⇒ 图标变成浅粉、"颜色跟原来不一样"（阿亮反馈）。这里显式
+                        // 取容器色，跟旧版逐像素一致。
+                        iconTint = contentColorFor(MaterialTheme.colorScheme.primaryContainer),
                         enabled = !editing,
                         onClick = { svc?.prev() },
-                    ) { Icon(XuanjiIcons.PrevTrack, contentDescription = "上一曲", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size((28 * scale).dp)) }
+                    ) { Icon(XuanjiIcons.PrevTrack, contentDescription = "上一曲", modifier = Modifier.size((28 * scale).dp)) }
                     Spacer(modifier = Modifier.width((12 * scale).dp))
                     CircleIconBtn(
                         size = (52 * scale).dp,
                         bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        iconTint = contentColorFor(MaterialTheme.colorScheme.primaryContainer),
                         enabled = !editing,
                         onClick = { svc?.prevSentence() },
-                    ) { Icon(XuanjiIcons.Prev, contentDescription = "上一句", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size((32 * scale).dp)) }
+                    ) { Icon(XuanjiIcons.Prev, contentDescription = "上一句", modifier = Modifier.size((32 * scale).dp)) }
                     Spacer(modifier = Modifier.width((20 * scale).dp))
-                    // 播放键：实心主色，视觉焦点
+                    // 播放键：实心主色，视觉焦点（图标白 = onPrimary，与旧版 FilledIconButton 一致）
                     CircleIconBtn(
                         size = (72 * scale).dp,
                         bg = MaterialTheme.colorScheme.primary,
+                        iconTint = MaterialTheme.colorScheme.onPrimary,
                         enabled = !editing,
                         onClick = { svc?.togglePlayPause() },
                     ) {
                         Icon(
                             if (state.isPlaying) XuanjiIcons.Pause else Icons.Filled.PlayArrow,
                             contentDescription = if (state.isPlaying) "暂停" else "播放",
-                            tint = MaterialTheme.colorScheme.onPrimary,
                             modifier = Modifier.size((38 * scale).dp),
                         )
                     }
@@ -721,16 +740,18 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     CircleIconBtn(
                         size = (52 * scale).dp,
                         bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        iconTint = contentColorFor(MaterialTheme.colorScheme.primaryContainer),
                         enabled = !editing,
                         onClick = { svc?.nextSentence() },
-                    ) { Icon(XuanjiIcons.Next, contentDescription = "下一句", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size((32 * scale).dp)) }
+                    ) { Icon(XuanjiIcons.Next, contentDescription = "下一句", modifier = Modifier.size((32 * scale).dp)) }
                     Spacer(modifier = Modifier.width((12 * scale).dp))
                     CircleIconBtn(
                         size = (48 * scale).dp,
                         bg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        iconTint = contentColorFor(MaterialTheme.colorScheme.primaryContainer),
                         enabled = !editing,
                         onClick = { svc?.next() },
-                    ) { Icon(XuanjiIcons.NextTrack, contentDescription = "下一曲", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size((28 * scale).dp)) }
+                    ) { Icon(XuanjiIcons.NextTrack, contentDescription = "下一曲", modifier = Modifier.size((28 * scale).dp)) }
                 }
             }
         }
