@@ -99,7 +99,10 @@ fun PlayerPage(
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 2.dp),
+            // 【0915 收紧】阿亮标红："顶栏 ↔ 标题"这段太空（实测 98px≈37dp）。
+            // 其中 20dp 是这里的 top padding，其余是 titleLarge 自带的行框上白。
+            // top 20→6dp；底部 bottom 保持 2dp（标题与波形条本来就贴得近，别动）。
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
             textAlign = TextAlign.Center,
         )
 
@@ -700,19 +703,16 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     thumbRadius = (7 * scale).dp,
                     trackTopOffset = (7 * scale).dp,
                 )
-                // 【0915 六次收紧·量出真身】阿亮第三次要"进度条到按键那 64px 再小"。
-                // 五次那版改 thumb/盒子只是把整块**平移**了 2px，间距纹丝不动（64px 进 64px 出）。
-                // uiautomator 量出真身：时间文字**布局盒** 34px，墨迹只有 21px，多出的 ~13px
-                // 是字体 ascent/descent 自带的白（includeFontPadding=false 只吃掉了 2px）。
-                // 现状拆解（轨道底 1026 → 播放圆顶 1089 = 63px）：
-                //   1026→1040 = 14px ← SeekBar 盒下半（=thumb 下半圆，缩 thumb 才能减）
-                //   1040→1074 = 34px ← 时间盒（21px 墨 + 13px 字白，阿亮红线：不许动时间）
-                //   1074→1089 = 15px ← 文字盒底到圆顶
-                // 阿亮说"你可以把它改小，但位置不要动" ⇒ 允许缩字号：11sp→10sp。
-                // 10sp 墨迹约 19px，盒约 31px；三处合计可再省约 8px，而文字**垂直居中**，
-                // 墨迹位置几乎不变（他只在意"别挪位置"，不是说不能变小）。
-                val timeFontSp = (10 * scale).sp
-                val timeBoxH = (11 * scale).dp
+                // 【0915 七次·修裁字】上一版栽了：我把时间盒钉成 11dp，但字号是 10sp，
+                // 10sp 的字实测行高要 ~13-14px，盒子比字还矮 ⇒ **文字下半截被裁掉**
+                // （阿亮截图："0:14 只能显示一半"）。
+                // ⚠️ 教训：includeFontPadding=false 只是去掉字体**自带的白**，不是让字形变矮；
+                //   盒子高度必须 ≥ 字号 ×1.25，否则必裁。
+                // 现在：盒子 = 字号 ×1.3（留足呼吸），字号回到 **11sp**（阿亮原本看着舒服的大小，
+                //   10sp 时他嫌小/被裁）。靠`CenterVertically`居中，位置仍钉在原地。
+                // 间距让出来的那几 px 不再从这里抠 —— 这轮改从**模块间 gap** 抠（见下方/上层布局）。
+                val timeFontSp = (11 * scale).sp
+                val timeBoxH = (14 * scale).dp
                 Row(
                     modifier = Modifier.fillMaxWidth()
                         .padding(horizontal = 8.dp)
@@ -723,8 +723,8 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     Text(
                         formatDuration(state.positionMs),
                         style = MaterialTheme.typography.labelSmall.copy(
-                            // 去掉 Material 文字默认的字体上下白（ascent/descent padding）。
-                            // 这是 36px 布局盒里那 ~15px 空白的来源。
+                            // 去掉字体自带的上白（ascent/descent padding）——让文字更贴盒顶，
+                            // 但盒子本身留足了高度（14dp vs 11sp 字），**不再裁字**。
                             platformStyle = PlatformTextStyle(includeFontPadding = false),
                         ),
                         fontSize = timeFontSp,
