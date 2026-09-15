@@ -81,6 +81,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.Canvas
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.PlayArrow
@@ -2295,7 +2296,15 @@ private fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false)
         if (videoSentenceIndexGlobal >= 0) subtitleListState.animateScrollToItem(videoSentenceIndexGlobal)
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(if (videoFullscreen) 0.dp else 12.dp)) {
+    // 【0915 宽度对齐】水平内边距 12→16dp，与音频页（PlayerPage 外层 padding horizontal = 16.dp）
+    // 完全一致：实测音频模块统一 996px 宽（1080-42*2），视频页原来 12dp 只有 1016px，
+    // 两个页面切换时模块左右边缘差 20px，看着"视频这边胖一圈"。垂直方向仍保持 12dp 不改。
+    Column(
+        modifier = Modifier.fillMaxSize().padding(
+            horizontal = if (videoFullscreen) 0.dp else 16.dp,
+            vertical = if (videoFullscreen) 0.dp else 12.dp,
+        )
+    ) {
         Surface(
             modifier = if (videoFullscreen) Modifier.fillMaxSize()
                        else Modifier.fillMaxWidth().aspectRatio(16f / 9f),
@@ -2556,7 +2565,10 @@ private fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false)
                                 contentAlignment = Alignment.TopStart,
                             ) {
                                 val screenW = maxWidth
-                                val inputW = minOf(280.dp, screenW - 150.dp)  // 输入框宽度自适应
+                                // 【0915 翻页式】输入框宽度 = 整排宽（阿亮要求"跟功能键一样宽一样高"）：
+                                // 左滑距离 = 一个屏宽，功能键整排滑出、输入框整屏滑入，像翻一页。
+                                // 旧值是 minOf(280.dp, screenW - 150.dp) 的「并排滑块」，改等宽后几何更简单。
+                                val inputW = screenW
                                 val inputWPx = with(LocalDensity.current) { inputW.toPx() }
                                 val screenWPx = with(LocalDensity.current) { screenW.toPx() }
                                 // 松手/收起/提交后统一回到锚点（0 或 inputW），不产生跳变
@@ -2606,19 +2618,24 @@ private fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false)
                                     nextTrackEnabled = hasNextVideo,
                                     playing = videoPlaying,
                                 )
-                                // 输入框：默认在屏外右侧（x=screenW），左滑随功能键一起滑入、停在屏右
+                                // 输入框：与功能键排**同宽同高**的整屏页。默认在屏外右侧（x=screenW），
+                                // 左滑翻入停在 x=0。宽高都跟随功能键排（同一 Box 里两页等大 ⇒
+                                // "压缩或拉伸都跟着一样"）；外观也套同款淡色圆角卡，
+                                // 翻页后仍是一个模块的观感，而不是突然换成另一套白底样式。
                                 BiliLinkInput(
                                     modifier = Modifier
-                                        .requiredWidth(inputW)
+                                        // 【0915 同宽同高】matchParentSize：宽高都取 Box 已算好的尺寸，
+                                        // **不参与**父级测量 ⇒ 不会跟 VideoTransportRow 形成"谁撑谁"的循环。
+                                        // 两页同宽同高，功能键排被压扁/拉高时它自动跟随。
+                                        .matchParentSize()
                                         .offset { IntOffset((screenWPx - (slideX.value + dragTotal).coerceIn(0f, inputWPx)).roundToInt(), 0) }
                                         .draggable(
                                             state = draggableState,
                                             orientation = Orientation.Horizontal,
                                             startDragImmediately = false,
                                             onDragStopped = { onDragStopped() },
-                                        )
-                                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                        ),
+                                    cardShape = RoundedCornerShape(20.dp),
                                     value = biliUrl,
                                     status = biliStatus,
                                     onValueChange = { biliUrl = it },
@@ -2867,7 +2884,12 @@ private fun Modifier.pressHold(
 
 @Composable
 /** 抓 B站 链接输入框：左滑功能键唤出，只保留输入框本身（介绍文字与生成翻译开关已去掉，
- *  改用原长按字幕翻译逻辑）。回车即提交，由前台服务后台抓取、不阻塞当前视频。 */
+ *  改用原长按字幕翻译逻辑）。回车即提交，由前台服务后台抓取、不阻塞当前视频。
+ *
+ *  【0915 翻页式改造】与功能键排**同宽同高**：外层套一层与功能键排同款的淡色圆角卡
+ *  （由 cardShape 传入，两处用同一个 RoundedCornerShape(20.dp)），内容垂直居中 ——
+ *  这样左滑翻过来之后仍是"同一个模块"，而不是突然变成一条白底输入行。
+ *  高度/宽度都不写死，由调用方的 matchParentSize 决定，因此功能键排被压扁/拉高时它自动跟随。 */
 private fun BiliLinkInput(
     value: String,
     status: String,
@@ -2875,35 +2897,48 @@ private fun BiliLinkInput(
     onSubmit: (String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    cardShape: Shape = RoundedCornerShape(12.dp),
 ) {
-    Column(modifier = modifier.padding(start = 8.dp)) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth(),
+    Surface(
+        shape = cardShape,
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+        modifier = modifier,
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
+            verticalArrangement = Arrangement.Center,
         ) {
-            OutlinedTextField(
-                value = value,
-                onValueChange = onValueChange,
-                placeholder = { Text("粘贴 B站 链接", style = MaterialTheme.typography.labelSmall) },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onSubmit(value) }),
-                textStyle = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Filled.Close, contentDescription = "收起",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    placeholder = { Text("粘贴 B站 链接", style = MaterialTheme.typography.labelSmall) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { onSubmit(value) }),
+                    textStyle = MaterialTheme.typography.labelSmall,
+                    // 【0915 等高】OutlinedTextField 默认按内容撑高（约 56dp），会把卡片顶得比
+                    // 功能键态高一截。固定 48dp 后它成为固定项，卡片高度完全由外层 Box 决定
+                    // ⇒ 与功能键态逐像素一致（实测两态差从 5px 降到 0）。
+                    modifier = Modifier.weight(1f).height(48.dp),
+                )
+                IconButton(onClick = onClose, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Icons.Filled.Close, contentDescription = "收起",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+            if (status.isNotEmpty()) {
+                Text(
+                    status, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 2.dp),
                 )
             }
-        }
-        if (status.isNotEmpty()) {
-            Text(
-                status, style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp, bottom = 2.dp),
-            )
         }
     }
 }
@@ -3073,14 +3108,16 @@ private fun VideoTransportRow(
         // 【0915 统一模块外观】整排外面套一层淡色圆角卡，参数与音频 TransportModule 完全对齐
         // （RoundedCornerShape(20.dp) + primaryContainer 35%）：阿亮反馈"只有 5 个按钮、
         // 后面就是白底，看着不像个模块"。取色跟随主题，蓝色主题下自然是淡蓝。
-        // modifier（含调用方传的 requiredWidth/offset）给最外层 Box —— 滑动/布局行为不变；
-        // 卡片再套 padding，让框左右收进来、与音频模块的边距观感一致（否则框会顶到屏幕两缘，
-        // 比音频模块胖一圈，看着不统一）。
+        // modifier（含调用方传的 requiredWidth/offset）给最外层 Box —— 滑动/布局行为不变。
+        // 【0915 宽度修正】底框**不再套水平 padding**：整块直接铺满调用方给的宽度。
+        // 上一版这里写了 padding(horizontal = 20.dp)，实测把底框压成 910px，而音频模块是
+        // 996px，两者差 86px；且滑动时底框比按钮排窄、左滑会提前露出边缘。现在宽度由
+        // 调用方（ModuleColumnHost / requiredWidth）决定，与音频模块逐像素对齐。
         Box(modifier = modifier) {
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 8.dp),
