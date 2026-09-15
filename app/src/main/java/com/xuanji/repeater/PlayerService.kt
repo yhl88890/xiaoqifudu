@@ -773,11 +773,30 @@ class PlayerService : Service() {
             }
             val cached = withContext(Dispatchers.IO) { SentenceCache.load(this@PlayerService, item) }
             if (cached != null && cached.sentences.isNotEmpty()) {
+                // 缓存自愈：旧版本「生成字幕」曾把空波形覆盖进缓存（恢复现场时不跑断句，
+                // 内存 waveform 还是空值就落盘），导致这份缓存只有句子、没有波形，
+                // 界面永远停在「N 句 · 波形未缓存」且不会自己好（命中缓存即 return，不重跑分析）。
+                // 所以这里发现波形为空就补跑一次本地分析，并回写缓存修好它。
+                var cachedWaveform = cached.waveform
+                var cachedTotal = cached.totalMs
+                if (cachedWaveform.isEmpty()) {
+                    val analyzed = withContext(Dispatchers.IO) { SentenceSplitter.split(item.path) { } }
+                    if (analyzed.waveform.isNotEmpty()) {
+                        cachedWaveform = analyzed.waveform
+                        cachedTotal = analyzed.totalMs
+                        withContext(Dispatchers.IO) {
+                            SentenceCache.save(
+                                this@PlayerService, item,
+                                CachedSplit(cached.sentences, cachedWaveform, cachedTotal),
+                            )
+                        }
+                    }
+                }
                 // 旧缓存 totalMs 可能有双声道 2 倍 bug：用末句终点校准真实总时长（否则波形帧长推断全错）
                 val lastEnd = cached.sentences.lastOrNull()?.endMs ?: 0L
-                val realTotal = if (lastEnd > 0 && cached.totalMs > lastEnd + 30_000) lastEnd + 2_000 else cached.totalMs
+                val realTotal = if (lastEnd > 0 && cachedTotal > lastEnd + 30_000) lastEnd + 2_000 else cachedTotal
                 // 修正句子边界到波形真实语音边界（防丢头少尾）
-                val refined = refineSentenceBoundaries(cached.sentences, cached.waveform, realTotal)
+                val refined = refineSentenceBoundaries(cached.sentences, cachedWaveform, realTotal)
                 val finalSentences = when {
                     lyrics.isNotEmpty() -> {
                         val merged = buildWaveLyricSentences(refined, lyrics, realTotal)
@@ -788,7 +807,7 @@ class PlayerService : Service() {
                 }
                 if (_state.value.currentItem?.path == item.path) {
                     _state.value = _state.value.copy(
-                        sentences = finalSentences, waveform = cached.waveform,
+                        sentences = finalSentences, waveform = cachedWaveform,
                         rawSegments = emptyList(), // 原始边界未随缓存存，清空防止上一首串台；重新识别时会现场重跑断句
                         splitting = false, splitProgress = 1f, recognizing = false,
                     )
@@ -897,20 +916,29 @@ class PlayerService : Service() {
             Toast.makeText(this, "请先在设置中填写 API Key", Toast.LENGTH_LONG).show()
             return
         }
-        val waveform = _state.value.waveform
-        val totalMs = _state.value.durationMs
+        val value = _state.value
         _state.value = _state.value.copy(recognizing = true)
         serviceScope.launch {
             _state.value = _state.value.copy(recognizeProgress = "")
             val provider = AsrProvider.fromName(AsrPrefs.loadProvider(this@PlayerService))
-            // 主路径：整曲识别（星辰返回精确句子时间戳，长音频一次搞定）
+            // 波形/原始段兜底：恢复现场（restorePlayback→loadAndPlay）不会跑断句，
+            // 此时 waveform 仍是初始空值、rawSegments 也是空的。若直接拿空波形落盘，
+            // 会把缓存里原有的波形覆盖成空 —— 表现为「生成字幕后字幕有了、波形却消失，
+            // 只剩 N 句 · 波形未缓存」。所以缺任一项就现场补跑一次本地分析，一次拿齐。
+            var waveform = value.waveform
+            var realTotalMs = value.durationMs
             var segs = _state.value.rawSegments
-            if (segs.isEmpty()) {
-                segs = withContext(Dispatchers.IO) {
-                    SentenceSplitter.split(item.path) { }.rawSegments
+            if (waveform.isEmpty() || segs.isEmpty()) {
+                val analyzed = withContext(Dispatchers.IO) { SentenceSplitter.split(item.path) { } }
+                if (waveform.isEmpty() && analyzed.waveform.isNotEmpty()) {
+                    waveform = analyzed.waveform
+                    realTotalMs = analyzed.totalMs
                 }
-                if (_state.value.currentItem?.path == item.path && segs.isNotEmpty()) {
-                    _state.value = _state.value.copy(rawSegments = segs)
+                if (segs.isEmpty() && analyzed.rawSegments.isNotEmpty()) {
+                    segs = analyzed.rawSegments
+                    if (_state.value.currentItem?.path == item.path) {
+                        _state.value = _state.value.copy(rawSegments = segs)
+                    }
                 }
             }
             var asrSentences: List<Sentence>? = null
@@ -925,7 +953,7 @@ class PlayerService : Service() {
             // 整曲失败 → 逐段识别兜底
             if (asrSentences == null) {
                 asrSentences = withContext(Dispatchers.IO) {
-                    recognizeBySegments(item, provider, key, segs, waveform, totalMs)
+                    recognizeBySegments(item, provider, key, segs, waveform, realTotalMs)
                 }
             }
             if (asrSentences == null) {
@@ -938,12 +966,16 @@ class PlayerService : Service() {
                 return@launch
             }
             // 修正句子边界到波形真实语音边界（防丢头少尾）
-            val refined = refineSentenceBoundaries(asrSentences, waveform, totalMs)
+            val refined = refineSentenceBoundaries(asrSentences, waveform, realTotalMs)
             if (_state.value.currentItem?.path == item.path) {
-                _state.value = _state.value.copy(sentences = refined, recognizing = false, recognizeProgress = "")
+                _state.value = _state.value.copy(
+                    sentences = refined, recognizing = false, recognizeProgress = "",
+                    // 补跑过分析时把波形/时长也回灌 UI，否则界面仍停在「波形未缓存」
+                    waveform = waveform, durationMs = if (realTotalMs > 0) realTotalMs else _state.value.durationMs,
+                )
             }
             withContext(Dispatchers.IO) {
-                SentenceCache.save(this@PlayerService, item, CachedSplit(refined, waveform, totalMs))
+                SentenceCache.save(this@PlayerService, item, CachedSplit(refined, waveform, realTotalMs))
             }
         }
     }
