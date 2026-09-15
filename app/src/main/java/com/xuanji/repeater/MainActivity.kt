@@ -219,12 +219,24 @@ private var videoSentenceStopAt by mutableStateOf<Long?>(null)
 private var videoRepeatStopAt by mutableStateOf<Long?>(null)
 private var videoRepeatStartMs = 0L
 private var videoRepeatLeft by mutableStateOf(0)
-/** 结束/取消视频「上一句复读」：清掉句尾与剩余次数（句尾自然播完、用户手动跳走、换片都走这里）。 */
+/** 结束/取消视频「上一句复读」：清掉句尾与剩余次数（句尾自然播完、用户手动跳走、换片都走这里）。
+ *  同时解除高亮钉子 —— 复读没了，高亮就该交回给轮询按播放位置跟随（对齐音频模式）。 */
 private fun clearVideoSentenceRepeat() {
     videoRepeatStopAt = null
     videoRepeatStartMs = 0L
     videoRepeatLeft = 0
+    videoSentencePin = -1
 }
+
+// 【0915 高亮钉住】复读期间把高亮钉在目标句上，别让轮询按播放位置来回改。
+// 对齐音频模式 PlayerService 的 pendingSentenceIndex 语义：
+//   点「上一句」→ 高亮钉死在那一句，复读 N 遍期间都不动；
+//   N 遍播完 → 解除钉子（置 -1），高亮恢复「跟着播放位置走」。
+// 不钉住的后果（阿亮报的问题）：复读每回到句首，轮询过了 seek 保护期就按 currentPos 重算，
+//   高亮在「目标句 ↔ 下一句」之间来回跳；且视频画面/字幕判句比出声慢半拍（输出缓冲），
+//   看着就是「高亮比音频慢一拍」。钉住后与音频模式表现一致。
+// -1 = 没钉（高亮照常由轮询按位置更新）。
+private var videoSentencePin by mutableStateOf(-1)
 
 // 视频切后台续播（0904）：onPause 把音轨交给前台服务，onResume 再交还 VideoView
 private var videoHandedToBg = false
@@ -1266,6 +1278,9 @@ class MainActivity : ComponentActivity() {
                                 onPlaySentence = { idx, ms ->
                                     // 阅读(视频源)：直接复用同一个 VideoView 播放器跳句，不切回视频页、不新建播放器
                                     // → 物理上不可能双声、不可能孤儿音频，且零延迟（沿用音频模式切阅读无延迟的思路）。
+                                    // 【0915】手动点句 = 放弃复读：撤掉可能残留的高亮钉子和复读任务，
+                                    // 否则钉住分支会把高亮又拉回旧句、看起来像「点不动」。
+                                    clearVideoSentenceRepeat()
                                     videoSentenceIndexGlobal = idx
                                     currentPos = ms
                                     // 记一句尾，轮询到句尾自动停（对齐音频阅读「读一句停一句」体验）
@@ -1898,7 +1913,8 @@ private fun videoJumpSentence(step: Int) {
     // 故只在 step < 0 时挂复读，这也正是本功能要的范围 —— 只改上一句。
     if (sentences.isNotEmpty()) {
         val idx = (videoSentenceIndexGlobal + step).coerceIn(0, sentences.size - 1)
-        // 任何跳句都先撤掉上一次的复读任务（用户手动跳走 = 放弃复读；也是「连续点上一句」重置计数的地方）
+        // 任何跳句都先撤掉上一次的复读任务（用户手动跳走 = 放弃复读；也是「连续点上一句」重置计数的地方）。
+        // 它同时会解除高亮钉子；真复读时由下面重新钉上，不复读（如点下一句）则由位置跟随自然接管。
         clearVideoSentenceRepeat()
         // seek 前就把当前位置挪到目标句起点：轮询每 200ms 读一次 mp.currentPosition，
         // seek 是异步的，若不预置，seek 未落地前轮询仍读到旧位置（>目标句尾）会当场触发复读跳回。
@@ -1914,6 +1930,8 @@ private fun videoJumpSentence(step: Int) {
                 videoRepeatStopAt = s.endMs
                 videoRepeatStartMs = s.startMs
                 videoRepeatLeft = times - 1
+                // 钉住高亮：复读 N 遍期间高亮稳稳停在目标句，不再被轮询按位置来回改（对齐音频模式）
+                videoSentencePin = idx
                 android.util.Log.d("XJ_REPEAT", "上一句复读 idx=$idx times=$times start=${s.startMs} end=${s.endMs}")
             }
         }
@@ -2087,7 +2105,15 @@ private fun VideoPage(readingMode: Boolean = false) {
             // seek 后 2000ms 内不打扰 videoSentenceIndex，避免刚跳过去又被轮询拉回旧句。
             // seekTo 是异步的，连续点下一句时 mp.currentPosition 可能仍停留在旧句，2000ms
             // 足够本地视频完成 seek；之后轮询再按真实位置修正。
-            if (now - videoLastSeekAt > 2000) {
+            // 【0915 高亮钉住】复读期间（videoSentencePin >= 0）跳过位置推断 —— 否则每回到句首，
+            // 过了保护期就会被重算，高亮在目标句/下一句间来回跳（阿亮报的 bug）。
+            // 【0915 高亮钉住】复读期间（videoSentencePin >= 0）高亮定死在目标句，不做位置推断 ——
+            // 否则每回到句首，过了保护期就会被重算，高亮在目标句/下一句间来回跳（阿亮报的 bug）。
+            // 高亮本身已由 videoSeekToSentence 落到目标句（那里有 videoSentenceIndexGlobal = idx），
+            // 这里只需「按兵不动」，语义与音频模式复读期间 currentSentenceIndex 定死一致。
+            if (videoSentencePin >= 0) {
+                // 钉住中：不动
+            } else if (now - videoLastSeekAt > 2000) {
                 videoSentenceIndexGlobal = computeSentence(pos)
             }
             if (loopState.value && sentencesState.value.isNotEmpty()) {
@@ -2113,8 +2139,11 @@ private fun VideoPage(readingMode: Boolean = false) {
                     videoLastSeekAt = now
                     android.util.Log.d("XJ_REPEAT", "复读回跳 start=$start 剩余=${videoRepeatLeft + 1}")
                 } else {
-                    // 复读完成（或遇单句循环）：撤掉复读任务，让播放自然往下走
+                    // 复读完成（或遇单句循环）：撤掉复读任务 + 解除高亮钉子
+                    // （clearVideoSentenceRepeat 内部已含解除钉子，对齐音频模式
+                    //  handleSentenceBoundary 里 currentSentenceIndex = -1 的语义）
                     clearVideoSentenceRepeat()
+                    android.util.Log.d("XJ_REPEAT", "复读结束，高亮交回位置跟随")
                 }
             }
             // 阅读(视频源)：点句起播记一句尾，轮询到句尾自动暂停（对齐音频阅读「读一句停一句」体验）。
@@ -2639,7 +2668,10 @@ private fun VideoPage(readingMode: Boolean = false) {
                             tonalElevation = if (active || expanded) 0.dp else 1.dp,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
                                 .combinedClickable(
-                                    onClick = { videoSeekToSentence(index) },
+                                    // 【0915】手动点句 = 放弃复读：先撤复读任务+高亮钉子，再跳句。
+                                    // （videoSeekToSentence 直接调、不过 videoJumpSentence，得自己清一次，
+                                    //  否则复读中点了别的句子，钉子会把高亮又拉回旧句。）
+                                    onClick = { clearVideoSentenceRepeat(); videoSeekToSentence(index) },
                                     onLongClick = { expandedVideoIndex = if (expanded) -1 else index },
                                 ),
                         ) {
