@@ -1,6 +1,9 @@
 package com.xuanji.repeater
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -138,7 +141,14 @@ fun SettingsPage(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 SettingsSwitch("深色模式", darkMode, onDarkModeChange)
-                SettingsSwitch("悬浮窗", floatOn, onFloatChange)
+                SettingsSwitch(
+                    text = "悬浮窗",
+                    checked = floatOn,
+                    onCheckedChange = onFloatChange,
+                    // 【0916】阿亮："悬浮窗应该做一下解释"。短说明就放这一项下面，
+                    // 完整权限清单在「软件介绍 → 权限说明」。
+                    note = "在其他应用上方显示歌词与播放控制。首次开启会跳系统授权页，需要允许「显示在其他应用上层」。",
+                )
             }
 
             // ---------------- 播放 ----------------
@@ -235,6 +245,47 @@ fun SettingsPage(
                 )
             }
 
+            // ---------------- 数据 ----------------
+            SettingsGroup("数据") {
+                // 导出目的地交给用户选（SAF），可以直接存网盘 / 电脑 / 发给自己 ——
+                // 只有落到 App 私有目录之外，才算真的"备份住了"。
+                val exportLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("application/json")
+                ) { uri ->
+                    if (uri == null) return@rememberLauncherForActivityResult
+                    val ok = DataBackup.writeTo(context, uri)
+                    Toast.makeText(
+                        context,
+                        if (ok) "备份已导出" else "导出失败，换个位置再试",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { exportLauncher.launch(DataBackup.defaultFileName()) }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "导出备份",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "›",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    text = "把生词本和字幕库导出成一个 JSON 文件，存到你自己选的地方（网盘 / 电脑都行）。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+
             // ---------------- 关于 ----------------
             SettingsGroup("关于") {
                 var showIntro by remember { mutableStateOf(false) }
@@ -301,6 +352,38 @@ fun SettingsPage(
                                     "其他设置",
                                     "主题颜色 / 深色模式调整外观；悬浮窗可在其他应用上方显示播放控制；「启动时继续播放」控制重新打开时是否续播。",
                                 )
+                                Spacer(Modifier.height(14.dp))
+                                // 【0916】阿亮："什么功能需要什么权限也说一下"。
+                                // 清单较长，按规矩放软件介绍里；悬浮窗那一项下面另有一句短说明。
+                                Text(
+                                    "权限说明",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                PermissionBlock(
+                                    "悬浮窗（显示在其他应用上层）",
+                                    "在其他 App 上方显示歌词与播放控制。不开启完全不影响使用，只有你主动打开时才需要授权。",
+                                )
+                                PermissionBlock(
+                                    "读取存储",
+                                    "扫描你手机里的音频 / 视频文件，生成选集和文件夹列表。",
+                                )
+                                PermissionBlock(
+                                    "写入存储",
+                                    "保存抓取的 B站 视频（落在 Download/XuanjiBili），以及你手动导出的备份文件。",
+                                )
+                                PermissionBlock(
+                                    "通知",
+                                    "后台播放时的常驻控制条，锁屏状态下也能切歌、暂停。",
+                                )
+                                PermissionBlock(
+                                    "联网",
+                                    "只用于三件事：在线识别字幕、字幕翻译、抓取 B站 视频。API Key 和 Cookie 只存在你本机，不上传。",
+                                )
+                                PermissionBlock(
+                                    "后台播放",
+                                    "让音频在切到后台或锁屏后继续播放，不被系统回收。不申请的话退到后台就断。",
+                                )
                             }
                         },
                     )
@@ -347,25 +430,55 @@ private fun SettingsGroup(
     }
 }
 
-/** 一行「文字 + 开关」 */
+/**
+ * 一行「文字 + 开关」。
+ * @param note 可选项下面的补充说明（12sp 灰字）。说明短的就直接写在这儿，
+ *             长篇的（比如权限清单）放软件介绍里 —— 阿亮 0916 定的规矩。
+ */
 @Composable
 private fun SettingsSwitch(
     text: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    note: String? = null,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
+        }
+        if (!note.isNullOrBlank()) {
+            Text(
+                text = note,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, end = 52.dp),
+            )
+        }
+    }
+}
+
+/** 权限说明里的一条：权限名（主色）+ 用途（灰字小字） */
+@Composable
+private fun PermissionBlock(name: String, usage: String) {
+    Column(modifier = Modifier.padding(top = 8.dp)) {
         Text(
-            text = text,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
+            text = name,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
         )
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Text(
+            text = usage,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
