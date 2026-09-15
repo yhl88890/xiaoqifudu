@@ -26,12 +26,16 @@ object PlayerLayoutPrefs {
     val defaultHeights = mapOf(
         PlayerModule.WAVEFORM to 120,
         PlayerModule.TOOLBAR to 72,
-        PlayerModule.TRANSPORT to 176,
+        // 【0915 收紧】176 → 140：进度条与按键之间的空隙压缩后，这块不再需要那么高，
+        // 省下的空间留给下方句子列表（阿亮要求"上下更窄、比例上更矮"）。
+        PlayerModule.TRANSPORT to 140,
     )
 
     const val MIN_HEIGHT = 60
     /** 控制行最小高度（dp）：允许压得更窄（4 颗 chip 也能放下），比通用 MIN_HEIGHT 小 */
     const val MIN_HEIGHT_TOOLBAR = 44
+    /** 传输模块（进度条+五键）最小高度（dp）：压太矮会让 72dp 播放键和进度条挤在一起 */
+    const val MIN_HEIGHT_TRANSPORT = 110
     const val MAX_HEIGHT = 340
 
     /** 波形条最小高度（dp）：允许压得更矮（波形内容简单），其他模块保持 MIN_HEIGHT */

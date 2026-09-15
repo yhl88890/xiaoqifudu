@@ -148,6 +148,7 @@ private fun PlayerModuleHost(
             when (it) {
                 PlayerModule.WAVEFORM -> PlayerLayoutPrefs.MIN_HEIGHT_WAVEFORM
                 PlayerModule.TOOLBAR -> PlayerLayoutPrefs.MIN_HEIGHT_TOOLBAR
+                PlayerModule.TRANSPORT -> PlayerLayoutPrefs.MIN_HEIGHT_TRANSPORT
                 else -> PlayerLayoutPrefs.MIN_HEIGHT
             }
         },
@@ -590,7 +591,9 @@ private fun SeekBar(
 private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Boolean) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         // 进度条/时间/按钮统一按 scale 缩放：压缩模块高度时整块协调缩小
-        val scale = (maxHeight / 176.dp).coerceIn(0.6f, 1.8f)
+        // 【0915 收紧】基准从 176dp 下调到 140dp：同一实际高度下内容更饱满，
+        // 不再"缩在卡片中间、上下各空一大截"（阿亮反馈中间空隙太大）。
+        val scale = (maxHeight / 140.dp).coerceIn(0.6f, 1.8f)
         // 卡片背景（与波形条同款）：primaryContainer 半透明圆角卡
         Surface(
             shape = RoundedCornerShape(20.dp),
@@ -598,7 +601,9 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
             modifier = Modifier.fillMaxSize(),
         ) {
             Column(
-                modifier = Modifier.fillMaxSize().padding(vertical = (6 * scale).dp),
+                // 【0915 收紧】竖向内边距 6→3、行距收紧：进度条/时间/按键逐层贴紧，
+                // 整块更矮更紧凑（阿亮要求"上下更窄、相对位置再近一点"）。
+                modifier = Modifier.fillMaxSize().padding(vertical = (3 * scale).dp),
                 verticalArrangement = Arrangement.Center,
             ) {
                 SeekBar(
@@ -607,10 +612,12 @@ private fun TransportModule(svc: PlayerService?, state: PlayerState, editing: Bo
                     onSeek = { svc?.seekTo(it) },
                     enabled = !editing,
                     modifier = Modifier.fillMaxWidth(),
-                    barHeight = (32 * scale).dp,
+                    // 【0915 收紧】盒子 32→24dp：轨道实际只有 4dp、thumb 光晕 ~13dp 半径，
+                    // 32dp 里大半是空的；24dp 仍容得下光晕并保住触摸区。
+                    barHeight = (24 * scale).dp,
                 )
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = (2 * scale).dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
