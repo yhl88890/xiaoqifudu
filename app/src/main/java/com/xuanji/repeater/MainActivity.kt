@@ -398,6 +398,16 @@ private fun loadVideoPrefs(context: Context) {
     currentPos = sp.getLong("pos", 0L)
     srtName = sp.getString("srt", "") ?: ""
     sentences = decodeSentences(sp.getString("sentences", "") ?: "")
+    // 【0915 修】冷启恢复同级视频列表：上一曲/下一曲靠 videoFolderVideos 定位当前视频的序号
+    // （curFolderIdx = indexOfFirst { it.path == videoPath }），不恢复这个列表 → idx = -1 →
+    // hasPrev/hasNext 全 false → 两个按钮全灰，"只能重新进视频选集再选一遍"才活。
+    // 这里按当前视频所在目录，从全库扫描结果里过滤出同级视频填回去（无路径的 SAF Uri 退化为全库）。
+    videoFolderVideos = runCatching {
+        val all = VideoScanner.scanAll(context)
+        val dir = path.substringBeforeLast('/', "")
+        val sibs = if (dir.isNotBlank()) all.filter { it.path.startsWith("$dir/") } else emptyList()
+        sibs.ifEmpty { all }
+    }.getOrDefault(emptyList())
     // 视频现场恢复成功后，恢复阅读来源与播放状态（供启动续播/暂停）：
     // readingFromVideo 决定阅读页显示视频字幕；playing 决定 onPrepared 是 start 还是保持暂停。
     readingFromVideo = sp.getBoolean("reading_from_video", false)

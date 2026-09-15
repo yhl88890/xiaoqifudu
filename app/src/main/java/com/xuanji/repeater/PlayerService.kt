@@ -1566,6 +1566,13 @@ class PlayerService : Service() {
             splitting = false,
             splitProgress = -1f,
         )
+        // 【0915 修】恢复现场时**同步补一次缓存句子**。
+        // 以前这里只恢复"指针"（哪首/第几毫秒），句子留空，指望随后的 startSplitting 从
+        // SentenceCache 读回来。但 startSplitting 只在 loadAndPlay() 里被调，而下面
+        // 「上次活跃是视频」的分支是直接 return 的 —— 于是音频句子永远是空，界面看着像
+        // "重装后没歌词"，点一下播放（走 loadAndPlay→startSplitting）才冒出来。
+        // 这里补一步：恢复现场后立刻把该曲目的缓存句子/波形灌进 state（异步 IO，不阻塞启动）。
+        restoreSentencesFromCache(items[idx])
         // 上次活跃的是视频：不自动续播音频（否则重开会出现「幽灵音频」与视频双声）
         val resume = PlaybackPrefs.loadResume(this) && lastMode() != "video"
         if (lastMode() == "video") {
@@ -1578,6 +1585,37 @@ class PlayerService : Service() {
             return
         }
         loadAndPlay(items[idx], autoPlay = resume, initialPositionMs = saved.positionMs)
+    }
+
+    /** 【0915 修】恢复现场后同步补缓存句子：把该曲目已落盘的断句/歌词直接灌进 state。
+     *  背景：restorePlayback 只恢复"指针"，句子留空靠 startSplitting 补；但「上次活跃是视频」
+     *  分支直接 return，startSplitting 压根不跑 ⇒ 重装/冷启后音频看着像"没歌词"，点播放才冒出来。
+     *  这里主动读一次 SentenceCache 补上，让界面一进来句子就在。
+     *  安全约束：只在「当前仍是这首歌」且「句子还空着」时写，绝不覆盖 startSplitting / ASR 的结果。 */
+    private fun restoreSentencesFromCache(item: AudioItem) {
+        serviceScope.launch {
+            val cached = withContext(Dispatchers.IO) {
+                runCatching { SentenceCache.load(this@PlayerService, item) }.getOrNull()
+            } ?: return@launch
+            if (cached.sentences.isEmpty()) return@launch
+            // 期间可能已经切歌 / 用户已经点了别的：只在还是这首、且句子仍空时补
+            val s = _state.value
+            if (s.currentItem?.path != item.path) return@launch
+            if (s.sentences.isNotEmpty()) return@launch
+            // 若此刻断句/识别已经开跑（loadAndPlay→startSplitting），让那条路来填，别抢
+            if (s.splitting || s.recognizing) return@launch
+            // 末句终点校准真实总时长（旧缓存可能有双声道 2 倍 bug，与 startSplitting 里同款处理）
+            val lastEnd = cached.sentences.lastOrNull()?.endMs ?: 0L
+            val realTotal =
+                if (lastEnd > 0 && cached.totalMs > lastEnd + 30_000) lastEnd + 2_000 else cached.totalMs
+            val refined = refineSentenceBoundaries(cached.sentences, cached.waveform, realTotal)
+            _state.value = _state.value.copy(
+                sentences = refined,
+                waveform = cached.waveform,
+                splitting = false,
+                splitProgress = 1f,
+            )
+        }
     }
 
     /** 视频模式冷启后切回音频模式：按保存位置干净地加载音频播放器。
