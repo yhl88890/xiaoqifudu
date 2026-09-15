@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -97,13 +98,17 @@ fun PlayerPage(
             text = state.currentItem?.title ?: "未选择音频",
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
-            maxLines = 1,
+            // 【0915 阿亮提问】原 maxLines=1 会让长标题被省略号截掉（"能不能完整显示两行"）。
+            // 改成 2 行：标题长就自动折第二行，不丢内容；再长才省略。
+            // 高度不写死 ⇒ 一行/两行自然撑开，下方模块跟着往下让，不会重叠。
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             // 【0915 收紧】阿亮标红："顶栏 ↔ 标题"这段太空（实测 98px≈37dp）。
             // 其中 20dp 是这里的 top padding，其余是 titleLarge 自带的行框上白。
             // top 20→6dp；底部 bottom 保持 2dp（标题与波形条本来就贴得近，别动）。
             modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
             textAlign = TextAlign.Center,
+            lineHeight = MaterialTheme.typography.titleLarge.fontSize * 1.25f,
         )
 
         PlayerModuleHost(
@@ -161,15 +166,10 @@ private fun PlayerModuleHost(
             }
         },
         maxHeight = PlayerLayoutPrefs.MAX_HEIGHT,
-        // 【0915】控制行 chip 本体高 = 52*scale，模块却给了 50dp ⇒ 富余高度被 Arrangement.Center
-        // 均分到上下。编辑框按这个富余量内缩，阿亮说的"上下白边宽"就没了。
-        editInsetOf = { m ->
-            if (m == PlayerModule.TOOLBAR) {
-                val h = (heights[m] ?: PlayerLayoutPrefs.defaultHeights[m] ?: 50).toFloat()
-                val chipH = 52f * (h / 72f).coerceIn(0.55f, 1.8f)
-                (((h - chipH) / 2f).coerceAtLeast(0f)).dp
-            } else 0.dp
-        },
+        // 【0915 四修】TOOLBAR 的 editInsetOf 已删除：
+        //   chip 现在 fillMaxHeight 吃满模块（见 ToolbarModule / ToolChipCard），
+        //   模块内不再有富余高度 ⇒ 编辑框直接 matchParentSize 就与 chip 严丝合缝。
+        //   （上一轮的 inset 反而把框缩小成了 941px < chip 995px，被阿亮看出"框没对齐"。）
         content = content,
     )
 }
@@ -305,7 +305,9 @@ fun <T> ModuleColumnHost(
                     )
                 }
                 // 编辑覆盖层：高亮边框 + 提示（编辑模式由设置开关控制，返回键退出）
-                // 【0915】按 editInsetOf 内缩，让框贴住内容本体（控制行 chip 上下不再多出粉边）。
+                // 【0915 四修】editInsetOf 已全传 0（TOOLBAR 的 chip 现在填满模块，框天然贴合），
+                //   提示文字从「Alignment.Center」改到**顶部对齐**：框变小后居中会正好压在
+                //   chip 文字上（阿亮截图里"重播次数 ×3"被提示文字盖住）。移到顶部就不会遮挡内容。
                 if (isEdit) {
                     val inset = editInsetOf(module)
                     Box(
@@ -316,11 +318,13 @@ fun <T> ModuleColumnHost(
                             .clip(RoundedCornerShape(16.dp))
                             .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.06f))
                             .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp)),
-                        contentAlignment = Alignment.Center,
+                        contentAlignment = Alignment.TopCenter,
                     ) {
                         Text(
                             editHint,
                             style = MaterialTheme.typography.labelSmall,
+                            fontSize = 9.sp,
+                            lineHeight = 10.sp,
                             color = MaterialTheme.colorScheme.primary,
                         )
                     }
@@ -406,20 +410,28 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
     var repeatTimes by remember { mutableStateOf(RepeatPrefs.loadTimes(ctx)) }
     var repeatSpeed by remember { mutableStateOf(RepeatPrefs.loadRepeatSpeed(ctx)) }
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        // 【0915 四修·白边真根因】阿亮反复反馈"重播次数那栏上下白边儿太宽"，前几轮我一直在改
+        // 编辑框（装饰层），没动内容本身 —— 方向错了。实测数据（1080x2400, font_scale=1.3）：
+        //   模块真实高 131px，chip 本体只有 95px（= 52*scale，scale=50/72=0.694）
+        //   ⇒ 中间 36px 被外层 Column 的 Arrangement.Center **均分到上下各 18px**，这就是白边。
+        //
+        // 根因：`scale = maxHeight/72`，于是 chip 高 = 52*(h/72) = **0.722h** ——
+        //   **chip 永远只有模块高的 72%，剩下 28% 必然变成上下白边**，跟模块调多高无关。
+        //   这个 72 原本是"设计基准高（52 卡片 + 20 边距）"，但它被当成了缩放分母，
+        //   导致"卡片高度"和"模块高度"绑死成 0.722 比例。
+        //
+        // 修法：**让 chip 行直接吃满模块高度**（Row 用 fillMaxSize、卡片高度不再乘 scale），
+        //   `scale` 只留给**内部字号/间距**用（保住"模块调矮时文字跟着小"的手感）。
+        //   ⇒ 上下白边归零，用户拖多高卡片就多高。
         val scale = (maxHeight / 72.dp).coerceIn(0.55f, 1.8f)
-        Column(
+        Row(
+            // 去掉原 padding(horizontal=2.dp)：它会让编辑框比 chip 左右各宽 2dp（已实测）
             modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.Center,
+            horizontalArrangement = Arrangement.spacedBy((8 * scale).dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                // 【0915】原来这里 padding(horizontal = 2.dp)，会让编辑高亮框比 chip **左右各宽 2dp**
-                // （实测：框 x 42→1037，chip x 48→1031）。阿亮说"框比按钮宽"包含这一条，故去掉。
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy((8 * scale).dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(modifier = Modifier.weight(1f)) {
-                    ToolChipCard(
+            Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                ToolChipCard(
                         label = "重播次数",
                         value = "×$repeatTimes",
                         onClick = { showRepeatMenu = true },
@@ -442,7 +454,7 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
                         }
                     }
                 }
-                Box(modifier = Modifier.weight(1f)) {
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                     ToolChipCard(
                         label = "全局速度",
                         value = "×${state.speed}",
@@ -465,7 +477,7 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
                         }
                     }
                 }
-                Box(modifier = Modifier.weight(1f)) {
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                     ToolChipCard(
                         label = "重播速度",
                         value = "×${repeatSpeed}",
@@ -490,7 +502,7 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
                         }
                     }
                 }
-                Box(modifier = Modifier.weight(1f)) {
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                     ToolChipCard(
                         label = when (state.playMode) {
                             PlayMode.SEQUENCE -> "顺序播放"
@@ -530,7 +542,6 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
             }
         }
     }
-}
 
 /** 自定义进度条：轨道/thumb 与波形条同几何（水平 padding 10dp + 全宽绘制），两者进度精确对齐；支持点击/拖动 seek */
 @Composable
@@ -917,7 +928,13 @@ private fun ToolChipCard(
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
-            modifier = Modifier.fillMaxWidth().height((52 * scale).dp),
+            // 【0915 四修·白边真根因】原来这里是 `.height((52 * scale).dp)` —— 固定高。
+            // 模块高 50dp、scale=0.694 ⇒ 卡片只有 36dp，剩下 14dp 被外层 Arrangement.Center
+            // 均分到上下（各 7dp ≈ 18px），这就是阿亮念叨好几轮的"上下白边儿"。
+            // 改成 fillMaxHeight()：卡片高度 = 模块高度（外层 Box 已是 fillMaxHeight + weight），
+            // 模块拖多高卡片就多高，上下白边归零；`scale` 仍只作用于内部字号/间距。
+            // 加 heightIn(min=) 兜底：模块被拖到极矮时卡片不塌成 0。
+            modifier = Modifier.fillMaxWidth().fillMaxHeight().heightIn(min = (32 * scale).dp),
         ) {
             if (icon != null && !iconAtBottom) {
                 // 图标 + 文字 同行（默认）；文字在上、数值在下
