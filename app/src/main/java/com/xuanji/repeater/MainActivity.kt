@@ -3070,52 +3070,66 @@ private fun VideoTransportRow(
         }
     } else {
         // —— 窗口下方主控制条：圆形 primaryContainer 风格（与音频模式统一，保持不变） ——
-        Row(
-            modifier = modifier,
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        // 【0915 统一模块外观】整排外面套一层淡色圆角卡，参数与音频 TransportModule 完全对齐
+        // （RoundedCornerShape(20.dp) + primaryContainer 35%）：阿亮反馈"只有 5 个按钮、
+        // 后面就是白底，看着不像个模块"。取色跟随主题，蓝色主题下自然是淡蓝。
+        // modifier（含调用方传的 requiredWidth/offset）给最外层 Box —— 滑动/布局行为不变；
+        // 卡片再套 padding，让框左右收进来、与音频模块的边距观感一致（否则框会顶到屏幕两缘，
+        // 比音频模块胖一圈，看着不统一）。
+        Box(modifier = modifier) {
             Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                modifier = Modifier.size(48.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
             ) {
-                IconButton(onClick = onPrevTrack, enabled = prevTrackEnabled, modifier = Modifier.fillMaxSize()) {
-                    Icon(XuanjiIcons.PrevTrack, contentDescription = "上一曲", modifier = Modifier.size(28.dp))
-                }
-            }
-            Box(
-                modifier = Modifier.size(52.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f))
-                    .pressHold(onTap = onPrevSentence, onHoldChange = onPrevSentenceHoldChange),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(XuanjiIcons.Prev, contentDescription = "上一句（长按快退）", modifier = Modifier.size(32.dp))
-            }
-            FilledIconButton(onClick = onToggle, modifier = Modifier.size(72.dp)) {
-                Icon(
-                    if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = if (playing) "暂停" else "播放",
-                    modifier = Modifier.size(38.dp),
-                )
-            }
-            Box(
-                modifier = Modifier.size(52.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f))
-                    .pressHold(onTap = onNextSentence, onHoldChange = onNextSentenceHoldChange),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(XuanjiIcons.Next, contentDescription = "下一句（长按快进）", modifier = Modifier.size(32.dp))
-            }
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                modifier = Modifier.size(48.dp),
-            ) {
-                IconButton(onClick = onNextTrack, enabled = nextTrackEnabled, modifier = Modifier.fillMaxSize()) {
-                    Icon(XuanjiIcons.NextTrack, contentDescription = "下一曲", modifier = Modifier.size(28.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        modifier = Modifier.size(48.dp),
+                    ) {
+                        IconButton(onClick = onPrevTrack, enabled = prevTrackEnabled, modifier = Modifier.fillMaxSize()) {
+                            Icon(XuanjiIcons.PrevTrack, contentDescription = "上一曲", modifier = Modifier.size(28.dp))
+                        }
+                    }
+                    Box(
+                        modifier = Modifier.size(52.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f))
+                            .pressHold(onTap = onPrevSentence, onHoldChange = onPrevSentenceHoldChange),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(XuanjiIcons.Prev, contentDescription = "上一句（长按快退）", modifier = Modifier.size(32.dp))
+                    }
+                    FilledIconButton(onClick = onToggle, modifier = Modifier.size(72.dp)) {
+                        Icon(
+                            if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (playing) "暂停" else "播放",
+                            modifier = Modifier.size(38.dp),
+                        )
+                    }
+                    Box(
+                        modifier = Modifier.size(52.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f))
+                            .pressHold(onTap = onNextSentence, onHoldChange = onNextSentenceHoldChange),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(XuanjiIcons.Next, contentDescription = "下一句（长按快进）", modifier = Modifier.size(32.dp))
+                    }
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        modifier = Modifier.size(48.dp),
+                    ) {
+                        IconButton(onClick = onNextTrack, enabled = nextTrackEnabled, modifier = Modifier.fillMaxSize()) {
+                            Icon(XuanjiIcons.NextTrack, contentDescription = "下一曲", modifier = Modifier.size(28.dp))
+                        }
+                    }
                 }
             }
         }
