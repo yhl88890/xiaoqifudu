@@ -12,8 +12,8 @@ android {
         applicationId = "com.xuanji.repeater"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.1"
+        versionCode = 12
+        versionName = "1.2"
     }
 
     signingConfigs {

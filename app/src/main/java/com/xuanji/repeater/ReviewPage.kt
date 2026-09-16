@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -90,6 +91,14 @@ fun ReviewPage(onBack: () -> Unit) {
     // 开场引导（第一次进来说明怎么用）
     var started by remember { mutableStateOf(false) }
 
+    // ---- 自动发音（0916 新增）----
+    // 阿亮要的：复习时每翻到新的一张卡，自动把词念一遍，省得每次抬手点小喇叭。
+    // 开关和口音都持久化，进来就是他上次的选择。
+    var autoSpeak by remember { mutableStateOf(ReviewPrefs.loadAutoSpeak(context)) }
+    var accent by remember { mutableStateOf(ReviewPrefs.loadAccent(context)) }
+    // 口音选择条展开没（点开关旁边那个小胶囊才展开，平时不占地方）
+    var accentOpen by remember { mutableStateOf(false) }
+
     /**
      * 开新一轮：从"未掌握"里挑 [batchSize] 个，优先挑最久没看的。
      *
@@ -135,26 +144,78 @@ fun ReviewPage(onBack: () -> Unit) {
     val pendingCount = remember(allEntries) { allEntries.count { !it.mastered } }
     val totalCount = allEntries.size
 
+    // 换口音：存下来 + 立刻用新口音念一遍当前这张（他点了就想马上听到区别）
+    fun pickAccent(a: String) {
+        accent = a
+        ReviewPrefs.saveAccent(context, a)
+        accentOpen = false
+        queue.firstOrNull()?.let { Pronounce.speak(it.text, a) }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // ---------- 顶栏 ----------
-        Row(
-            modifier = Modifier.fillMaxWidth().height(48.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onBack) { Icon(XuanjiIcons.Back, contentDescription = "返回") }
-            Text(
-                text = "复习",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            if (started && !finished && queue.isNotEmpty()) {
+        // 复习进行中时顶栏可以有两层：上面一行是 返回 / 标题 / 自动发音块 / 剩 N，
+        // 下面一层是"读哪个口音"（默认收起，点了小胶囊才展开）。
+        Column(modifier = Modifier.fillMaxWidth()) {
+            val inSession = started && !finished && queue.isNotEmpty()
+            Row(
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) { Icon(XuanjiIcons.Back, contentDescription = "返回") }
                 Text(
-                    text = "剩 ${queue.size}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(end = 16.dp),
+                    text = "复习",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
                 )
+                Spacer(modifier = Modifier.weight(1f))
+                // 自动发音：只在真正做题时出现（开场页/结算页没卡片可念，摆在那儿是噪音）
+                if (inSession) {
+                    AutoSpeakControl(
+                        enabled = autoSpeak,
+                        accent = accent,
+                        accentOpen = accentOpen,
+                        onToggle = { on ->
+                            autoSpeak = on
+                            if (!on) accentOpen = false
+                            ReviewPrefs.saveAutoSpeak(context, on)
+                            // 打开就顺手念一遍当前这张：他马上能听到效果，
+                            // 不用等翻到下一张才知道自己开对了没有
+                            if (on) queue.firstOrNull()?.let { Pronounce.speak(it.text, accent) }
+                        },
+                        onPickAccent = { a -> pickAccent(a) },
+                        onToggleAccent = { accentOpen = !accentOpen },
+                    )
+                    Text(
+                        text = "剩 ${queue.size}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 6.dp, end = 16.dp),
+                    )
+                }
+            }
+
+            // 口音选择：开关打开后点小胶囊才展开
+            if (inSession && autoSpeak && accentOpen) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 16.dp, bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "读哪个口音",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    AccentChip("美音", accent == ReviewPrefs.ACCENT_US, XuanjiIcons.SpeakerUs) {
+                        pickAccent(ReviewPrefs.ACCENT_US)
+                    }
+                    AccentChip("英音", accent == ReviewPrefs.ACCENT_UK, XuanjiIcons.SpeakerUk) {
+                        pickAccent(ReviewPrefs.ACCENT_UK)
+                    }
+                }
             }
         }
 
@@ -189,6 +250,13 @@ fun ReviewPage(onBack: () -> Unit) {
                     current != null -> key(current.id) {
                         // 🔴 用条目 id 当 key：换下一张时整棵卡片是全新实例，
                         // 上一张的 fadeOut 残留不可能渲染到新词上面（防答案泄露的第二道保险）。
+                        //
+                        // 自动发音：key 用的是 current.id，所以"换了一张卡"= key 变了 = effect 重跑，
+                        // 正好一次念一个新词。千万不能拿 queue.size 或别的东西当 key ——
+                        // 那样翻面（flipped 变化）或队列里重排都会把它再触发一次，变成反复念。
+                        LaunchedEffect(current.id, autoSpeak, accent) {
+                            if (autoSpeak) Pronounce.speak(current.text, accent)
+                        }
                         ReviewCard(
                             entry = current,
                             flipped = flipped,
@@ -482,6 +550,142 @@ private fun ReviewCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+    }
+}
+
+/**
+ * 自动发音开关（0916 新增）。
+ *
+ * 结构：一颗「自动读」开关 + 开关打开后旁边冒出来的一颗小胶囊（显示当前口音、点一下展开选择）。
+ *
+ * 【为什么开关没打开时不显示胶囊】他没打开自动朗读的话，"读哪个口音"是个无意义的问题，
+ * 摆在那儿只会让顶栏更挤 —— 顶栏本来就还有「剩 N」。
+ *
+ * 【为什么开关自己做而不是用 Material 的 Switch】Switch 连带上下的留白有 32dp 高，
+ * 塞进 48dp 的顶栏会把「剩 N」挤掉。自己画一颗 40×22 的小胶囊，尺寸可控。
+ * 系统字体放大也不怕 —— 这里全是 dp 画的几何图形，没有跟着 sp 涨的文字。
+ */
+@Composable
+private fun AutoSpeakControl(
+    enabled: Boolean,
+    accent: String,
+    accentOpen: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onPickAccent: (String) -> Unit,
+    onToggleAccent: () -> Unit,
+) {
+    val tint = MaterialTheme.colorScheme.primary
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        // ---- 开关本体：点整块都能切，别只让那 40dp 的小胶囊可点 ----
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .clip(RoundedCornerShape(14.dp))
+                .clickable { onToggle(!enabled) }
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+        ) {
+            Icon(
+                XuanjiIcons.SpeakerUs,
+                contentDescription = null,
+                tint = if (enabled) tint else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(5.dp))
+            Text(
+                text = "自动读",
+                style = MaterialTheme.typography.labelMedium,
+                color = if (enabled) tint else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            // 手画的小开关：40×22 胶囊 + 18dp 圆点
+            Box(
+                modifier = Modifier
+                    .size(width = 40.dp, height = 22.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(
+                        if (enabled) tint else MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                contentAlignment = if (enabled) Alignment.CenterEnd else Alignment.CenterStart,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 2.dp)
+                        .size(18.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (enabled) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.outline
+                        ),
+                )
+            }
+        }
+
+        // ---- 口音胶囊：开关打开后才出现 ----
+        if (enabled) {
+            Spacer(modifier = Modifier.width(4.dp))
+            val us = accent == ReviewPrefs.ACCENT_US
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.clickable(onClick = onToggleAccent),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Icon(
+                        if (us) XuanjiIcons.SpeakerUs else XuanjiIcons.SpeakerUk,
+                        contentDescription = null,
+                        tint = if (us) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (us) "美音" else "英音",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = if (accentOpen) "▴" else "▾",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 口音选项（展开后那个「美音 / 英音」二选一） */
+@Composable
+private fun AccentChip(label: String, selected: Boolean, icon: ImageVector, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = if (selected) MaterialTheme.colorScheme.onPrimary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(modifier = Modifier.width(5.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (selected) MaterialTheme.colorScheme.onPrimary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
