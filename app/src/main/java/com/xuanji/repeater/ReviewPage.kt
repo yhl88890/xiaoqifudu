@@ -458,8 +458,9 @@ private fun ReviewCard(
                         }
 
                         // 释义（词性释义优先，没有就用翻译）
-                        val answer = entry.definition?.takeIf { it.isNotBlank() }
-                            ?: entry.translation?.takeIf { it.isNotBlank() }
+                        val definition = entry.definition?.takeIf { it.isNotBlank() }
+                        val translation = entry.translation?.takeIf { it.isNotBlank() }
+                        val answer = definition ?: translation
                         if (answer != null) {
                             Text(
                                 text = answer,
@@ -475,9 +476,9 @@ private fun ReviewCard(
                             )
                         }
 
-                        // 整句释义单独再给一行（句子条目靠它）
-                        if (entry.isSentence) {
-                            entry.translation?.takeIf { it.isNotBlank() }?.let { t ->
+                        // 整句：上面若已用翻译当答案就不再补，避免同一条中文显示两遍
+                        if (entry.isSentence && definition != null) {
+                            translation?.let { t ->
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Text(
                                     text = t,
