@@ -29,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -36,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -110,9 +112,13 @@ fun ReviewPage(onBack: () -> Unit) {
 
     /** 答完一张：从队首摘掉，然后看这一轮是不是走完了 —— 走完就在这儿当场判，不靠重组触发 */
     fun consumeAndAdvance(entry: VocabEntry, known: Boolean) {
+        // 🔴 顺序很重要：必须先翻回正面，再换下一张。
+        // 反过来的话，queue 一换、卡片立刻就渲染成"下一张词 + 还翻着面"，
+        // 下一张的释义会闪一帧 —— 等于把答案提前泄露了。
+        flipped = false
+
         val rest = queue.drop(1)
         queue = rest
-        flipped = false
         if (rest.isNotEmpty()) return
 
         // 本轮走完。还有错题、且没超过补题上限，就补一轮；否则收工。
@@ -121,7 +127,6 @@ fun ReviewPage(onBack: () -> Unit) {
             queue = retry
             roundTotal = retry.size
             wrongThisRound = emptyList()
-            roundNo++
         } else {
             finished = true
         }
@@ -181,24 +186,28 @@ fun ReviewPage(onBack: () -> Unit) {
             else -> {
                 val current = queue.firstOrNull()
                 when {
-                    current != null -> ReviewCard(
-                        entry = current,
-                        flipped = flipped,
-                        progressDone = (roundTotal - queue.size).coerceAtLeast(0),
-                        progressTotal = roundTotal,
-                        onFlip = { flipped = true },
-                        onKnown = {
-                            VocabStore.markReviewed(context, current.id, true)
-                            totalKnown++
-                            consumeAndAdvance(current, known = true)
-                        },
-                        onUnknown = {
-                            VocabStore.markReviewed(context, current.id, false)
-                            totalUnknown++
-                            wrongThisRound = wrongThisRound + current
-                            consumeAndAdvance(current, known = false)
-                        },
-                    )
+                    current != null -> key(current.id) {
+                        // 🔴 用条目 id 当 key：换下一张时整棵卡片是全新实例，
+                        // 上一张的 fadeOut 残留不可能渲染到新词上面（防答案泄露的第二道保险）。
+                        ReviewCard(
+                            entry = current,
+                            flipped = flipped,
+                            progressDone = (roundTotal - queue.size).coerceAtLeast(0),
+                            progressTotal = roundTotal,
+                            onFlip = { flipped = true },
+                            onKnown = {
+                                VocabStore.markReviewed(context, current.id, true)
+                                totalKnown++
+                                consumeAndAdvance(current, known = true)
+                            },
+                            onUnknown = {
+                                VocabStore.markReviewed(context, current.id, false)
+                                totalUnknown++
+                                wrongThisRound = wrongThisRound + current
+                                consumeAndAdvance(current, known = false)
+                            },
+                        )
+                    }
                     // 队列空了但还没结算：只可能是"凑不出这一轮了"（剩下的都掌握了），
                     // 或者刚好答完最后一张的那一帧。前者给个收尾，后者等重组刷出结算页。
                     pendingCount == 0 -> FinishState(
@@ -330,27 +339,20 @@ private fun ReviewCard(
 
                 // 单词带发音按钮（句子不给，句子整句念没意义）
                 if (!entry.isSentence) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        IconButton(onClick = { Pronounce.speak(entry.text, "us") }) {
-                            Icon(
-                                XuanjiIcons.SpeakerUs,
-                                contentDescription = "美音",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
-                        IconButton(onClick = { Pronounce.speak(entry.text, "uk") }) {
-                            Icon(
-                                XuanjiIcons.SpeakerUk,
-                                contentDescription = "英音",
-                                tint = MaterialTheme.colorScheme.tertiary,
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                        PronounceChip(
+                            label = "美音",
+                            icon = XuanjiIcons.SpeakerUs,
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = { Pronounce.speak(entry.text, "us") },
+                        )
+                        PronounceChip(
+                            label = "英音",
+                            icon = XuanjiIcons.SpeakerUk,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            onClick = { Pronounce.speak(entry.text, "uk") },
+                        )
                     }
                 }
 
@@ -484,8 +486,47 @@ private fun ReviewCard(
     }
 }
 
-/** 底部「认识 / 不认识」按钮：自绘圆角块，尺寸稳定不受系统字号影响 */
+/**
+ * 发音按钮：喇叭 + 文字标注（美音 / 英音）。
+ *
+ * 为什么不用 `IconButton`：它自带 48dp 最小触摸目标、且只放得下一个图标，
+ * 没法标注是英音还是美音 —— 阿亮明确要求"标注上英音跟美音、做大一点、拉开距离"。
+ * 自己画胶囊块：图标 26dp + 文字，整块高 48dp、左右留白够，拇指好按。
+ */
 @Composable
+private fun PronounceChip(
+    label: String,
+    icon: ImageVector,
+    tint: Color,
+    onClick: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = tint.copy(alpha = 0.12f),
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+        ) {
+            Icon(
+                icon,
+                contentDescription = label,
+                tint = tint,
+                modifier = Modifier.size(26.dp),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium,
+                color = tint,
+            )
+        }
+    }
+}
+
+/** 底部「认识 / 不认识」按钮：自绘圆角块，尺寸稳定不受系统字号影响 */@Composable
 private fun AnswerButton(text: String, bg: Color, fg: Color, onClick: () -> Unit) {
     Surface(
         shape = RoundedCornerShape(28.dp),
