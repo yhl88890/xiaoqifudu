@@ -13,6 +13,61 @@ import androidx.compose.ui.unit.dp
  */
 object XuanjiIcons {
 
+    /** 搜索：放大镜（圆环 + 斜柄）。【0916 生词本筛选】 */
+    val Search: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "Search", defaultWidth = 24.dp, defaultHeight = 24.dp,
+            viewportWidth = 24f, viewportHeight = 24f,
+        ).apply {
+            path(
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2f,
+                strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round,
+            ) {
+                // 圆环用两段弧拼：Compose 的 arcTo 相对坐标容易画歪，用曲线更稳
+                moveTo(15.5f, 10.5f)
+                curveTo(15.5f, 13.26f, 13.26f, 15.5f, 10.5f, 15.5f)
+                curveTo(7.74f, 15.5f, 5.5f, 13.26f, 5.5f, 10.5f)
+                curveTo(5.5f, 7.74f, 7.74f, 5.5f, 10.5f, 5.5f)
+                curveTo(13.26f, 5.5f, 15.5f, 7.74f, 15.5f, 10.5f)
+                close()
+            }
+            path(
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2f,
+                strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round,
+            ) {
+                moveTo(14.2f, 14.2f)
+                lineTo(19f, 19f)
+            }
+        }.build()
+    }
+
+    /** 关闭/清空：叉（×） */
+    val Close: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "Close", defaultWidth = 24.dp, defaultHeight = 24.dp,
+            viewportWidth = 24f, viewportHeight = 24f,
+        ).apply {
+            path(
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2.2f,
+                strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round,
+            ) {
+                moveTo(6.5f, 6.5f)
+                lineTo(17.5f, 17.5f)
+            }
+            path(
+                stroke = SolidColor(Color.Black),
+                strokeLineWidth = 2.2f,
+                strokeLineCap = androidx.compose.ui.graphics.StrokeCap.Round,
+            ) {
+                moveTo(17.5f, 6.5f)
+                lineTo(6.5f, 17.5f)
+            }
+        }.build()
+    }
+
     /** 暂停：两条竖条 */
     val Pause: ImageVector by lazy {
         ImageVector.Builder(
@@ -387,10 +442,93 @@ object XuanjiIcons {
         }.build()
     }
 
-    /** 发音：小喇叭（美音 US） */
+    /** 熟练度：实心五角星（亮的那颗） */
+    val StarFilled: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "StarFilled", defaultWidth = 24.dp, defaultHeight = 24.dp,
+            viewportWidth = 24f, viewportHeight = 24f,
+        ).apply {
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(12f, 2.5f)
+                lineTo(15.09f, 8.76f)
+                lineTo(22f, 9.77f)
+                lineTo(17f, 14.64f)
+                lineTo(18.18f, 21.52f)
+                lineTo(12f, 18.27f)
+                lineTo(5.82f, 21.52f)
+                lineTo(7f, 14.64f)
+                lineTo(2f, 9.77f)
+                lineTo(8.91f, 8.76f)
+                close()
+            }
+        }.build()
+    }
+
+    /** 熟练度：空心五角星（还没练到的那些） */
+    val StarOutline: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "StarOutline", defaultWidth = 24.dp, defaultHeight = 24.dp,
+            viewportWidth = 24f, viewportHeight = 24f,
+        ).apply {
+            // 外轮廓：一个中间挖空的五角星（用「外圈 + 内圈反向」凑出描边效果）
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(12f, 2.5f)
+                lineTo(15.09f, 8.76f)
+                lineTo(22f, 9.77f)
+                lineTo(17f, 14.64f)
+                lineTo(18.18f, 21.52f)
+                lineTo(12f, 18.27f)
+                lineTo(5.82f, 21.52f)
+                lineTo(7f, 14.64f)
+                lineTo(2f, 9.77f)
+                lineTo(8.91f, 8.76f)
+                close()
+                // 内圈（反向绕，形成"空心"）
+                moveTo(12f, 6.2f)
+                lineTo(9.2f, 11.9f)
+                lineTo(3.6f, 12.7f)
+                lineTo(7.7f, 16.5f)
+                lineTo(6.8f, 21.4f)
+                lineTo(12f, 18.9f)
+                lineTo(17.2f, 21.4f)
+                lineTo(16.3f, 16.5f)
+                lineTo(20.4f, 12.7f)
+                lineTo(14.8f, 11.9f)
+                close()
+            }
+        }.build()
+    }
+
+    /** 发音：小喇叭（美音 US）—— 单道声波 */
     val SpeakerUs: ImageVector by lazy {
         ImageVector.Builder(
             name = "SpeakerUs", defaultWidth = 24.dp, defaultHeight = 24.dp,
+            viewportWidth = 24f, viewportHeight = 24f,
+        ).apply {
+            path(fill = SolidColor(Color.Black)) {
+                moveTo(3f, 9f)
+                lineTo(3f, 15f)
+                lineTo(7f, 15f)
+                lineTo(12f, 19f)
+                lineTo(12f, 5f)
+                lineTo(7f, 9f)
+                close()
+            }
+            path(fill = SolidColor(Color.Black)) {
+                // 单道声波
+                moveTo(15f, 8.5f)
+                curveTo(17f, 10.5f, 17f, 13.5f, 15f, 15.5f)
+                lineTo(16.4f, 16.9f)
+                curveTo(19.2f, 13.8f, 19.2f, 10.2f, 16.4f, 7.1f)
+                close()
+            }
+        }.build()
+    }
+
+    /** 发音：小喇叭（英音 UK）—— 两道声波（跟美音区分开） */
+    val SpeakerUk: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "SpeakerUk", defaultWidth = 24.dp, defaultHeight = 24.dp,
             viewportWidth = 24f, viewportHeight = 24f,
         ).apply {
             path(fill = SolidColor(Color.Black)) {
@@ -416,32 +554,6 @@ object XuanjiIcons {
                 curveTo(20.8f, 9.6f, 20.8f, 14.4f, 18.4f, 17.3f)
                 lineTo(20f, 18.9f)
                 curveTo(23f, 15.4f, 23f, 8.6f, 20f, 5.1f)
-                close()
-            }
-        }.build()
-    }
-
-    /** 发音：小喇叭（英音 UK） */
-    val SpeakerUk: ImageVector by lazy {
-        ImageVector.Builder(
-            name = "SpeakerUk", defaultWidth = 24.dp, defaultHeight = 24.dp,
-            viewportWidth = 24f, viewportHeight = 24f,
-        ).apply {
-            path(fill = SolidColor(Color.Black)) {
-                moveTo(3f, 9f)
-                lineTo(3f, 15f)
-                lineTo(7f, 15f)
-                lineTo(12f, 19f)
-                lineTo(12f, 5f)
-                lineTo(7f, 9f)
-                close()
-            }
-            path(fill = SolidColor(Color.Black)) {
-                // 单道声波（UK 用一道区分）
-                moveTo(15f, 8.5f)
-                curveTo(17f, 10.5f, 17f, 13.5f, 15f, 15.5f)
-                lineTo(16.4f, 16.9f)
-                curveTo(19.2f, 13.8f, 19.2f, 10.2f, 16.4f, 7.1f)
                 close()
             }
         }.build()

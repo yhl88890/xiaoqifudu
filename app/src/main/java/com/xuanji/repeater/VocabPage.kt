@@ -1,5 +1,8 @@
 package com.xuanji.repeater
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,11 +16,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,8 +54,22 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
     val entries by VocabStore.entries.collectAsStateWithLifecycle()
     var showClearConfirm by remember { mutableStateOf(false) }
 
+    // ---- 筛选 / 搜索（0916：生词本超过 200 条后，翻列表找不到词）----
+    // ⚠️ 刻意不持久化：每次进来都从「全部」开始。
+    // 要是记住上次筛选，你进去只看到 3 条，第一反应是"我词怎么没了"。
+    var filter by remember { mutableStateOf(VocabFilter.ALL) }
+    var keyword by remember { mutableStateOf("") }
+    var searchOpen by remember { mutableStateOf(false) }
+
+    val shown = remember(entries, filter, keyword) {
+        entries.filter { e ->
+            filter.match(e) && (keyword.isBlank() || e.matches(keyword))
+        }
+    }
+
     // 没掌握的条数：复习入口上直接显示，一眼知道还有多少要练
     val pending = entries.count { !it.mastered }
+    val masteredCount = entries.size - pending
 
     Column(modifier = Modifier.fillMaxSize()) {
         // 头部：返回 + 标题 + 复习 + 清空
@@ -103,12 +122,102 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
                 )
             }
         } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            // ---- 概览 + 搜索 + 筛选档（0916）----
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                items(entries, key = { it.id }) { entry ->
-                    VocabEntryRow(entry = entry, onDelete = { VocabStore.remove(context, entry.id) })
+                Text(
+                    text = "共 ${entries.size} 条 · 已掌握 $masteredCount 条",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                IconButton(
+                    onClick = {
+                        searchOpen = !searchOpen
+                        if (!searchOpen) keyword = ""   // 收起搜索框就把关键词一起清掉，免得"藏着一个筛选条件"
+                    },
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        if (searchOpen) XuanjiIcons.Close else XuanjiIcons.Search,
+                        contentDescription = if (searchOpen) "关闭搜索" else "搜索",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+
+            if (searchOpen) {
+                OutlinedTextField(
+                    value = keyword,
+                    onValueChange = { keyword = it },
+                    singleLine = true,
+                    placeholder = { Text("搜单词 / 翻译 / 释义 / 来源") },
+                    trailingIcon = {
+                        if (keyword.isNotEmpty()) {
+                            IconButton(onClick = { keyword = "" }, modifier = Modifier.size(32.dp)) {
+                                Icon(
+                                    XuanjiIcons.Close,
+                                    contentDescription = "清空关键词",
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                )
+            }
+
+            // 筛选档：横向可滑，档数以后加也不会挤（别用 Row 硬塞，窄屏会截断）
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                VocabFilter.entries.forEach { f ->
+                    val selected = f == filter
+                    val count = remember(entries, f) { entries.count { f.match(it) } }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (selected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = if (selected) 0.dp else 1.dp,
+                        modifier = Modifier.clickable { filter = f },
+                    ) {
+                        Text(
+                            text = "${f.label} $count",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            color = if (selected) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+            }
+
+            if (shown.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = if (keyword.isNotBlank()) "没有匹配「$keyword」的条目" else "这一档是空的",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    // key 用 id 而不是下标：删一条后下标会整体前移，Compose 会认错节点、行内状态错位
+                    items(shown, key = { it.id }) { entry ->
+                        VocabEntryRow(entry = entry, onDelete = { VocabStore.remove(context, entry.id) })
+                    }
                 }
             }
         }
@@ -173,24 +282,11 @@ private fun VocabEntryRow(entry: VocabEntry, onDelete: () -> Unit) {
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
                         )
                     }
-                    // 掌握进度角标：连对 N 次里的 N。0 不显示（没复习过就不打扰）
+                    // 熟练度星级（照欧路的做法）：5 颗星，亮的表示练到第几档
+                    // 0 星不显示（没复习过就不打扰）
                     if (entry.correctStreak > 0) {
                         Spacer(modifier = Modifier.width(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = if (entry.mastered) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.surfaceVariant,
-                        ) {
-                            Text(
-                                // 掌握了给对勾，没掌握给进度（2/3）
-                                text = if (entry.mastered) "✓ 已掌握"
-                                else "${entry.correctStreak}/${VocabEntry.MASTERED_AT}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (entry.mastered) MaterialTheme.colorScheme.onPrimary
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
-                            )
-                        }
+                        StarRating(stars = entry.stars)
                     }
                 }
                 // 单词：美音/英音 各一行（喇叭在左 + 标签 + 音标），音标不折行
@@ -292,3 +388,32 @@ private fun formatAddedTime(ms: Long): String = try {
 } catch (_: Exception) {
     ""
 }
+
+/**
+ * 熟练度星级：五颗星，亮的表示练到第几档（照欧路的做法）。
+ *
+ * 为什么自绘而不是用 IconButton/Icon：
+ * 这里要的是"一排小星星"这种装饰性元素，不是按钮 —— 不能有触摸目标、不能撑高行。
+ * 用 `Box.size()+clip(CircleShape)` 那套自绘思路的简化版：直接画实心/描边五角星路径。
+ *
+ * 金色是刻意写死的（不用主题色）：星级是"成绩"的语义，跟粉色主题放一起容易被当成装饰，
+ * 阿亮照着欧路来，金色才像"熟练度"。
+ */
+@Composable
+fun StarRating(stars: Int, size: Int = 11) {
+    val filled = stars.coerceIn(0, VocabEntry.MAX_STARS)
+    if (filled == 0) return
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        repeat(VocabEntry.MAX_STARS) { i ->
+            Icon(
+                imageVector = if (i < filled) XuanjiIcons.StarFilled else XuanjiIcons.StarOutline,
+                contentDescription = null,
+                tint = if (i < filled) StarGold else MaterialTheme.colorScheme.outlineVariant,
+                modifier = Modifier.size(size.dp),
+            )
+        }
+    }
+}
+
+/** 熟练度星星的金色 */
+private val StarGold = androidx.compose.ui.graphics.Color(0xFFFFB300)

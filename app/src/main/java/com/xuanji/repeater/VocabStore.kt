@@ -37,10 +37,66 @@ data class VocabEntry(
     companion object {
         /** 连续答对这么多次，就算「已掌握」，日常复习队列里不再安排（列表里仍能看到） */
         const val MASTERED_AT = 3
+
+        /** 列表里展示的星级上限（照欧路的五颗星做法） */
+        const val MAX_STARS = 5
     }
 
     /** 是否已掌握 */
     val mastered: Boolean get() = correctStreak >= MASTERED_AT
+
+    /**
+     * 熟练度星级 0~[MAX_STARS]，只用来显示（欧路那种五颗星）。
+     *
+     * 映射刻意**不是** `min(streak, 5)`：那样"连对 3 次 = 掌握"就永远只到 3 星，
+     * 星星再也涨不上去、看着像没练够。这里让 **3 星 = 已掌握**，
+     * 继续复习还能涨到 4、5 星 —— 给"掌握之后还想再练"留出正反馈。
+     *   0 次 → 0 星（列表里不显示）
+     *   1 次 → 1 星
+     *   2 次 → 2 星
+     *   3 次 → 3 星（= 已掌握，退出复习队列）
+     *   4 次 → 4 星
+     *   5 次及以上 → 5 星（满星）
+     */
+    val stars: Int get() = correctStreak.coerceIn(0, MAX_STARS)
+
+    /**
+     * 【0916】搜索匹配：单词/句子正文、翻译、词性释义、来源，任意命中即可。
+     *
+     * 为什么要搜释义而不只搜正文：阿亮查词的习惯往往是"我记得翻译里有'勉强'这个词"，
+     * 而不是记得拼写。只搜正文的话，词一多就只能靠翻。
+     */
+    fun matches(keyword: String): Boolean {
+        val k = keyword.trim().lowercase()
+        if (k.isEmpty()) return true
+        return text.lowercase().contains(k) ||
+            translation?.lowercase()?.contains(k) == true ||
+            definition?.lowercase()?.contains(k) == true ||
+            source.lowercase().contains(k)
+    }
+}
+
+/**
+ * 【0916】生词本列表筛选档。
+ *
+ * 为什么不做分页：分页要记页码、翻页会丢位置、删一条还要重算边界 —— 一堆状态。
+ * 筛选取代分页：**列表本身不截断**（LazyColumn 天然只渲染可见项，200 条和 2000 条一样顺），
+ * 用户只是缺"把不想看的先藏起来"的能力。想要什么，点一下就好，没有任何页码状态。
+ */
+enum class VocabFilter(val label: String) {
+    ALL("全部"),
+    UNMASTERED("未掌握"),
+    MASTERED("已掌握"),
+    WORD("单词"),
+    SENTENCE("句子");
+
+    fun match(entry: VocabEntry): Boolean = when (this) {
+        ALL -> true
+        UNMASTERED -> !entry.mastered
+        MASTERED -> entry.mastered
+        WORD -> !entry.isSentence
+        SENTENCE -> entry.isSentence
+    }
 }
 
 /**

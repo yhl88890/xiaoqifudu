@@ -280,7 +280,7 @@ private fun ReadyState(pending: Int, total: Int, onStart: () -> Unit) {
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "连对 ${VocabEntry.MASTERED_AT} 次就算掌握，不再安排复习",
+                    text = "连对 ${VocabEntry.MASTERED_AT} 次就算掌握（列表里 ★★★），继续练还能涨星",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
