@@ -43,14 +43,17 @@ import java.util.Locale
  * 数据由 VocabStore（JSON 持久化 + StateFlow）驱动。
  */
 @Composable
-fun VocabPage(onBack: () -> Unit) {
+fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
     val context = LocalContext.current
     VocabStore.ensureLoaded(context)
     val entries by VocabStore.entries.collectAsStateWithLifecycle()
     var showClearConfirm by remember { mutableStateOf(false) }
 
+    // 没掌握的条数：复习入口上直接显示，一眼知道还有多少要练
+    val pending = entries.count { !it.mastered }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        // 头部：返回 + 标题 + 清空
+        // 头部：返回 + 标题 + 复习 + 清空
         Row(
             modifier = Modifier.fillMaxWidth().height(48.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -64,6 +67,18 @@ fun VocabPage(onBack: () -> Unit) {
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.weight(1f))
+            // 复习入口：只要生词本里有东西就给（哪怕全掌握了，进去也能再练）
+            if (entries.isNotEmpty()) {
+                TextButton(onClick = onReview) {
+                    Icon(
+                        XuanjiIcons.Repeat,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(if (pending > 0) "复习 $pending" else "复习")
+                }
+            }
             TextButton(
                 onClick = { showClearConfirm = true },
                 enabled = entries.isNotEmpty(),
@@ -157,6 +172,25 @@ private fun VocabEntryRow(entry: VocabEntry, onDelete: () -> Unit) {
                             else MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
                         )
+                    }
+                    // 掌握进度角标：连对 N 次里的 N。0 不显示（没复习过就不打扰）
+                    if (entry.correctStreak > 0) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (entry.mastered) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceVariant,
+                        ) {
+                            Text(
+                                // 掌握了给对勾，没掌握给进度（2/3）
+                                text = if (entry.mastered) "✓ 已掌握"
+                                else "${entry.correctStreak}/${VocabEntry.MASTERED_AT}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (entry.mastered) MaterialTheme.colorScheme.onPrimary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                            )
+                        }
                     }
                 }
                 // 单词：美音/英音 各一行（喇叭在左 + 标签 + 音标），音标不折行

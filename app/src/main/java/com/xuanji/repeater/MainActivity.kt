@@ -175,7 +175,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
 /** 页面：播放页 / 选集页 / 阅读模式页 / 文件夹页 / 生词本页 */
-enum class Page { PLAYER, TRACK, READING, FOLDER, VOCAB, VIDEO }
+enum class Page { PLAYER, TRACK, READING, FOLDER, VOCAB, REVIEW, VIDEO }
 
 // ===== 视频模式 UI 状态：提升到文件级(进程内常驻),切页面/旋转不丢,回视频页自动续播 =====
 private var videoUri by mutableStateOf<Uri?>(null)
@@ -946,7 +946,7 @@ class MainActivity : ComponentActivity() {
             ModeButton(
                 text = "阅读模式",
                 icon = XuanjiIcons.Book,
-                selected = current == Page.READING || current == Page.VOCAB,
+                selected = current == Page.READING || current == Page.VOCAB || current == Page.REVIEW,
                 onClick = { onSelect(Page.READING) },
                 enabled = enabled,
                 modifier = Modifier.weight(1f)
@@ -1086,7 +1086,7 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(page, readingFromVideo) {
             PlaybackSession.setSessionSource(
                 page == Page.VIDEO ||
-                    ((page == Page.READING || page == Page.VOCAB) && readingFromVideo)
+                    ((page == Page.READING || page == Page.VOCAB || page == Page.REVIEW) && readingFromVideo)
             )
         }
 
@@ -1105,6 +1105,8 @@ class MainActivity : ComponentActivity() {
             when {
                 // 视频全屏时：返回先退出全屏、留在视频模式，不要跳回音频播放页
                 page == Page.VIDEO && videoFullscreen -> videoFullscreen = false
+                // 复习页：返回回生词本（它是从生词本进去的）
+                page == Page.REVIEW -> page = Page.VOCAB
                 page == Page.VOCAB -> page = Page.READING
                 page == Page.FOLDER -> page = folderReturnPage
                 // 阅读(视频源)：返回回到视频模式——保留同一个 VideoView 播放器不重建、不双声
@@ -1151,10 +1153,10 @@ class MainActivity : ComponentActivity() {
                     page == Page.FOLDER -> folderInitType == MediaType.VIDEO
                     else -> activeKind == MediaKind.VIDEO
                 }
-                val isReadingSel = page == Page.READING || page == Page.VOCAB
+                val isReadingSel = page == Page.READING || page == Page.VOCAB || page == Page.REVIEW
                 Surface(
                     onClick = {
-                        if (page == Page.READING || page == Page.VOCAB) {
+                        if (page == Page.READING || page == Page.VOCAB || page == Page.REVIEW) {
                             // 阅读模式：顶栏按钮 =「阅读选集」→ 开关合并播放历史（= 原「全部」），不导航。
                             // 【0914】视频进阅读也能用了（三个来源 tab 已去掉，选集视图成了统一入口），
                             // 所以不再有「阅读(视频源)下按了没人消费」的残留问题。
@@ -1343,7 +1345,11 @@ class MainActivity : ComponentActivity() {
                             // 0914：阅读模式顶栏「阅读选集」→ ReadingPage 打开/关闭选集视图（音频/视频源都可）
                             libraryRequest = readingLibraryReq,
                         )
-                        Page.VOCAB -> VocabPage(onBack = { page = Page.READING })
+                        Page.VOCAB -> VocabPage(
+                            onBack = { page = Page.READING },
+                            onReview = { page = Page.REVIEW },
+                        )
+                        Page.REVIEW -> ReviewPage(onBack = { page = Page.VOCAB })
                         Page.FOLDER -> FolderPage(
                             context = context,
                             svc = svc,

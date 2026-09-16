@@ -46,6 +46,8 @@ object DataBackup {
                     put("source", e.source)
                     put("addedAt", e.addedAt)
                     put("isSentence", e.isSentence)
+                    put("correctStreak", e.correctStreak)
+                    put("lastReviewedAt", e.lastReviewedAt)
                 }
             )
         }
@@ -299,6 +301,9 @@ object DataBackup {
                         source = o.optString("source", ""),
                         addedAt = o.optLong("addedAt", System.currentTimeMillis()),
                         isSentence = o.optBoolean("isSentence", false),
+                        // 备份里带复习进度就一起恢复，老备份没有则为 0（从没复习过）
+                        correctStreak = o.optInt("correctStreak", 0),
+                        lastReviewedAt = o.optLong("lastReviewedAt", 0L),
                     )
                 )
             }

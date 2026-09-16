@@ -28,7 +28,20 @@ data class VocabEntry(
     val source: String,
     val addedAt: Long,
     val isSentence: Boolean,
-)
+    // ---- 复习（0916 新增，老数据缺失时走默认值 0，不影响读取）----
+    /** 已连续答对次数：答对 +1，答错清零。攒到 [MASTERED_AT] 就算掌握了 */
+    val correctStreak: Int = 0,
+    /** 上一次复习的时间戳，0 = 从没复习过 */
+    val lastReviewedAt: Long = 0L,
+) {
+    companion object {
+        /** 连续答对这么多次，就算「已掌握」，日常复习队列里不再安排（列表里仍能看到） */
+        const val MASTERED_AT = 3
+    }
+
+    /** 是否已掌握 */
+    val mastered: Boolean get() = correctStreak >= MASTERED_AT
+}
 
 /**
  * 生词本：JSON 文件持久化（filesDir/vocab.json）+ StateFlow 响应式。
@@ -122,6 +135,36 @@ object VocabStore {
         scope.launch { persist(context) }
     }
 
+    /**
+     * 【0916】记一次复习结果。
+     * @param known true = 认识（连续次数 +1，攒够 [VocabEntry.MASTERED_AT] 算掌握）
+     *              false = 不认识（连续次数清零，回到队列重来）
+     */
+    fun markReviewed(context: Context, id: Long, known: Boolean) {
+        _entries.value = _entries.value.map { e ->
+            if (e.id != id) e
+            else e.copy(
+                correctStreak = if (known) e.correctStreak + 1 else 0,
+                lastReviewedAt = System.currentTimeMillis(),
+            )
+        }
+        scope.launch { persist(context) }
+    }
+
+    /** 把某个词的「已掌握」状态清掉，重新进复习队列（长按 / 设置里用） */
+    fun resetProgress(context: Context, id: Long) {
+        _entries.value = _entries.value.map { e ->
+            if (e.id != id) e else e.copy(correctStreak = 0, lastReviewedAt = 0L)
+        }
+        scope.launch { persist(context) }
+    }
+
+    /** 全局复习进度，给复习页顶部显示"还剩 N 个没掌握" */
+    fun reviewStats(): Pair<Int, Int> {
+        val all = _entries.value
+        return all.count { !it.mastered } to all.size
+    }
+
     fun clear(context: Context) {
         _entries.value = emptyList()
         scope.launch { persist(context) }
@@ -168,6 +211,8 @@ object VocabStore {
                         .put("source", e.source)
                         .put("addedAt", e.addedAt)
                         .put("isSentence", e.isSentence)
+                        .put("correctStreak", e.correctStreak)
+                        .put("lastReviewedAt", e.lastReviewedAt)
                 )
             }
             file(context).writeText(JSONObject().put("entries", arr).toString())
@@ -195,6 +240,9 @@ object VocabStore {
                     source = o.optString("source"),
                     addedAt = o.optLong("addedAt", 0L),
                     isSentence = o.optBoolean("isSentence", false),
+                    // 老数据没有这两个字段 → 默认 0（从没复习过），不会崩也不会误判成已掌握
+                    correctStreak = o.optInt("correctStreak", 0),
+                    lastReviewedAt = o.optLong("lastReviewedAt", 0L),
                 )
             }
         } catch (_: Exception) {
