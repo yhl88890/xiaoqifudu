@@ -122,6 +122,91 @@ object DataBackup {
         return VocabStore.entries.value.count { !it.isSentence }
     }
 
+    /** 生词本总条数（单词 + 整句），Anki CSV 用 */
+    fun entryCount(context: Context): Int {
+        VocabStore.ensureLoaded(context)
+        return VocabStore.entries.value.size
+    }
+
+    // ------------------------------------------------------------------
+    // Anki 卡片（CSV）
+    // ------------------------------------------------------------------
+
+    /**
+     * 生成 Anki 可直接导入的 CSV：**两列 = 正面英文 / 背面中文**。
+     *
+     * 为什么是两列：Anki 自带的基础模板（Basic）正好是"正面 / 背面"两个字段，
+     * 两列导进去零配置、不用手动调字段映射。多一列反而会让它的导入界面多问一轮。
+     *
+     * 背面按"越有用越靠前"排：中文 → 音标 → 词性释义 → 来源。
+     * 空字段整行略过，不会留一堆空行。
+     *
+     * **整句也一起导**：收藏的句子做成"正面英文句 / 背面中文"的卡同样能复习，
+     * 丢掉太可惜。所以这份 CSV 是"全部收藏"，跟只导单词的 TXT 口径不同。
+     *
+     * 分隔符用逗号（Anki 的默认），靠标准 CSV 转义处理内容里的逗号 / 引号 / 换行，
+     * 所以不用手动改分隔符。不加 BOM —— 加了会让 Anki 第一条卡片的正面
+     * 悄悄多一个看不见的字符。
+     */
+    fun buildAnkiCsv(context: Context): String {
+        VocabStore.ensureLoaded(context)
+        val sb = StringBuilder()
+        VocabStore.entries.value.forEach { e ->
+            val front = e.text.trim()
+            if (front.isEmpty()) return@forEach
+
+            val back = mutableListOf<String>()
+            e.translation?.trim()?.takeIf { it.isNotEmpty() }?.let { back.add(it) }
+
+            if (!e.isSentence) {
+                val us = e.usphone?.trim().orEmpty()
+                val uk = e.ukphone?.trim().orEmpty()
+                when {
+                    us.isNotEmpty() && uk.isNotEmpty() && us != uk -> back.add("$us / $uk")
+                    us.isNotEmpty() -> back.add(us)
+                    uk.isNotEmpty() -> back.add(uk)
+                }
+                e.definition?.trim()?.takeIf { it.isNotEmpty() }?.let { back.add(it) }
+            }
+
+            e.source.trim().takeIf { it.isNotEmpty() }?.let { back.add("来自：$it") }
+
+            sb.append(csvField(front)).append(',').append(csvField(back.joinToString("\n")))
+            sb.append('\n')
+        }
+        return sb.toString()
+    }
+
+    /** Anki 卡片文件名：小七复读机-Anki卡片-20260916-1300.csv */
+    fun ankiCsvFileName(): String {
+        val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
+        return "小七复读机-Anki卡片-$ts.csv"
+    }
+
+    /** Anki 卡片写到用户选中的 Uri */
+    fun writeAnkiCsvTo(context: Context, uri: Uri): Boolean = try {
+        val csv = buildAnkiCsv(context)
+        val os = context.contentResolver.openOutputStream(uri) ?: return false
+        os.use {
+            it.write(csv.toByteArray(Charsets.UTF_8))
+            it.flush()
+        }
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    /**
+     * 标准 CSV 字段转义：含逗号 / 引号 / 换行时用双引号包起来，内部引号翻倍。
+     * 中文释义里出现英文逗号是常事，不转义会把一列劈成两列、整份卡片错位。
+     */
+    private fun csvField(s: String): String =
+        if (s.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) {
+            "\"" + s.replace("\"", "\"\"") + "\""
+        } else {
+            s
+        }
+
     /**
      * 把备份写到用户选中的 Uri（SAF `ACTION_CREATE_DOCUMENT` 回调给回来的）。
      * @return 是否写成功

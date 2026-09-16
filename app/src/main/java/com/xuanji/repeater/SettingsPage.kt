@@ -284,6 +284,20 @@ fun SettingsPage(
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 }
 
+                // Anki 卡片（CSV）：拿出去用 Anki 的间隔重复复习
+                val ankiLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("text/csv")
+                ) { uri ->
+                    if (uri == null) return@rememberLauncherForActivityResult
+                    val n = DataBackup.entryCount(context)
+                    val msg = when {
+                        n == 0 -> "生词本里还没有内容"
+                        DataBackup.writeAnkiCsvTo(context, uri) -> "已导出 $n 张卡片"
+                        else -> "导出失败，换个位置再试"
+                    }
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+
                 DataRow(
                     title = "导出备份",
                     note = "生词本 + 字幕库打包成一个 JSON，存到你自己选的地方（网盘 / 电脑都行）。换手机、清数据前先来这一下。",
@@ -298,6 +312,11 @@ fun SettingsPage(
                     title = "导出单词表（TXT）",
                     note = "只导出单词（不含收藏的整句），一行一个，可以直接导入欧路 / 有道 / 不背单词的生词本。",
                 ) { wordListLauncher.launch(DataBackup.wordListFileName()) }
+
+                DataRow(
+                    title = "导出 Anki 卡片（CSV）",
+                    note = "单词和收藏的整句都导，正面英文、背面中文（含音标、词性、来源）。Anki 里「导入文件」直接选它即可，分隔符保持默认的逗号。",
+                ) { ankiLauncher.launch(DataBackup.ankiCsvFileName()) }
             }
 
             // ---------------- 关于 ----------------
