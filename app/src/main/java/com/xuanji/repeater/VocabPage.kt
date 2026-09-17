@@ -19,6 +19,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,10 +63,18 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
     var keyword by remember { mutableStateOf("") }
     var searchOpen by remember { mutableStateOf(false) }
 
-    val shown = remember(entries, filter, keyword) {
-        entries.filter { e ->
-            filter.match(e) && (keyword.isBlank() || e.matches(keyword))
-        }
+    // ---- 排序（0917：按加入时间 / 按开头字母）----
+    // 跟筛选相反，**这里要记住**：排序不会让词"消失"，记住反而更顺手。理由见 VocabPrefs.kt
+    var sort by remember { mutableStateOf(VocabPrefs.loadSort(context)) }
+    var sortOpen by remember { mutableStateOf(false) }
+
+    val shown = remember(entries, filter, keyword, sort) {
+        // ⚠️ 顺序：先筛、再排。反过来的话筛完再排也没错，但先把集合缩小更省（2000 条时看得出来）
+        sort.apply(
+            entries.filter { e ->
+                filter.match(e) && (keyword.isBlank() || e.matches(keyword))
+            }
+        )
     }
 
     // 没掌握的条数：复习入口上直接显示，一眼知道还有多少要练
@@ -72,7 +82,15 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
     val masteredCount = entries.size - pending
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // 头部：返回 + 标题 + 复习 + 清空
+        // 头部：返回 + 复习 + 清空
+        //
+        // 🔴【0917 阿亮】这里原来在返回箭头右边跟着一行「生词本（3）」当标题。
+        // 问题：**这串字在「阅读模式」顶栏右侧是"入口按钮"，到了这一页又成了"标题"**，
+        // 而箭头紧贴标题 ⇒ 连起来读就是「返回生词本」，人已经在这一页了，读着莫名其妙
+        // （复习页同理：「← 复习」读成「返回复习」）。
+        // 他的原话："这个逻辑不太对吧"，然后拍板"只留返回的小三角儿"。
+        // ⇒ 所以标题去掉了，**别再顺手加回来**。
+        // 条数信息没丢：下一行的「共 N 条 · 已掌握 N 条」本来就在写。
         Row(
             modifier = Modifier.fillMaxWidth().height(48.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -80,11 +98,6 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
             IconButton(onClick = onBack) {
                 Icon(XuanjiIcons.Back, contentDescription = "返回")
             }
-            Text(
-                text = "生词本（${entries.size}）",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
             Spacer(modifier = Modifier.weight(1f))
             // 复习入口：只要生词本里有东西就给（哪怕全掌握了，进去也能再练）
             if (entries.isNotEmpty()) {
@@ -133,6 +146,58 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(modifier = Modifier.weight(1f))
+
+                // ---- 排序入口（0917）----
+                // 为什么不做成一行 chips：上面筛选那行已经横滑了，再叠一行排序，
+                // 页顶就成了「概览 / 搜索框 / 筛选 / 排序」四层，太重。
+                // 排序是设置、不是高频切换 ⇒ 压成一个文字按钮，点一下弹三项。
+                // ⚠️ 这三项**要持久化**（跟上面的筛选故意相反）：见 VocabPrefs.kt 的说明。
+                Box {
+                    TextButton(onClick = { sortOpen = true }) {
+                        Text(
+                            text = sort.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text(
+                            text = if (sortOpen) "▴" else "▾",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    DropdownMenu(expanded = sortOpen, onDismissRequest = { sortOpen = false }) {
+                        VocabSort.values().forEach { s ->
+                            val sel = s == sort
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = s.label,
+                                        fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                                    )
+                                },
+                                leadingIcon = {
+                                    // 不选中时留个等宽空位，免得三行文字左右错开
+                                    Box(modifier = Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                                        if (sel) {
+                                            Icon(
+                                                XuanjiIcons.Check,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    sort = s
+                                    VocabPrefs.saveSort(context, s)
+                                    sortOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
+
                 IconButton(
                     onClick = {
                         searchOpen = !searchOpen

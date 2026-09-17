@@ -175,11 +175,10 @@ fun ReviewPage(onBack: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onBack) { Icon(XuanjiIcons.Back, contentDescription = "返回") }
-                Text(
-                    text = "复习",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                // 🔴【0917 阿亮】这里原来跟着一行「复习」当标题。
+                // 箭头紧贴标题 ⇒ 连起来读成「返回复习」，人已经在这一页了，读着莫名其妙
+                // （生词本页同款问题：「← 生词本（3）」读成「返回生词本」）。
+                // 他拍板："只留返回的小三角儿，页面名去掉"。⇒ 标题删了，别再顺手加回来。
                 Spacer(modifier = Modifier.weight(1f))
                 // 自动发音：只在真正做题时出现（开场页/结算页没卡片可念，摆在那儿是噪音）
                 if (inSession) {
