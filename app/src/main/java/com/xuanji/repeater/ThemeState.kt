@@ -33,6 +33,11 @@ fun xuanjiColorScheme(index: Int, dark: Boolean): ColorScheme {
             secondaryContainer = c.dark.copy(alpha = 0.30f),
             onSecondaryContainer = c.light,
             tertiary = primary,
+            // 🔴【0917 阿亮】原来这里**只覆盖了 `tertiary`，漏了 `tertiaryContainer` / `onTertiaryContainer`**
+            // ⇒ 这俩落到 `darkColorScheme()` 的默认值（淡紫容器 + 浅紫字），跟马卡龙主题不搭。
+            //   生词本「句」角标、阅读模式视频标记都在用它。这里补齐，跟 primaryContainer 取同一个值。
+            tertiaryContainer = c.dark.copy(alpha = 0.34f),
+            onTertiaryContainer = c.light,
             background = blend(Color(0xFF121212), c.dark, 0.08f),
             surface = blend(Color(0xFF121212), c.dark, 0.08f),
             surfaceContainerLowest = blend(Color(0xFF0D0D0D), c.dark, 0.05f),
@@ -53,6 +58,11 @@ fun xuanjiColorScheme(index: Int, dark: Boolean): ColorScheme {
             secondaryContainer = c.light.copy(alpha = 0.24f),
             onSecondaryContainer = c.dark,
             tertiary = primary,
+            // 🔴【0917 阿亮】同上面暗色分支：原来漏覆盖 `tertiaryContainer`/`onTertiaryContainer`，
+            // 走到 `lightColorScheme()` 默认的淡紫（#EADDFF / #21005D）⇒ 生词本「句」角标是紫的，
+            // 跟粉色主题格格不入（他原话："颜色跟主题风格也太不统一了"）。补齐成跟「词」同一套色。
+            tertiaryContainer = c.light.copy(alpha = 0.30f),
+            onTertiaryContainer = c.dark,
             background = blend(Color.White, c.light, 0.10f),
             surface = blend(Color.White, c.light, 0.10f),
             surfaceContainerLowest = Color.White,

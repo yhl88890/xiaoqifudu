@@ -1168,7 +1168,17 @@ class MainActivity : ComponentActivity() {
         Surface(modifier = Modifier.fillMaxSize()) {
             androidx.compose.foundation.layout.Column(modifier = Modifier.fillMaxSize()) {
                 // 顶栏：左设置、中「正在学」选集下拉、右生成歌词/文件夹
-                if (!(page == Page.VIDEO && videoFullscreen)) Row(
+                //
+                // 🔴【0917 阿亮】生词本 / 复习页**不要顶栏** —— 那三个按钮（阅读选集 / 生成字幕 / 文件夹）
+                // 对这两页都没意义，留着纯占地方、还容易误点。
+                // 他原话："进到生词本之后还显示顶栏，我感觉好像没必要了吧…这几个都感觉就没用了，
+                // 就给它弄掉，底栏可以保留。"
+                // ⚠️ 这里**不是**"遮挡"也不是另一套界面 —— 就是同一个 Column 里的第一行，
+                //    隐藏后内容会直接顶到状态栏底下 ⇒ 下面 Box 那处必须补 statusBarsPadding，
+                //    不然返回箭头会被状态栏压住（视频全屏那条分支**不加**，全屏就是要铺满）。
+                val hideTopBar = (page == Page.VIDEO && videoFullscreen) ||
+                    page == Page.VOCAB || page == Page.REVIEW
+                if (!hideTopBar) Row(
                     modifier = Modifier.fillMaxWidth().statusBarsPadding().height(52.dp).padding(end = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -1294,7 +1304,16 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // 内容区（占据剩余空间）
-                androidx.compose.foundation.layout.Box(modifier = Modifier.weight(1f)) {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        // 生词本 / 复习页把顶栏藏了（见上面 hideTopBar），内容得自己避开状态栏，
+                        // 否则顶部的返回箭头会钻到状态栏下面。视频全屏不在此列 —— 全屏本来就要铺满。
+                        .then(
+                            if (page == Page.VOCAB || page == Page.REVIEW) Modifier.statusBarsPadding()
+                            else Modifier
+                        )
+                ) {
                     // ===== 常驻视频层（阅读无缝衔接核心）=====
                     // 视频模式 / 阅读(视频源) 时把 VideoView 常驻挂载：切视频↔阅读不卸载 VideoView，
                     // 底层 MediaPlayer 永不重建 → 零延迟、零双声、无孤儿音频（彻底消灭 0903 那堆打地鼠补丁）。
