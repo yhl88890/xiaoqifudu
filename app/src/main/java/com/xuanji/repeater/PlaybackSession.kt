@@ -82,4 +82,25 @@ object PlaybackSession {
         _activeKind.value = kind
         Log.d("XJ_KIND", "activeKind -> $kind (from=$whence)")
     }
+
+    private val _floatText = MutableStateFlow("")
+
+    /**
+     * 视频模式下的「当前句字幕文本」，专供悬浮窗读。
+     *
+     * 【为什么音频不用它】音频的悬浮窗可以直接读 `PlayerService.state`（同一个进程）。
+     * 而**视频的字幕只活在 MainActivity 的变量里** —— 视频是手搓 MediaPlayer、绑 TextureView，
+     * 搬不进 Service ⇒ 悬浮窗隔着进程拿不到。这里开一条**只放文本**的窄通道：
+     * MainActivity 把当前句推上来，悬浮窗读走。
+     *
+     * ⚠️ 只放「文本」这一个字段。别顺手把视频的播放状态整包搬进来 ——
+     * 那会变成第二套状态真值，跟 `activeKind` 打架（0916 那个 `restore()` 就是这么被删掉的）。
+     */
+    val floatText: StateFlow<String> = _floatText.asStateFlow()
+
+    /** MainActivity 在视频当前句变化时调用（同一句重复调用无副作用） */
+    fun setFloatText(text: String) {
+        if (_floatText.value == text) return
+        _floatText.value = text
+    }
 }

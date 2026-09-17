@@ -15,7 +15,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 
 /**
@@ -128,31 +132,62 @@ class FloatLyricsService : Service() {
 
     private fun observeState() {
         scope.launch {
-            // 等待 PlayerService 就绪（播放器常驻前台，通常立即可用）
-            var svc = PlayerService.instance
-            while (svc == null) {
-                delay(500)
-                svc = PlayerService.instance
-            }
-            svc.state.collectLatest { state ->
-                val tv = textView ?: return@collectLatest
-                val text = currentSentenceText(state)
-                android.util.Log.d("FloatLyrics", "update text=[$text] idx=${state.currentSentenceIndex} lyrics=${state.lyrics.size}")
-                // 最终防线：任何路径都不允许把空白文本上屏（避免悬浮窗变成无字黑块）
-                tv.text = text.ifEmpty { "小七复读机" }
-            }
+            combine(
+                PlaybackSession.activeKind,
+                PlaybackSession.floatText,
+                playerStateFlow(),
+            ) { kind, videoText, st -> Triple(kind, videoText, st) }
+                .collectLatest { (kind, videoText, st) ->
+                    val tv = textView ?: return@collectLatest
+                    // 视频字幕走 MainActivity 推上来的那条窄通道；音频直接读 PlayerService 的状态
+                    val text = if (kind == MediaKind.VIDEO) videoText else currentSentenceText(st)
+                    // 最终防线：任何路径都不允许把空白文本上屏（避免悬浮窗变成无字黑块）
+                    tv.text = text.ifEmpty { "小七复读机" }
+                }
         }
     }
 
-    /** 当前句文本：优先歌词行，无歌词则显示曲目名；整曲播放时按位置自动跟进歌词 */
+    /**
+     * 音频侧的 PlayerState 流。
+     *
+     * 🔴 **不能像以前那样 `while (svc == null) delay(500)` 死等**：
+     * 纯视频模式下 PlayerService 可能压根没起来（用户没播过音频），
+     * 那样悬浮窗会永远卡在初始文案，看起来就是"悬浮窗坏了"。
+     * 现在没就绪就先发一条空 state，等它起来再切到真流。
+     */
+    private fun playerStateFlow(): Flow<PlayerState> = flow {
+        while (true) {
+            val svc = PlayerService.instance
+            if (svc != null) {
+                emitAll(svc.state)
+                return@flow
+            }
+            emit(PlayerState())
+            delay(500)
+        }
+    }
+
+    /**
+     * 音频模式的当前句文本。兜底顺序：**断句文本 → LRC 歌词 → 曲目名**。
+     *
+     * 🔴【0917 阿亮报「悬浮窗只显示曲目名」】根因就在下面那个 `idx`：
+     * 原来用的是 `state.currentSentenceIndex`，而**整曲播放时它恒为 -1**
+     * （`PlayerService` 只在「按句复读」时才把它置成 >= 0）⇒ 一路掉到 lyrics 分支。
+     * 以前他放的是 LRC 歌词，能显示；换成**自己生成的断句字幕**（没有 LRC）就只剩曲目名
+     * —— 这就是"以前成功过、现在不行"的原因。
+     *
+     * 正解是 `activeSentenceIndex`：句子模式走 currentSentenceIndex，
+     * 整曲播放按播放位置在 `sentences` 里定位
+     * （那个属性本来就是为「歌词高亮 / 悬浮窗跟随」写的，见 `PlayerState`）。
+     */
     private fun currentSentenceText(state: PlayerState): String {
         // title 可能为空串（空串不会被 ?: 兜底），统一兜底
         val title = state.currentItem?.title?.ifEmpty { null } ?: "小七复读机"
-        val idx = state.currentSentenceIndex
+        val idx = state.activeSentenceIndex
         if (idx >= 0) {
-            val sentence = state.sentences.getOrNull(idx) ?: return title
-            // 句子文本由 service 端按歌词重叠归属算好；无文本显示标题
-            return sentence.text.ifEmpty { title }
+            // 断句文本可能是空的（那段没识别出文字）⇒ 这时要退回 LRC，而不是直接甩曲目名
+            val t = state.sentences.getOrNull(idx)?.text.orEmpty()
+            if (t.isNotBlank()) return t
         }
         // 整曲播放：取当前播放位置之前最近的歌词行，实现歌词滚动跟进
         val lyric = state.lyrics.lastOrNull { it.timeMs <= state.positionMs } ?: return title

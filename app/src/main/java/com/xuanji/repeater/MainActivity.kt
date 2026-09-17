@@ -141,6 +141,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -1164,6 +1166,27 @@ class MainActivity : ComponentActivity() {
         // Phase3-步骤2：订阅「当前播放源」唯一真值。
         // 注意 StateFlow 必须 collect 才能触发重组，直接读 PlaybackSession.current 是不会重组的。
         val activeKind by PlaybackSession.activeKind.collectAsStateWithLifecycle()
+
+        // 视频当前句 → 悬浮窗（0917 阿亮要求"视频下的字幕也能用悬浮窗播"）
+        //
+        // 【为什么必须有这段】视频的字幕只活在 MainActivity 的变量里（手搓 MediaPlayer + TextureView，
+        // 搬不进 Service），而悬浮窗是个独立 Service ⇒ 它够不着。这里把「当前句文本」推给
+        // PlaybackSession.floatText，悬浮窗去读那一条。
+        //
+        // 【为什么用 snapshotFlow 而不是在写入点各补一行】videoSentenceIndexGlobal 有 6 个写入点
+        // （加载重置 / 点句 / seek / 播放轮询…），抄漏一处就会出现"某条路径切句后悬浮窗不跟"。
+        // 监听一次覆盖全部。**带上 activeKind 是必要的**：切换模式时当前句没变、但得重推一次，
+        // 否则从音频切到视频，悬浮窗还念着上一路的文本。
+        LaunchedEffect(Unit) {
+            combine(
+                PlaybackSession.activeKind,
+                snapshotFlow { videoSentenceIndexGlobal to sentences },
+            ) { kind, (idx, list) -> kind to list.getOrNull(idx)?.text.orEmpty() }
+                .collect { (kind, text) ->
+                    // 只在视频是真值来源时推：音频模式别拿视频的残留文本把悬浮窗带偏
+                    if (kind == MediaKind.VIDEO) PlaybackSession.setFloatText(text)
+                }
+        }
 
         Surface(modifier = Modifier.fillMaxSize()) {
             androidx.compose.foundation.layout.Column(modifier = Modifier.fillMaxSize()) {
