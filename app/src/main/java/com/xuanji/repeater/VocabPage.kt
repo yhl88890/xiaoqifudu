@@ -260,12 +260,20 @@ private fun VocabEntryRow(entry: VocabEntry, onDelete: () -> Unit) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 🔴🔴 `weight(1f, fill = false)` 不能删（0917 阿亮报"句子没有角标也没有星"的根因）：
+                    //    原来这个 Text 没有任何宽度约束，**长句会把整行占满**，
+                    //    后面的「词/句」角标和星级被整个挤到屏幕外 —— 他以为"句子不支持这两个东西"。
+                    //    实测：94 字符的长句，Text 宽 x=[69,911]，角标直接不出现在无障碍树里；
+                    //    同时「Time flies.」这种短句一切正常。所以这**不是"句子功能缺失"**，
+                    //    是纯布局溢出 —— **别为此去把单词和句子拆成两个列表**，治不了。
+                    //    ⚠️ `fill = false` 也是必需的：填 true 的话短词后面的角标会被推到屏幕最右边。
                     Text(
                         text = entry.text,
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     // 词/句 类型角标

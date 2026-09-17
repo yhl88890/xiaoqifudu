@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 生词提醒：AlarmManager 排的闹钟**重启后会全部丢失**，得靠开机广播重排一次 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <!-- 视频模式：从文件管理器（媒体库）里列视频，需要读视频权限 -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
@@ -41,6 +43,20 @@
         <service
             android:name=".FloatLyricsService"
             android:exported="false" />
+
+        <!-- 生词提醒：闹钟到点换一条通知；开机、装完新版后重排
+             （AlarmManager 的闹钟在这两种情况下都会丢，而开关还留在 SP 里"开"着）。
+             exported=false 对这些系统广播依然收得到 —— 系统(uid 1000)不受该标记限制，
+             而自定义的 VOCAB_TICK 只有本 App 能发，别人伪造不了。 -->
+        <receiver
+            android:name=".VocabReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.xuanji.repeater.VOCAB_TICK" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <activity
             android:name=".MainActivity"

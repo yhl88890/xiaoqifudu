@@ -1,8 +1,11 @@
 package com.xuanji.repeater
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -330,6 +333,90 @@ fun SettingsPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
+            }
+
+            // ---------------- 生词提醒 ----------------
+            SettingsGroup("生词提醒") {
+                // 0917 阿亮要做「通知栏轮播生词」：隔一阵子换一个还没记住的词，瞄一眼就当复习。
+                // 实现细节全在 VocabReminder.kt（AlarmManager，不是前台服务 —— 理由见那个文件头）。
+                var remindOn by remember { mutableStateOf(VocabReminder.isOn(context)) }
+                var interval by remember { mutableStateOf(VocabReminder.loadInterval(context)) }
+
+                // Android 13+ 通知要**运行时**授权，没有的话 notify() 会被系统直接丢掉。
+                // 所以开关不能只写 SP：先要权限，拿到结果再决定开不开。
+                val notifPerm = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    if (granted) {
+                        val posted = VocabReminder.setOn(context, true)
+                        Toast.makeText(
+                            context,
+                            if (posted) "已开启，通知栏现在就有一个词" else "已开启，但生词本里暂时没有要复习的词",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    } else {
+                        remindOn = false
+                        VocabReminder.setOn(context, false)
+                        Toast.makeText(context, "系统没给通知权限，提醒发不出来", Toast.LENGTH_LONG).show()
+                    }
+                }
+
+                SettingsSwitch(
+                    text = "在通知栏轮播生词",
+                    checked = remindOn,
+                    onCheckedChange = { want ->
+                        if (!want) {
+                            remindOn = false
+                            VocabReminder.setOn(context, false)
+                        } else if (Build.VERSION.SDK_INT >= 33 &&
+                            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                            != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            remindOn = true
+                            val posted = VocabReminder.setOn(context, true)
+                            Toast.makeText(
+                                context,
+                                if (posted) "已开启，通知栏现在就有一个词" else "已开启，但生词本里暂时没有要复习的词",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    },
+                    note = "隔一阵子把还没记住的生词换到通知栏，点一下直接进复习页。" +
+                        "不响也不震，就是让你顺手瞄一眼。",
+                )
+
+                if (remindOn) {
+                    Text(
+                        text = "多久换一个",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 10.dp, bottom = 6.dp),
+                    )
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        VocabReminder.INTERVAL_CHOICES.forEach { m ->
+                            FilterChip(
+                                selected = interval == m,
+                                onClick = {
+                                    interval = m
+                                    VocabReminder.saveInterval(context, m)
+                                },
+                                label = { Text(if (m < 60) "$m 分钟" else "${m / 60} 小时") },
+                            )
+                        }
+                    }
+                    Text(
+                        text = "只提醒还没掌握的（连对 3 次的就不再出现）。轮着来，不会老是同一个词。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
             }
 
             // ---------------- 识别 ----------------

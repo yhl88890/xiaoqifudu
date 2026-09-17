@@ -276,6 +276,11 @@ private var biliError by mutableStateOf("")
 // 这里用回调把「切到视频模式 / 复读机」转交给 setContent 作用域执行。
 private var biliNavigate: ((Page) -> Unit)? = null
 
+// 0917 生词提醒：点通知**冷启**进来时，onCreate 阶段 AppRoot 还没组合、biliNavigate 还是 null，
+// 所以先把请求挂起，等 AppRoot 里那个「恢复上次现场」的 LaunchedEffect 消费掉（见那里）。
+// ⚠️ 必须由那个 effect 消费：否则「恢复上次页面」（会跳回视频/阅读）会把复习页覆盖掉。
+private var pendingGotoReview = false
+
 // 抓 B站 完成/进度回调：改用进程内事件总线 BiliImportBus（见下方 setContent 内的 LaunchedEffect 收集），
 // 不再用跨组件广播——Android 14 上 RECEIVER_NOT_EXPORTED 的隐式广播投不到，会导致"提交后没反应"。
 // 服务跑完通过 BiliImportBus.post(BiliImportEvent.Done/Progress) 回传，这里收集后更新状态并自动打开播放。
@@ -729,15 +734,27 @@ class MainActivity : ComponentActivity() {
         if (videoUri != null && videoSurfaceRef[0] != null) {
             bindVideoSurface(videoSurfaceRef[0], "onNewIntent")
         }
+        // 0917 生词提醒：点通知时 App 还活着（singleTask）= 走这条，直接跳复习页。
+        // 冷启那条走 onCreate 的 pendingGotoReview（那时 biliNavigate 还没赋值）。
+        if (intent.getBooleanExtra(VocabReminder.EXTRA_GOTO_REVIEW, false)) {
+            biliNavigate?.invoke(Page.REVIEW)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installCrashGuard()   // 越早装越好：之后所有主线程异常都能被兜住，而不是直接闪退
         logLastCrash(this)    // 上次要是闪退过，把堆栈打进日志
+        // 0917 生词提醒：点通知冷启进来 → 挂个请求，等 AppRoot 组合时消费（那时才能改 page）
+        if (intent?.getBooleanExtra(VocabReminder.EXTRA_GOTO_REVIEW, false) == true) {
+            pendingGotoReview = true
+        }
         // 【0915】把应用级 Context 挂到会话对象上：文件级顶层函数（如 videoJumpSentence）拿不到
         // LocalContext，但「上一句复读」要读音频模式的 RepeatPrefs 重播次数。只存 Application Context，不泄漏。
         PlaybackSession.attachContext(this)
+        // 0917 生词提醒自愈：开关开着但闹钟被清掉了（装新版/强行停止/ROM 清后台）⇒ 重排。
+        // 幂等、开销极小；细节和"为什么不能每次启动都重排"见 VocabReminder.healIfNeeded。
+        VocabReminder.healIfNeeded(this)
         startForegroundService(Intent(this, PlayerService::class.java))
         bindService(Intent(this, PlayerService::class.java), connection, Context.BIND_AUTO_CREATE)
         // 恢复悬浮窗：上次开启过则自动拉起（应用在前台，可安全 startService）
@@ -1018,16 +1035,21 @@ class MainActivity : ComponentActivity() {
         val readingLibraryReq = remember { mutableStateOf(false) }
         // 进文件夹页时先停在音频还是视频那一栏（从视频模式进来就先看视频）
         var folderInitType by remember { mutableStateOf(MediaType.AUDIO) }
-        // 把 page 的写权限暴露给文件级广播接收器：前台服务抓完 B站 自动导航到视频/复读机。
-        // 视频模式进文件夹→文件夹默认看视频栏、顶栏显示「视频选集」（0904 修 Bug C）
-        biliNavigate = { p ->
-            if (p == Page.FOLDER && page == Page.VIDEO) folderInitType = MediaType.VIDEO
-            page = p
-        }
         // 进文件夹页前记住来源模式：退出文件夹时回到进入时的模式（需求3）
         var folderReturnPage by remember { mutableStateOf(Page.PLAYER) }
         var layoutEdit by remember { mutableStateOf(false) }
         var showSettings by remember { mutableStateOf(false) }
+        // 把 page 的写权限暴露给文件级广播接收器：前台服务抓完 B站 自动导航到视频/复读机。
+        // 视频模式进文件夹→文件夹默认看视频栏、顶栏显示「视频选集」（0904 修 Bug C）
+        // ⚠️ 这个赋值必须留在 showSettings 声明**之后** —— 下面要顺手关它。
+        biliNavigate = { p ->
+            if (p == Page.FOLDER && page == Page.VIDEO) folderInitType = MediaType.VIDEO
+            page = p
+            // 0917 生词提醒：点通知跳复习时顺手把设置页关掉。
+            // 不关的话设置页会盖在复习页上 —— 用户看见的就是「点了通知没反应」
+            // （模拟器实测过：复习页确实跳过去了，只是被设置页挡着）。
+            if (p == Page.REVIEW) showSettings = false
+        }
         var floatOn by remember { mutableStateOf(FloatPrefs.load(context)) }
         var resumeOn by remember { mutableStateOf(PlaybackPrefs.loadResume(context)) }
         // 选集页滚动位置：提升到 Activity 层，页面切换（组合销毁/重建）后仍保留。
@@ -1060,6 +1082,13 @@ class MainActivity : ComponentActivity() {
         // 让冷启/媒体中心返回能回到上次模式（视频/阅读/音频），并尊重暂停/播放状态（而非总回音频）。
         LaunchedEffect(Unit) {
             loadVideoPrefs(context)
+            // 0917 生词提醒：点通知冷启进来的，**优先**落复习页 ——
+            // 必须 return 掉，否则下面按 sessionPage 恢复（可能跳回视频/阅读）会把复习页盖掉。
+            if (pendingGotoReview) {
+                pendingGotoReview = false
+                page = Page.REVIEW
+                return@LaunchedEffect
+            }
             when (sessionPage) {
                 Page.VIDEO -> if (videoUri != null) {
                     page = Page.VIDEO
