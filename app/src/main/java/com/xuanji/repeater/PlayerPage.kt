@@ -30,7 +30,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -438,7 +437,7 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
                         scale = scale,
                         enabled = !editing,
                     )
-                    DropdownMenu(
+                    AppDropdownMenu(
                         expanded = showRepeatMenu,
                         onDismissRequest = { showRepeatMenu = false },
                     ) {
@@ -462,7 +461,7 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
                         scale = scale,
                         enabled = !editing,
                     )
-                    DropdownMenu(
+                    AppDropdownMenu(
                         expanded = showSpeedMenu,
                         onDismissRequest = { showSpeedMenu = false },
                     ) {
@@ -485,7 +484,7 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
                         scale = scale,
                         enabled = !editing,
                     )
-                    DropdownMenu(
+                    AppDropdownMenu(
                         expanded = showRepeatSpeedMenu,
                         onDismissRequest = { showRepeatSpeedMenu = false },
                     ) {
@@ -520,7 +519,7 @@ private fun ToolbarModule(svc: PlayerService?, state: PlayerState, editing: Bool
                         scale = scale,
                         enabled = !editing,
                     )
-                    DropdownMenu(
+                    AppDropdownMenu(
                         expanded = showPlayModeMenu,
                         onDismissRequest = { showPlayModeMenu = false },
                     ) {

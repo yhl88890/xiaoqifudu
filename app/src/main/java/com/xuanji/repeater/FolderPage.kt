@@ -35,7 +35,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -393,7 +392,7 @@ else -> LazyColumn(
                             IconButton(onClick = { menuFor = folder }) {
                                 Icon(Icons.Filled.MoreVert, contentDescription = "更多")
                             }
-                            DropdownMenu(
+                            AppDropdownMenu(
                                 expanded = menuFor == folder,
                                 onDismissRequest = { menuFor = null },
                             ) {
@@ -853,7 +852,7 @@ private fun FolderDetailPage(
                                     IconButton(onClick = { menuFor = item }) {
                                         Icon(Icons.Filled.MoreVert, contentDescription = "更多")
                                     }
-                                    DropdownMenu(
+                                    AppDropdownMenu(
                                         expanded = menuFor == item,
                                         onDismissRequest = { menuFor = null },
                                     ) {
@@ -945,7 +944,7 @@ private fun FolderDetailPage(
                                     IconButton(onClick = { videoMenuFor = item }) {
                                         Icon(Icons.Filled.MoreVert, contentDescription = "更多")
                                     }
-                                    DropdownMenu(
+                                    AppDropdownMenu(
                                         expanded = videoMenuFor == item,
                                         onDismissRequest = { videoMenuFor = null },
                                     ) {

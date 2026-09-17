@@ -36,7 +36,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -209,8 +208,13 @@ fun SettingsPage(
                 Text(
                     // 【0917 精简】原来这上面有一段「自动：… 只用本地发音：…」的长说明，
                     // 已整段搬进「软件介绍 → 朗读用哪个声音」。设置页只留标签和控件。
-                    text = "自动模式下，超过 40 字的句子用哪个音色",
-                    style = MaterialTheme.typography.labelMedium,
+                    // 🔴【0917 统一字号 + 缩短】`labelMedium`(12sp) → `bodyMedium`(14sp)，
+                    //    跟「朗读用哪个声音」和所有开关行同号（他报"左右字体大小不一样"）。
+                    //    字号一大会变长，所以把「的句子用哪个」压掉 —— "用哪个"由右边那颗
+                    //    按钮自己说明，「自动模式下」和「40 字」这两个关键信息都留着。
+                    //    ⚠️ 他设备上 font_scale 会放大 1.1~1.3，太长会折行、又变成占两行。
+                    text = "自动模式下，超过 40 字的音色",
+                    style = MaterialTheme.typography.bodyMedium,
                     color = if (autoMode) dim else dimOff,
                     // 【0917 省行】上面 PickerRow 自带 4dp 下留白，这里就不用再撑 14dp 了
                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
@@ -231,11 +235,12 @@ fun SettingsPage(
                             enabled = autoMode,
                             contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
                         ) {
-                            Text(sfLabel, style = MaterialTheme.typography.bodyMedium)
+                            // 不指定 style ⇒ 默认 `labelLarge`(14sp)，跟左边标题同号
+                            Text(sfLabel)
                             Spacer(modifier = Modifier.size(6.dp))
-                            Text("▾", style = MaterialTheme.typography.bodySmall)
+                            Text("▾")
                         }
-                        DropdownMenu(
+                        AppDropdownMenu(
                             expanded = sfMenu,
                             onDismissRequest = { sfMenu = false },
                         ) {
@@ -1038,7 +1043,11 @@ private fun <T> PickerRow(
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium,
+            // 🔴【0917 阿亮："这些按钮左边儿和右边儿的文字字体大小都不一样，要统一一下"】
+            //    原来是 `labelMedium`(12sp)，而同一页的开关行（深色模式 / 悬浮窗…）用的是
+            //    `bodyMedium`(14sp) ⇒ 一页里两档字号，看着就是乱的。
+            //    统一到 **`bodyMedium`**，跟开关行、主题颜色、数据行全部对齐。
+            style = MaterialTheme.typography.bodyMedium,
             color = if (enabled) dim else dim.copy(alpha = 0.38f),
             modifier = Modifier.weight(1f),
         )
@@ -1048,11 +1057,13 @@ private fun <T> PickerRow(
                 enabled = enabled,
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
             ) {
-                Text(labelOf(current), style = MaterialTheme.typography.bodySmall)
+                // 不显式指定 style ⇒ 走 OutlinedButton 默认的 `labelLarge`(14sp)，
+                // 跟左边标签的 `bodyMedium`(14sp) 同号（这也是本次要修的"左右不一样大"）。
+                Text(labelOf(current))
                 Spacer(modifier = Modifier.size(6.dp))
-                Text("▾", style = MaterialTheme.typography.bodySmall)
+                Text("▾")
             }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            AppDropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                 options.forEach { o ->
                     DropdownMenuItem(
                         // 勾选标记跟播放页「重播次数」那个下拉保持同一套写法

@@ -19,7 +19,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -166,7 +165,7 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    DropdownMenu(expanded = sortOpen, onDismissRequest = { sortOpen = false }) {
+                    AppDropdownMenu(expanded = sortOpen, onDismissRequest = { sortOpen = false }) {
                         VocabSort.values().forEach { s ->
                             val sel = s == sort
                             DropdownMenuItem(

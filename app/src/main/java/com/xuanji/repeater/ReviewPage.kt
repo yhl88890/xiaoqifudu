@@ -20,7 +20,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -773,7 +772,7 @@ private fun BatchSizeControl(
             }
         }
 
-        DropdownMenu(expanded = open, onDismissRequest = onDismiss) {
+        AppDropdownMenu(expanded = open, onDismissRequest = onDismiss) {
             Column(modifier = Modifier.padding(horizontal = 16.dp).width(230.dp)) {
                 Text(
                     text = "每轮复习 ${draft.roundToInt()} 个",
