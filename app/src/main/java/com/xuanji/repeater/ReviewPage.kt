@@ -106,10 +106,13 @@ fun ReviewPage(onBack: () -> Unit) {
      * 不存在"队列空了自动补"的隐式逻辑 —— 之前就是那么写的，
      * 结果第一轮刚装填完就被判成"本轮走完"，直接跳到了结算页。
      */
-    fun startNewRound() {
+    fun startNewRound(includeMastered: Boolean = false) {
         val excludeIds = queue.map { it.id }.toSet()
+        // 🔴【0917 阿亮报】这里原来写死 `!it.mastered` ⇒ 全部连对 3 次之后队列永远是空的，
+        // 他就"没法再继续复习了"，页面只让他"攒新词"。学完了也该能接着练。
+        // ⇒ 这一轮要不要把已掌握的词也放进来，交给调用方决定（ReadyState 的「再练一轮」传 true）。
         val picked = allEntries
-            .filter { !it.mastered && it.id !in excludeIds }
+            .filter { it.id !in excludeIds && (includeMastered || !it.mastered) }
             .sortedBy { it.lastReviewedAt }
             .take(batchSize)
         queue = picked
@@ -228,6 +231,11 @@ fun ReviewPage(onBack: () -> Unit) {
                     started = true
                     startNewRound()
                 },
+                // 全掌握时的入口：不传 includeMastered 的话队列还是空的，点下去等于没反应
+                onStartMastered = {
+                    started = true
+                    startNewRound(includeMastered = true)
+                },
             )
             finished -> FinishState(
                 known = totalKnown,
@@ -240,7 +248,9 @@ fun ReviewPage(onBack: () -> Unit) {
                     queue = emptyList()
                     wrongThisRound = emptyList()
                     finished = false
-                    startNewRound()
+                    // 🔴 必须带上 includeMastered：在"全掌握"状态下点再来一轮，
+                    //    不传的话队列是空的，按钮点了跟没点一样（0917 他报的就是这个形态）
+                    startNewRound(includeMastered = pendingCount == 0)
                 },
                 onBack = onBack,
             )
@@ -290,7 +300,17 @@ fun ReviewPage(onBack: () -> Unit) {
                         known = totalKnown,
                         unknown = totalUnknown,
                         pendingLeft = 0,
-                        onAgain = {},
+                        // 原来这里是空的 `{}`，配合同样被藏起来的按钮 = 点了没反应。
+                        // 现在给真动作：再练一轮（含已掌握）。（0917 阿亮报）
+                        onAgain = {
+                            totalKnown = 0
+                            totalUnknown = 0
+                            roundNo = 0
+                            queue = emptyList()
+                            wrongThisRound = emptyList()
+                            finished = false
+                            startNewRound(includeMastered = true)
+                        },
                         onBack = onBack,
                     )
                     else -> FinishState(
@@ -316,7 +336,12 @@ fun ReviewPage(onBack: () -> Unit) {
 
 /** 开场：告诉他还剩多少个、点一下开始 */
 @Composable
-private fun ReadyState(pending: Int, total: Int, onStart: () -> Unit) {
+private fun ReadyState(
+    pending: Int,
+    total: Int,
+    onStart: () -> Unit,
+    onStartMastered: () -> Unit,
+) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -331,7 +356,10 @@ private fun ReadyState(pending: Int, total: Int, onStart: () -> Unit) {
             Spacer(modifier = Modifier.height(10.dp))
             Text(
                 text = if (pending == 0) {
-                    "生词本一共 $total 个，都已经连对 ${VocabEntry.MASTERED_AT} 次了。\n再听点新的，攒点新词吧。"
+                    // 🔴【0917】原文案是"再听点新的，攒点新词吧" —— 等于把他关在门外。
+                    // 他现在只有十几个词句，练完就卡住了，明确说"学完了也要能继续学"。
+                    "生词本一共 $total 个，都已经连对 ${VocabEntry.MASTERED_AT} 次了。\n" +
+                        "想再练一遍也行 —— 答错会退回队列重新练。"
                 } else {
                     "生词本一共 $total 个。\n看到词先在心里想意思，点一下屏幕看答案。"
                 },
@@ -357,6 +385,28 @@ private fun ReadyState(pending: Int, total: Int, onStart: () -> Unit) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "连对 ${VocabEntry.MASTERED_AT} 次就算掌握（列表里 ★★★），继续练还能涨星",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (total > 0) {
+                // 全掌握了也得有按钮 —— 不然这一页只有一段"攒新词吧"的说明，他只能原路返回（0917 他报的）
+                Spacer(modifier = Modifier.height(28.dp))
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable(onClick = onStartMastered),
+                ) {
+                    Text(
+                        text = "再练一轮",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.padding(horizontal = 40.dp, vertical = 14.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "练的是已经掌握的词；答错就退回队列，重新攒 ★★★",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -808,7 +858,7 @@ private fun FinishState(
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = if (pendingLeft == 0) {
-                    "生词本里已经没有需要复习的了，漂亮。"
+                    "生词本里的都掌握了，想再练一遍随时来。"
                 } else {
                     "还有 $pendingLeft 个没掌握，想再练一轮随时来。"
                 },
@@ -820,20 +870,19 @@ private fun FinishState(
             Spacer(modifier = Modifier.height(28.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TextButton(onClick = onBack) { Text("回生词本") }
-                if (pendingLeft > 0) {
-                    Surface(
-                        shape = RoundedCornerShape(28.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable(onClick = onAgain),
-                    ) {
-                        Text(
-                            text = "再来一轮",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.padding(horizontal = 28.dp, vertical = 12.dp),
-                        )
-                    }
+                // 🔴 按钮不再只在 pendingLeft > 0 时给 —— 全掌握时也得能接着练（0917 阿亮报）
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable(onClick = onAgain),
+                ) {
+                    Text(
+                        text = "再来一轮",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.padding(horizontal = 28.dp, vertical = 12.dp),
+                    )
                 }
             }
         }

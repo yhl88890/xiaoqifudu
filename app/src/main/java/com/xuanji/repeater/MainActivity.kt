@@ -1124,6 +1124,12 @@ class MainActivity : ComponentActivity() {
             // 听起来像「视频切回来自动播放、播放键却显示没播」的串音错觉。
             // （反向：离开视频模式时 VideoPage 的 onDispose 会 stopPlayback 停掉视频，无需这里再处理）
             if (page == Page.VIDEO) PlayerService.instance?.pause()
+            // 🔴【0917 阿亮报】音频正在播的时候进复习，音频居然接着放，跟卡片自己的发音串在一起，
+            // 也盖住他"心里先想意思"的注意力 ⇒ 进复习页把音频暂停。
+            // 用 pause 不用 stop：位置留着，回播放页按一下就能接着听。
+            // ⚠️ 只停复习页，**别顺手把阅读模式/生词本也停了** —— 阅读模式本来就是"边听边看"，
+            //    之前"阅读无缝接管音频"是刻意做的（见 0904 那几轮），停了就是回退。
+            if (page == Page.REVIEW) PlayerService.instance?.pause()
         }
 
         // Phase3-步骤2：订阅「当前播放源」唯一真值。
