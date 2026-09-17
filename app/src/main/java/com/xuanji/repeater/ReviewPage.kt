@@ -100,7 +100,14 @@ fun ReviewPage(onBack: () -> Unit) {
     var accentOpen by remember { mutableStateOf(false) }
 
     /**
-     * 开新一轮：从"未掌握"里挑 [batchSize] 个，优先挑最久没看的。
+     * 开新一轮：挑 [batchSize] 个，优先挑最久没看的。
+     *
+     * `includeMastered`：
+     *  - `false`（默认）—— **只挑没掌握的**。给「开始复习」用：进复习就该先练不会的。
+     *  - `true` —— 已掌握的也一起进池子。给「再来一轮」用 ⇒ **整本重练一遍**。
+     *
+     * 🔴 「再来一轮」永远传 true。见下面 onAgain 里的长注释：传 false 时如果只剩 1 个没掌握，
+     *    池子就只有那 1 个，会出现"连点几次再来一轮都是同一张卡"的蠢样子（0917 阿亮报）。
      *
      * 注意这里只在用户点「开始复习」/「再来一轮」时被调用一次，
      * 不存在"队列空了自动补"的隐式逻辑 —— 之前就是那么写的，
@@ -248,9 +255,16 @@ fun ReviewPage(onBack: () -> Unit) {
                     queue = emptyList()
                     wrongThisRound = emptyList()
                     finished = false
-                    // 🔴 必须带上 includeMastered：在"全掌握"状态下点再来一轮，
-                    //    不传的话队列是空的，按钮点了跟没点一样（0917 他报的就是这个形态）
-                    startNewRound(includeMastered = pendingCount == 0)
+                    // 🔴🔴 「再来一轮」= **重新开一整轮（含已掌握）**，永远传 true。
+                    //
+                    // 这里原来写的是 `includeMastered = pendingCount == 0`，想表达"没掌握的就练没掌握的"，
+                    // 结果造出一个很蠢的死循环（0917 阿亮报）：
+                    //   他生词本里只剩 1 个长句没掌握 ⇒ pendingCount=1 ⇒ includeMastered=false
+                    //   ⇒ 池子 = 未掌握 = 只有那 1 个长句 ⇒ 点一次"再来一轮"还是它，再点还是它……
+                    //   直到他对了 3 次、那句子凑够 3 星变成"已掌握"、pendingCount 归零，
+                    //   才轮到整本列表出来 —— 他说的"第三轮后才出来"就是这个。
+                    // ⇒ 「再来一轮」在用户脑子里就是"整本再练一遍"，不是"补零头"。
+                    startNewRound(includeMastered = true)
                 },
                 onBack = onBack,
             )
@@ -324,7 +338,8 @@ fun ReviewPage(onBack: () -> Unit) {
                             queue = emptyList()
                             wrongThisRound = emptyList()
                             finished = false
-                            startNewRound()
+                            // 同上：必须整本重来，不能只补未掌握的（否则只剩 1 个时会卡在同一张卡上）
+                            startNewRound(includeMastered = true)
                         },
                         onBack = onBack,
                     )

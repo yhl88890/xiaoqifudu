@@ -78,6 +78,14 @@ import kotlinx.coroutines.delay
  * 现在改成：**分区标题在卡片外（主色小字加粗）、设置项在卡片内（常规正文）**，
  * 靠「容器」而不是靠「字号差」区分，一眼就能分开。
  */
+/**
+ * 「试听这个音色」用的范文。
+ * ⚠️ 必须**长过有道的长度上限**（英音 40 字符），否则这段会走去有道、试不出在线合成那条路。
+ * 这句 94 个字符，稳过。
+ */
+private const val SPEAK_TEST_SENTENCE =
+    "The best way to improve your English is to listen to real conversations every single day."
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsPage(
@@ -197,12 +205,54 @@ fun SettingsPage(
                     )
                 }
                 Text(
-                    text = "自动：单词和短句用有道真人音（更自然），整句太长的话有道读不了，会自动改用本地发音；" +
+                    text = "自动：单词和短句用有道真人音（更自然）；整句太长的话有道读不了，" +
+                        "会自动改用在线语音合成（就是「识别」里填的那个 key，不用另外注册）；" +
                         "只用本地发音：完全不联网，没网也能听。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
                 )
+                // 🔴 长句走在线合成，音色可选（v21）。不给入口的话，他觉得音色难听就只能回来找我改代码。
+                var sfVoice by remember { mutableStateOf(SpeakPrefs.loadSfVoice(context)) }
+                Text(
+                    text = "长句用哪个音色",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SpeakPrefs.SF_VOICES.forEach { (id, label) ->
+                        FilterChip(
+                            selected = sfVoice == id,
+                            onClick = {
+                                sfVoice = id
+                                SpeakPrefs.saveSfVoice(context, id)
+                            },
+                            label = { Text(label) },
+                        )
+                    }
+                }
+                Text(
+                    text = "长句子超过有道的长度上限，就用这个音色在线合成；" +
+                        "单词和短句还是有道真人音，不受这里影响。换个音色后，之前听过的长句要重新合成一次。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                // 🔴 试听 = 自检。长句没声音的毛病以前是**静默失败**，只能远程看日志猜，
+                //    给他一个按钮：念一遍 + Toast 说明"这次走的是哪条通道"，出问题他自己就看见了。
+                TextButton(
+                    onClick = {
+                        Toast.makeText(context, "试听中…", Toast.LENGTH_SHORT).show()
+                        Pronounce.testLongSentence(SPEAK_TEST_SENTENCE) { msg ->
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                ) { Text("试听这个音色") }
                 // 本地发音靠系统的 TTS 引擎，国内不少 ROM 没预装英文语音包 ⇒ 主动提示，别让他以为坏了
                 var ttsStatus by remember { mutableStateOf(Pronounce.ttsStatus()) }
                 LaunchedEffect(Unit) {
@@ -235,7 +285,7 @@ fun SettingsPage(
                 } else if (ttsStatus == Pronounce.TtsStatus.NotReady) {
                     Text(
                         text = "系统里没有可用的语音引擎，「本地发音」暂时用不了；" +
-                            "遇到长句子可能会没声音。可以先去系统设置里装一个。",
+                            "长句子会自动改用在线的语音合成，不影响听。想去系统设置里装也行。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(top = 8.dp),

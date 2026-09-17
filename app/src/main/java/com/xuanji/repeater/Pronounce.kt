@@ -5,6 +5,7 @@ import android.media.MediaPlayer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -12,6 +13,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.net.HttpURLConnection
@@ -50,6 +52,14 @@ import kotlin.coroutines.resume
  *     ① **HTTP 状态码能直接看到** —— 500 就是 500，立刻知道该换口音，不用靠超时去猜；
  *     ② 500 的 URL 再也不会喂给 MediaPlayer ⇒ 之前那个"prepare 卡死"的坑天然绕开了。
  *   缓存上限 [MAX_CACHE_FILES] 个文件，超了删最旧的。
+ *
+ * 🔴🔴 2026-09-17 长句改走**硅基流动 TTS**（v21，阿亮定：「句子就不走有道，走其他」）：
+ *   上一版让长句走**系统 TTS**，可系统 TTS 在阿亮真机上是"哑"的 —— 引擎在、`isLanguageAvailable`
+ *   返 AVAILABLE、`speak()` 也返 SUCCESS，但预置音色是 server 型（连不上就静默）⇒ 长句依旧没声。
+ *   ⇒ 改成 [speakLong] **三道防线**，目标是"任何情况下都得有声"：
+ *       ① **硅基流动 TTS**（CosyVoice2）—— 复用**「识别」里已经填过的那把 key**，不挑长度
+ *       ② 系统 TTS —— 离线，但国产 ROM 常没英文包
+ *       ③ **有道切块串播** —— 按语义切碎，每块都落在有道上限内，最差也是真人音
  */
 object Pronounce {
 
@@ -76,6 +86,20 @@ object Pronounce {
 
     /** TTS 语速。先固定 1.0；以后要做"慢速跟读"再把它开成设置项 */
     private const val TTS_SPEECH_RATE = 1.0f
+
+    // ---------- 硅基流动 TTS（长句专用，v21）----------
+    /** 语音合成端点。**跟「识别」是同一个 key**，所以阿亮不用再注册任何账号 */
+    private const val SF_ENDPOINT = "https://api.siliconflow.cn/v1/audio/speech"
+    /** 模型名。voice 字段要写成 `模型名:音色` 这种前缀形式 */
+    private const val SF_MODEL = "FunAudioLLM/CosyVoice2-0.5B"
+    /** 合成+下载的总超时。长句合成比下单词音频慢，给宽一点 */
+    private const val SF_TIMEOUT_MS = 20000L
+    /** socket 读超时（等服务器合成的时间） */
+    private const val SF_READ_TIMEOUT_MS = 20000
+    /** 切块串播时，单块的播放上限（一块约 40 字符 ≈ 8 秒，给足余量） */
+    private const val PLAY_TIMEOUT_MS = 20000L
+    /** 日志/缓存里给硅基流动用个标记，跟有道的 type 1/2 区分开 */
+    private const val SF_TYPE = 9
 
     // ---------- 本地缓存 ----------
     /** 缓存目录 `<cacheDir>/voice/`。用 cacheDir 不用 filesDir：系统空间紧张时清掉无所谓，重下就行 */
@@ -129,14 +153,182 @@ object Pronounce {
             return
         }
 
-        // ② 超长文本：有道两种口音都会 500，那两轮请求就别发了
-        if (w.length > UK_MAX_LEN && ttsReady && ttsSpeak(w, accent)) {
-            Log.i(TAG, "len=${w.length} 超过有道上限 $UK_MAX_LEN，改走本地 TTS")
+        // ② 超长文本：有道两种口音都会 500，那两轮请求就别发了 ⇒ 走长句专用通道
+        if (w.length > UK_MAX_LEN) {
+            speakLong(w, accent)
             return
         }
 
         // ③ 有道人声
         speakYoudao(w, accent)
+    }
+
+    /**
+     * 长句专用通道（v21）。**三道防线，目标是"任何情况下都得有声"**：
+     *   ① [sfFetchToCache] 硅基流动 TTS —— 复用「识别」那把 key，不挑长度，一句一次请求
+     *   ② 系统 TTS —— 离线，但国产 ROM 常没英文语音包（阿亮真机就发不出声）
+     *   ③ [speakYoudaoChunked] 有道切块串播 —— 切碎了喂给有道，最差也是真人音
+     *
+     * 【为什么必须三道】上一版只做了 ②，结果在阿亮机器上：引擎在、`speak()` 返 SUCCESS，
+     * 但预置音色是 server 型、连不上 ⇒ 静默。长句等于没修。所以 ① 顶上去当主力，③ 兜底。
+     */
+    private fun speakLong(w: String, accent: String) {
+        scope.launch(Dispatchers.IO) {
+            releasePlayer()
+
+            // ① 硅基流动
+            val f = withTimeoutOrNull(SF_TIMEOUT_MS) { sfFetchToCache(w) }
+            if (f != null && withTimeoutOrNull(PREPARE_TIMEOUT_MS) { playFile(f, SF_TYPE) } == true) {
+                Log.i(TAG, "长句走硅基流动 TTS len=${w.length}")
+                return@launch
+            }
+
+            // ② 系统 TTS
+            if (ttsSpeak(w, accent)) {
+                Log.i(TAG, "硅基流动拿不到，长句退回本地 TTS len=${w.length}")
+                return@launch
+            }
+
+            // ③ 有道切块（最后一道，保证有声）
+            Log.w(TAG, "硅基流动+本地TTS 都不行，长句改走有道切块 len=${w.length}")
+            speakYoudaoChunked(w, accent)
+        }
+    }
+
+    /**
+     * 向硅基流动要一段语音：POST，body 里的 `input` 就是要读的原文。
+     * 响应体**直接就是 mp3 二进制**（不是 JSON、不是 URL），所以照抄 [fetchToCache] 的
+     * "下到 .part 再原子改名"那套即可，缓存文件同样进 `<cacheDir>/voice/`。
+     *
+     * 拿不到（没填 key / 401 / 402 余额不足 / 超时 / 非 200）返回 null，交给调用方往下降级。
+     * ⚠️ 返回值是 `suspend` 的：整个合成 + 下载都在协程里，不会卡 UI。
+     */
+    private suspend fun sfFetchToCache(w: String): File? {
+        val ctx = appContext ?: return null
+        val key = AsrPrefs.loadKey(ctx).trim()
+        if (key.isEmpty()) {
+            Log.i(TAG, "没填过 API key（设置→识别），硅基流动 TTS 跳过")
+            return null
+        }
+
+        val voice = SpeakPrefs.loadSfVoice(ctx)
+        val dir = File(ctx.cacheDir, CACHE_DIR)
+        if (!dir.exists() && !dir.mkdirs()) return null
+
+        // 🔴 缓存名必须带音色：换了音色要重新合成，不能跟旧音色串着用
+        val file = File(dir, "sf_${voice}_${md5(w)}.mp3")
+        if (file.length() > 0) return file
+
+        val tmp = File(dir, file.name + ".part")
+        if (tmp.exists()) tmp.delete()
+
+        // ⚠️ 别手拼 JSON：`input` 里但凡有引号/换行/中文，手拼出来的就是坏 JSON
+        val payload = JSONObject().apply {
+            put("model", SF_MODEL)
+            put("input", w)
+            put("voice", "$SF_MODEL:$voice")
+            put("response_format", "mp3")
+            put("speed", 1.0)
+        }.toString()
+
+        var conn: HttpURLConnection? = null
+        var ok = false
+        try {
+            conn = (URL(SF_ENDPOINT).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = SF_READ_TIMEOUT_MS
+                doOutput = true
+                setRequestProperty("Authorization", "Bearer $key")
+                setRequestProperty("Content-Type", "application/json")
+            }
+            conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+
+            val code = conn.responseCode
+            if (code == 200) {
+                conn.inputStream.use { input ->
+                    tmp.outputStream().use { out ->
+                        val buf = ByteArray(8192)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                        }
+                    }
+                }
+                ok = tmp.length() > 0
+            } else {
+                // 401 key 错 / 402 余额不足 / 4xx 参数不对 —— 都降级，但日志要能看出是哪种
+                val msg = runCatching { conn.errorStream?.bufferedReader()?.readText() }.getOrNull()
+                Log.w(TAG, "硅基流动 TTS 失败 HTTP $code ${msg?.take(160)}")
+            }
+        } catch (e: CancellationException) {
+            tmp.delete()
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "硅基流动 TTS 异常: ${e.message}")
+        } finally {
+            try { conn?.disconnect() } catch (_: Exception) {}
+        }
+
+        if (!ok) {
+            tmp.delete()
+            return null
+        }
+        if (!tmp.renameTo(file)) {
+            tmp.delete()
+            return null
+        }
+        trimCacheIfNeeded(dir)
+        return file
+    }
+
+    /**
+     * 最后一道兜底：把长句切成 ≤ [UK_MAX_LEN] 的几块，依次喂给有道。
+     * 切点复用断句那套 [cutTextAtWord]（优先句末标点/逗号/连接词，其次词边界），
+     * 所以听感上是**在自然停顿处换气**，不会切在半个单词中间。
+     */
+    private suspend fun speakYoudaoChunked(w: String, accent: String) {
+        val parts = chunkForYoudao(w)
+        Log.i(TAG, "长句切成 ${parts.size} 块：${parts.joinToString(" | ") { it.take(16) }}")
+        for ((i, p) in parts.withIndex()) {
+            // 短的照旧走美音，长的走英音 —— 跟单词那边同一套规则
+            val type = if (accent != "uk" && p.length <= US_MAX_LEN) 2 else 1
+            val f = withTimeoutOrNull(DOWNLOAD_TIMEOUT_MS) { fetchToCache(p, type) } ?: continue
+            // 必须等这一块播完再播下一块，否则几块会叠在一起
+            val done = withTimeoutOrNull(PLAY_TIMEOUT_MS) { playFileAndWait(f, type) } ?: false
+            if (!done) {
+                Log.w(TAG, "切块第 ${i + 1}/${parts.size} 块没播完，放弃剩下的")
+                return
+            }
+        }
+    }
+
+    /**
+     * 把文本切成若干块，每块 ≤ [maxLen]，**切出来的块拼起来 == 原文（不丢字）**。
+     * 给 [cutTextAtWord] 一个"希望切在 maxLen 处"的比例，让它自己在附近找语义停顿。
+     */
+    private fun chunkForYoudao(text: String, maxLen: Int = UK_MAX_LEN): List<String> {
+        val out = ArrayList<String>()
+        var rest = text.trim()
+        var guard = 0
+        while (rest.length > maxLen && guard++ < 40) {
+            val head = cutTextAtWord(rest, maxLen.toDouble() / rest.length)
+            if (head.isEmpty() || head.length >= rest.length) {
+                // 兜底：语义切点没找到（比如一长串没空格的字符）⇒ 硬切，但别切在词中间
+                val hard = rest.substring(0, maxLen)
+                val sp = hard.lastIndexOf(' ')
+                val cut = if (sp > maxLen / 2) sp else maxLen
+                out.add(rest.substring(0, cut).trim())
+                rest = rest.substring(cut).trim()
+            } else {
+                out.add(head)
+                rest = rest.removePrefix(head).trim()
+            }
+        }
+        if (rest.isNotEmpty()) out.add(rest)
+        return out
     }
 
     /** 有道人声这条路：本地缓存优先，拿不到就换另一个口音再试 */
@@ -291,6 +483,53 @@ object Pronounce {
             }
         }
 
+    /**
+     * 播一个本地文件并**等它整段播完**才返回（切块串播专用）。
+     * 跟 [playFile] 的区别：那个 prepared 就返回（点一下喇叭够用），
+     * 这个要等到 `onCompletion` —— 否则几块会同时响，糊成一团。
+     */
+    private suspend fun playFileAndWait(f: File, type: Int): Boolean =
+        suspendCancellableCoroutine { cont ->
+            var settled = false
+            val mp = MediaPlayer()
+
+            fun releaseMine() {
+                try { mp.stop() } catch (_: Exception) {}
+                try { mp.release() } catch (_: Exception) {}
+                if (player === mp) player = null
+            }
+
+            fun finish(ok: Boolean) {
+                if (settled) return
+                settled = true
+                if (cont.isActive) cont.resume(ok)
+            }
+
+            try {
+                mp.setOnPreparedListener {
+                    player = mp
+                    mp.start()
+                }
+                mp.setOnCompletionListener {
+                    releaseMine()
+                    finish(true)
+                }
+                mp.setOnErrorListener { _, what, extra ->
+                    Log.w(TAG, "切块播放出错 what=$what extra=$extra type=$type")
+                    releaseMine()
+                    finish(false)
+                    true
+                }
+                cont.invokeOnCancellation { releaseMine() }
+                mp.setDataSource(f.absolutePath)
+                mp.prepareAsync()
+            } catch (e: Exception) {
+                Log.w(TAG, "playFileAndWait 失败 type=$type: ${e.message}")
+                releaseMine()
+                finish(false)
+            }
+        }
+
     // ---------- 本地 TTS ----------
 
     /** 预热引擎。初始化回调是异步的，就绪前 [speak] 不会走 TTS 分支 */
@@ -350,6 +589,44 @@ object Pronounce {
             Log.w(TAG, "TTS speak 异常: ${e.message}")
             false
         }
+    }
+
+    /**
+     * 自检（设置页「试听」按钮用）：拿一句范文走一遍**跟真实长句完全一样**的通道，
+     * 念出来 + 用大白话回报"这次用的是哪条通道"。
+     *
+     * 【为什么必须要有它】长句没声音这类毛病的失败是**静默的** —— 界面上什么都不会发生，
+     * 只能靠远程看 logcat 去猜卡在哪一步，阿亮为此白跑了两轮。
+     * 有了它：没填 key / key 不对 / 余额不足 / 网络不通 / 能下不能播，他自己点一下就看见。
+     */
+    fun testLongSentence(text: String, onResult: (String) -> Unit) {
+        scope.launch(Dispatchers.Main) {
+            val msg = withContext(Dispatchers.IO) {
+                val ctx = appContext ?: return@withContext "App 还没就绪，稍后再试"
+                releasePlayer()
+
+                if (AsrPrefs.loadKey(ctx).isBlank()) {
+                    if (ttsSpeak(text, "us")) "没填 API key（去上面「识别」那个框里填一个）——这次用的是系统本地发音"
+                    else "没填 API key，系统里也没有英文语音包 —— 长句子会没声音"
+                } else {
+                    val f = withTimeoutOrNull(SF_TIMEOUT_MS) { sfFetchToCache(text) }
+                    if (f != null && withTimeoutOrNull(PREPARE_TIMEOUT_MS) { playFile(f, SF_TYPE) } == true) {
+                        "在线合成正常，音色「${sfVoiceLabel(ctx)}」"
+                    } else if (ttsSpeak(text, "us")) {
+                        "在线合成没成功（key 不对 / 余额不足 / 网络不通）——这次用的是系统本地发音"
+                    } else {
+                        "在线合成没成功，系统本地发音也不行 —— 长句会自动改成有道切块朗读"
+                    }
+                }
+            }
+            onResult(msg)
+        }
+    }
+
+    /** 音色 id → 中文标签，找不到就原样返回（设置页显示用） */
+    private fun sfVoiceLabel(ctx: Context): String {
+        val id = SpeakPrefs.loadSfVoice(ctx)
+        return SpeakPrefs.SF_VOICES.firstOrNull { it.first == id }?.second ?: id
     }
 
     /** 设置页拿它判断要不要提示"去系统里装英文语音包" */
