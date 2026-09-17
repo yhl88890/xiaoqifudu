@@ -251,10 +251,18 @@ fun ReviewPage(onBack: () -> Unit) {
                         // 🔴 用条目 id 当 key：换下一张时整棵卡片是全新实例，
                         // 上一张的 fadeOut 残留不可能渲染到新词上面（防答案泄露的第二道保险）。
                         //
-                        // 自动发音：key 用的是 current.id，所以"换了一张卡"= key 变了 = effect 重跑，
-                        // 正好一次念一个新词。千万不能拿 queue.size 或别的东西当 key ——
-                        // 那样翻面（flipped 变化）或队列里重排都会把它再触发一次，变成反复念。
-                        LaunchedEffect(current.id, autoSpeak, accent) {
+                        // 自动发音：key **只认 current.id** —— "换了一张卡" = id 变 = effect 重跑，
+                        // 正好一次念一个新词。
+                        //
+                        // 🔴🔴 绝不能把 autoSpeak / accent 塞进 key（0917 修掉的老 bug）：
+                        // 开关的 onToggle 和换口音的 pickAccent **各自已经显式念过一遍**了，
+                        // 再让 key 变化触发这个 effect，同一句就会被读两遍 ——
+                        // 阿亮听到的就是"开了自动发音，字念了两遍"。
+                        // 所以这里只认 id：id 没变就绝不再念。
+                        //
+                        // 🔴 也绝不能拿 queue.size 当 key：翻面（flipped 变化）或队列重排
+                        // 都会把它再触发一次，变成反复念。
+                        LaunchedEffect(current.id) {
                             if (autoSpeak) Pronounce.speak(current.text, accent)
                         }
                         ReviewCard(
