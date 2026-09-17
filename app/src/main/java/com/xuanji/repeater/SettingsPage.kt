@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,7 +39,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -177,34 +175,18 @@ fun SettingsPage(
             // ---------------- 发音 ----------------
             SettingsGroup("发音") {
                 var speakSource by remember { mutableStateOf(SpeakPrefs.loadSource(context)) }
-                Text(
-                    text = "朗读用哪个声音",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 6.dp),
+                // 【0917 阿亮："一个功能尽量只占一行"】原来「朗读用哪个声音」是
+                //    标题 1 行 + 两颗 chip 1 行 = 2 行；现在收成「标签 + 右侧按钮」1 行。
+                PickerRow(
+                    label = "朗读用哪个声音",
+                    options = listOf(SpeakPrefs.SOURCE_AUTO, SpeakPrefs.SOURCE_TTS),
+                    current = speakSource,
+                    labelOf = { if (it == SpeakPrefs.SOURCE_AUTO) "自动" else "只用本地发音" },
+                    onPick = {
+                        speakSource = it
+                        SpeakPrefs.saveSource(context, it)
+                    },
                 )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    FilterChip(
-                        selected = speakSource == SpeakPrefs.SOURCE_AUTO,
-                        onClick = {
-                            speakSource = SpeakPrefs.SOURCE_AUTO
-                            SpeakPrefs.saveSource(context, SpeakPrefs.SOURCE_AUTO)
-                        },
-                        label = { Text("自动") },
-                    )
-                    FilterChip(
-                        selected = speakSource == SpeakPrefs.SOURCE_TTS,
-                        onClick = {
-                            speakSource = SpeakPrefs.SOURCE_TTS
-                            SpeakPrefs.saveSource(context, SpeakPrefs.SOURCE_TTS)
-                        },
-                        label = { Text("只用本地发音") },
-                    )
-                }
                 // 🔴🔴【0917 阿亮报"这两个选项我看着迷糊"】他原话："朗读用哪个声音？然后有自动
                 //    跟只用本地发音，然后下面是长句用哪个音色 —— 这朗读跟长句它们之间的相互关系
                 //    是怎样的？" 他迷糊是有道理的，原来的写法的确看不出层级：
@@ -230,50 +212,56 @@ fun SettingsPage(
                     text = "自动模式下，超过 40 字的句子用哪个音色",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (autoMode) dim else dimOff,
-                    modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
+                    // 【0917 省行】上面 PickerRow 自带 4dp 下留白，这里就不用再撑 14dp 了
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
                 )
-                Box {
-                    OutlinedButton(
-                        onClick = { sfMenu = true },
-                        enabled = autoMode,
-                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
-                    ) {
-                        Text(sfLabel, style = MaterialTheme.typography.bodyMedium)
-                        Spacer(modifier = Modifier.size(6.dp))
-                        Text("▾", style = MaterialTheme.typography.bodySmall)
-                    }
-                    DropdownMenu(
-                        expanded = sfMenu,
-                        onDismissRequest = { sfMenu = false },
-                    ) {
-                        SpeakPrefs.SF_VOICES.forEach { (id, label) ->
-                            DropdownMenuItem(
-                                // 勾选标记跟播放页「重播次数」那个下拉保持同一套写法
-                                text = { Text(if (id == sfVoice) "$label ✓" else label) },
-                                onClick = {
-                                    sfVoice = id
-                                    SpeakPrefs.saveSfVoice(context, id)
-                                    sfMenu = false
-                                },
-                            )
-                        }
-                    }
-                }
-                // 【0917 精简】原来这里还有一段「长句子超过有道的长度上限…」的说明，
-                // 已搬进「软件介绍 → 朗读用哪个声音」。
+                // 【0917 阿亮："把那个『试听这个音色』放到那几个音色的右边呀，那不就又少占一行吗"】
+                //    ⇒ 音色按钮和试听按钮并成同一行。
                 // 🔴 试听 = 自检。长句没声音的毛病以前是**静默失败**，只能远程看日志猜，
                 //    给他一个按钮：念一遍 + Toast 说明"这次走的是哪条通道"，出问题他自己就看见了。
                 //    ⚠️ 跟着音色一起置灰：这个按钮试的就是"在线合成"那条路，
                 //      选了「只用本地发音」再去点它，试的是当前不生效的东西，只会更迷糊。
-                TextButton(
-                    onClick = {
-                        Toast.makeText(context, "试听中…", Toast.LENGTH_SHORT).show()
-                        Pronounce.testLongSentence(SPEAK_TEST_SENTENCE) { msg ->
-                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box {
+                        OutlinedButton(
+                            onClick = { sfMenu = true },
+                            enabled = autoMode,
+                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
+                        ) {
+                            Text(sfLabel, style = MaterialTheme.typography.bodyMedium)
+                            Spacer(modifier = Modifier.size(6.dp))
+                            Text("▾", style = MaterialTheme.typography.bodySmall)
                         }
-                    },
-                    enabled = autoMode,
-                ) { Text("试听这个音色") }
+                        DropdownMenu(
+                            expanded = sfMenu,
+                            onDismissRequest = { sfMenu = false },
+                        ) {
+                            SpeakPrefs.SF_VOICES.forEach { (id, label) ->
+                                DropdownMenuItem(
+                                    // 勾选标记跟播放页「重播次数」那个下拉保持同一套写法
+                                    text = { Text(if (id == sfVoice) "$label ✓" else label) },
+                                    onClick = {
+                                        sfVoice = id
+                                        SpeakPrefs.saveSfVoice(context, id)
+                                        sfMenu = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            Toast.makeText(context, "试听中…", Toast.LENGTH_SHORT).show()
+                            Pronounce.testLongSentence(SPEAK_TEST_SENTENCE) { msg ->
+                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        enabled = autoMode,
+                    ) { Text("试听这个音色") }
+                }
                 // 本地发音靠系统的 TTS 引擎，国内不少 ROM 没预装英文语音包、甚至没有引擎 ⇒ 主动提示，别让他以为坏了
                 //
                 // 🔴【0917 阿亮报："红字说系统里没有可用语音引擎，我去系统设置里看我是有引擎的，多邻国都能用"】
@@ -381,28 +369,18 @@ fun SettingsPage(
                 )
 
                 if (remindOn) {
-                    Text(
-                        text = "多久换一个",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 10.dp, bottom = 6.dp),
+                    // 【0917 阿亮："生词提醒那一栏，多久换一个？那几个选项 15 / 30 / 1 小时 /
+                    //    2 小时，也给它弄成小弹窗放到『多久换一个』的右边，这不又少了两行吗"】
+                    PickerRow(
+                        label = "多久换一个",
+                        options = VocabReminder.INTERVAL_CHOICES,
+                        current = interval,
+                        labelOf = { if (it < 60) "$it 分钟" else "${it / 60} 小时" },
+                        onPick = {
+                            interval = it
+                            VocabReminder.saveInterval(context, it)
+                        },
                     )
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        VocabReminder.INTERVAL_CHOICES.forEach { m ->
-                            FilterChip(
-                                selected = interval == m,
-                                onClick = {
-                                    interval = m
-                                    VocabReminder.saveInterval(context, m)
-                                },
-                                label = { Text(if (m < 60) "$m 分钟" else "${m / 60} 小时") },
-                            )
-                        }
-                    }
                     // 【0917 精简】原来这里有一段「有词的时候轮播：只挑还没掌握的…」，
                     // 已搬进「软件介绍 → 在通知栏轮播生词」。
                 }
@@ -411,29 +389,19 @@ fun SettingsPage(
             // ---------------- 识别 ----------------
             SettingsGroup("识别 · 自动生成字幕") {
                 var asrProvider by remember { mutableStateOf(AsrPrefs.loadProvider(context)) }
-                Text(
-                    text = "识别服务商",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 6.dp),
+                // 【0917 阿亮："识别服务商也一样，那 3 个服务商也给它弄成点击小弹窗，
+                //    放到『识别服务商』这几个字的右边，这不又少了两行"】
+                PickerRow(
+                    label = "识别服务商",
+                    options = AsrProvider.values().toList(),
+                    current = AsrProvider.values().firstOrNull { it.name == asrProvider }
+                        ?: AsrProvider.SILICONFLOW,
+                    labelOf = { it.label },
+                    onPick = {
+                        asrProvider = it.name
+                        AsrPrefs.saveProvider(context, it.name)
+                    },
                 )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    maxItemsInEachRow = 3,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    AsrProvider.values().forEach { p ->
-                        FilterChip(
-                            selected = asrProvider == p.name,
-                            onClick = {
-                                asrProvider = p.name
-                                AsrPrefs.saveProvider(context, p.name)
-                            },
-                            label = { Text(p.label) },
-                        )
-                    }
-                }
                 var asrKey by remember { mutableStateOf(AsrPrefs.loadKey(context)) }
                 OutlinedTextField(
                     value = asrKey,
@@ -441,25 +409,17 @@ fun SettingsPage(
                         asrKey = it
                         AsrPrefs.saveKey(context, it)
                     },
-                    label = { Text("API Key") },
+                    // 【0917 阿亮："那几个框儿之前你把它改短了，现在看着改短了很别扭，
+                    //    你还不如把它整个铺开"】⇒ 撤销 v31 的 66% 收窄，恢复整行铺开。
+                    //    原来那行独立的"免费、免信用卡…"说明行也撤了 —— 信息并进 label，
+                    //    省一行；完整申请步骤在「关于 → 软件介绍」。
+                    label = { Text("API Key（免费注册）") },
                     placeholder = { Text("粘贴服务商提供的 Key，仅存本机") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
-                    // 【0917 收窄】原来是 fillMaxWidth() 撑满整行 —— 阿亮原话"一个功能选项里头
-                    //    拉了那么宽，我觉着不好"。收到 2/3 宽并居中。
                     modifier = Modifier
-                        .fillMaxWidth(0.66f)
-                        .align(Alignment.CenterHorizontally)
-                        .padding(top = 8.dp),
-                )
-                // 【0917 新增】阿亮："所有要填 API 的地方要跟人说清楚，去哪申请、搜哪个关键词。"
-                //    设置页只留这一行"怎么弄"的指引；完整的「哪个模型 / 为什么用它 / 免费吗」
-                //    全在「关于 → 软件介绍 → 在线识别用哪个模型、上哪申请」那一节。
-                Text(
-                    text = "免费、免信用卡。搜「硅基流动」注册即可，申请步骤见「关于 → 软件介绍」。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
                 )
             }
 
@@ -476,10 +436,8 @@ fun SettingsPage(
                     placeholder = { Text("粘贴浏览器 cookie 里的 SESSDATA") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
-                    // 【0917 收窄】同「识别」的 API Key：不再撑满整行。下面那段说明搬进了软件介绍。
-                    modifier = Modifier
-                        .fillMaxWidth(0.66f)
-                        .align(Alignment.CenterHorizontally),
+                    // 【0917 铺开】撤销 v31 的 66% 收窄 —— 他说改短了看着别扭。
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
 
@@ -492,22 +450,13 @@ fun SettingsPage(
                         translateModel = it
                         AsrPrefs.saveTranslateModel(context, it)
                     },
+                    // 【0917 铺开】撤销 v31 的 66% 收窄（同「识别」）。原来下面那行
+                    //    「不填也能用；填了才会自动给整批字幕配中文」也撤了 —— 信息并进
+                    //    placeholder，省一行。
                     label = { Text("翻译模型") },
-                    placeholder = { Text("Qwen/Qwen2.5-7B-Instruct") },
+                    placeholder = { Text("不填也行；填了才会自动配中文") },
                     singleLine = true,
-                    // 【0917 收窄】同「识别」的 API Key。
-                    modifier = Modifier
-                        .fillMaxWidth(0.66f)
-                        .align(Alignment.CenterHorizontally),
-                )
-                // 【0917】原来这里写的是"需 SiliconFlow Key。主模型排队/限流时自动切换 HY3 兜底。"
-                //    —— 那句话在设置页属于介绍，已搬进软件介绍。但"翻译模型"这个框光看名字
-                //    没人知道是干嘛的，所以留一行最短的"填了有什么用"，别的都不说。
-                Text(
-                    text = "不填也能用；填了才会自动给整批字幕配中文。用的是「识别」那同一把 Key。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
 
@@ -1055,6 +1004,66 @@ private fun DataRow(title: String, note: String? = null, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 2.dp, bottom = 4.dp),
             )
+        }
+    }
+}
+
+/**
+ * 【0917 阿亮："一个功能尽量只占一行，有限的屏幕里显示更多信息"】
+ *
+ * 「标签 + 右侧小按钮」的单行选择器：标签撑满左侧，按钮印着当前值，点开是下拉菜单。
+ *
+ * 原来是 `FlowRow` 铺一串 `FilterChip` —— 3 个选项就要吃掉 2 行、4 个就是 3 行
+ * （标题还占 1 行）。收成一行后，识别服务商 / 多久换一个 / 朗读用哪个声音各少占 1~2 行。
+ *
+ * ⚠️ 调用点注意：**同一行放不下时会挤** —— 标签用 `weight(1f)` 顶住，按钮不会被压掉，
+ *    但标签太长会自己换行。所以标签要短（≤ 8 个中文字）。
+ */
+@Composable
+private fun <T> PickerRow(
+    label: String,
+    options: List<T>,
+    current: T,
+    labelOf: (T) -> String,
+    onPick: (T) -> Unit,
+    enabled: Boolean = true,
+) {
+    var open by remember { mutableStateOf(false) }
+    val dim = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (enabled) dim else dim.copy(alpha = 0.38f),
+            modifier = Modifier.weight(1f),
+        )
+        Box {
+            OutlinedButton(
+                onClick = { open = true },
+                enabled = enabled,
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            ) {
+                Text(labelOf(current), style = MaterialTheme.typography.bodySmall)
+                Spacer(modifier = Modifier.size(6.dp))
+                Text("▾", style = MaterialTheme.typography.bodySmall)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                options.forEach { o ->
+                    DropdownMenuItem(
+                        // 勾选标记跟播放页「重播次数」那个下拉保持同一套写法
+                        text = { Text(if (o == current) labelOf(o) + " ✓" else labelOf(o)) },
+                        onClick = {
+                            onPick(o)
+                            open = false
+                        },
+                    )
+                }
+            }
         }
     }
 }
