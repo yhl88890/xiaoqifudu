@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -36,11 +37,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -201,36 +205,66 @@ fun SettingsPage(
                         label = { Text("只用本地发音") },
                     )
                 }
-                // 🔴 长句走在线合成，音色可选（v21）。不给入口的话，他觉得音色难听就只能回来找我改代码。
+                // 🔴🔴【0917 阿亮报"这两个选项我看着迷糊"】他原话："朗读用哪个声音？然后有自动
+                //    跟只用本地发音，然后下面是长句用哪个音色 —— 这朗读跟长句它们之间的相互关系
+                //    是怎样的？" 他迷糊是有道理的，原来的写法的确看不出层级：
+                //      · 「朗读用哪个声音」是**总开关**：决定走「自动」还是「只用本地发音」两条路；
+                //      · 「长句音色」只挂在「自动」那条路下面，而且只对 **超过 40 字**的句子生效
+                //        （常量见 Pronounce.UK_MAX_LEN=40）。
+                //    ⇒ 改了三处：① 标题写明从属关系和门槛 ② 选「只用本地发音」时整块置灰
+                //      ③ 8 个音色不再铺 4 行 chip，收成"一个按钮点开下拉"（他要"一个功能占一行"）。
+                //    ⚠️ 实情提醒：「只用本地发音」下 TTS 读不出来时仍会退回在线合成
+                //      （Pronounce.speakInternal 的兜底），所以这里只是**界面上不引导你去调**，
+                //      不是逻辑上彻底断掉，别把置灰理解成"这条通道被删了"。
+                val autoMode = speakSource == SpeakPrefs.SOURCE_AUTO
                 var sfVoice by remember { mutableStateOf(SpeakPrefs.loadSfVoice(context)) }
+                var sfMenu by remember { mutableStateOf(false) }
+                val sfLabel = SpeakPrefs.SF_VOICES.firstOrNull { it.first == sfVoice }?.second ?: sfVoice
+                // 置灰用的淡化色：Material 的禁用态惯例是 38% 不透明度
+                val dim = MaterialTheme.colorScheme.onSurfaceVariant
+                val dimOff = dim.copy(alpha = 0.38f)
+
                 Text(
                     // 【0917 精简】原来这上面有一段「自动：… 只用本地发音：…」的长说明，
                     // 已整段搬进「软件介绍 → 朗读用哪个声音」。设置页只留标签和控件。
-                    text = "长句用哪个音色",
+                    text = "自动模式下，超过 40 字的句子用哪个音色",
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (autoMode) dim else dimOff,
                     modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
                 )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    SpeakPrefs.SF_VOICES.forEach { (id, label) ->
-                        FilterChip(
-                            selected = sfVoice == id,
-                            onClick = {
-                                sfVoice = id
-                                SpeakPrefs.saveSfVoice(context, id)
-                            },
-                            label = { Text(label) },
-                        )
+                Box {
+                    OutlinedButton(
+                        onClick = { sfMenu = true },
+                        enabled = autoMode,
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
+                    ) {
+                        Text(sfLabel, style = MaterialTheme.typography.bodyMedium)
+                        Spacer(modifier = Modifier.size(6.dp))
+                        Text("▾", style = MaterialTheme.typography.bodySmall)
+                    }
+                    DropdownMenu(
+                        expanded = sfMenu,
+                        onDismissRequest = { sfMenu = false },
+                    ) {
+                        SpeakPrefs.SF_VOICES.forEach { (id, label) ->
+                            DropdownMenuItem(
+                                // 勾选标记跟播放页「重播次数」那个下拉保持同一套写法
+                                text = { Text(if (id == sfVoice) "$label ✓" else label) },
+                                onClick = {
+                                    sfVoice = id
+                                    SpeakPrefs.saveSfVoice(context, id)
+                                    sfMenu = false
+                                },
+                            )
+                        }
                     }
                 }
                 // 【0917 精简】原来这里还有一段「长句子超过有道的长度上限…」的说明，
                 // 已搬进「软件介绍 → 朗读用哪个声音」。
                 // 🔴 试听 = 自检。长句没声音的毛病以前是**静默失败**，只能远程看日志猜，
                 //    给他一个按钮：念一遍 + Toast 说明"这次走的是哪条通道"，出问题他自己就看见了。
+                //    ⚠️ 跟着音色一起置灰：这个按钮试的就是"在线合成"那条路，
+                //      选了「只用本地发音」再去点它，试的是当前不生效的东西，只会更迷糊。
                 TextButton(
                     onClick = {
                         Toast.makeText(context, "试听中…", Toast.LENGTH_SHORT).show()
@@ -238,6 +272,7 @@ fun SettingsPage(
                             Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                         }
                     },
+                    enabled = autoMode,
                 ) { Text("试听这个音色") }
                 // 本地发音靠系统的 TTS 引擎，国内不少 ROM 没预装英文语音包、甚至没有引擎 ⇒ 主动提示，别让他以为坏了
                 //
@@ -736,18 +771,39 @@ fun SettingsPage(
                                 Spacer(Modifier.height(12.dp))
                                 // 【0917 承接】设置页「发音」组原来那两段长说明（自动 / 只用本地发音、
                                 //    长句超过有道长度上限）整段搬到这里，跟原有的「朗读用哪个声音」合并成一条。
+                                // 🔴🔴【0917 重写】阿亮看着设置页那两个标题说"迷糊" ⇒ 这段介绍
+                                //    改成先讲清**层级**（谁是总开关、谁挂在谁下面），再讲细节。
+                                //    顺便把「40 字」这个门槛和"英文 40 字符≈7 个单词、所以长句才是
+                                //    常态"写进去 —— 这是他迷糊的最大来源（以为"长句"是特例）。
+                                //    ⚠️ 门槛常量在 Pronounce.UK_MAX_LEN=40；美音上限 US_MAX_LEN=16。
                                 IntroBlock(
-                                    "朗读用哪个声音",
-                                    "分两段走：单词和短句用有道的真人音，更自然，而且免费、不用注册；" +
-                                        "整句太长的话有道读不了，会自动改成在线语音合成 —— 用的就是你「识别」里" +
-                                        "填的那个 Key，不用另外注册。\n" +
-                                        "在线合成有 8 个音色（4 个女声、4 个男声），在「设置 → 发音 → 长句用哪个音色」里挑，" +
-                                        "挑完点旁边的「试听这个音色」当场听一句，它还会告诉你这次走的是哪条路。" +
-                                        "换音色之后，之前听过的长句要重新合成一次（缓存是按音色分开存的）。\n" +
-                                        "「只用本地发音」是完全不联网的模式，没网也能听：它靠的是手机系统自带的语音引擎。" +
-                                        "前提是系统里装了英文语音包 —— 没装的话设置里会红字提示，点「去系统设置下载」跟着走就行。\n" +
-                                        "要注意：卡正面那两颗「美音」「英音」，单词和短句是两个真的不同的音；" +
-                                        "但长句走的是在线合成，它没有英美音之分 —— 所以长句上点哪颗，听到的都是你选的那个音色。",
+                                    "朗读用哪个声音（这一项是总开关）",
+                                    "设置页「发音」里那两项不是并列的，是父子关系，所以容易看混 —— 这里说清。\n" +
+                                        "「朗读用哪个声音」是总开关，它决定整条路怎么走：\n" +
+                                        "· 选「自动」→ 按句子长短分两条：40 字以内走有道的真人音（更自然，免费、不用注册）；" +
+                                        "超过 40 字走在线语音合成（用你「识别」里填的那把 Key）。\n" +
+                                        "· 选「只用本地发音」→ 全部走手机系统自带的语音引擎，完全不联网，没网也能听。" +
+                                        "前提是系统里装了英文语音包，没装的话设置页会红字提示，点「去系统设置下载」跟着走就行。\n" +
+                                        "门槛要留意一下：「40 字」指的是 40 个字符，英文大概才 7 个单词 —— " +
+                                        "所以实际用起来，「超过 40 字」才是常态，大部分句子都会走在线合成那条路。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "自动模式下、超过 40 字的句子用哪个音色",
+                                    "就是上面那条在线合成的通道用哪个嗓子。一共 8 个音色（4 个女声、4 个男声），" +
+                                        "点开设置页那个按钮挑一个，挑完点「试听这个音色」当场听一句，" +
+                                        "它还会告诉你这次实际走的是哪条路。\n" +
+                                        "换个音色之后，之前听过的长句要重新合成一次（缓存是按音色分开存的）。\n" +
+                                        "如果「朗读用哪个声音」选了「只用本地发音」，这一项会变灰、点不动 —— " +
+                                        "那时候长句也走本机、不走在线合成，调它没用。这不是坏了。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "卡片上那两颗「美音」「英音」跟上面是什么关系",
+                                    "那两颗是给短句用的：单词和短句走有道，里面有真的英音、美音两套" +
+                                        "（美音超过 16 个字符会不够用，程序会自动换成英音）。\n" +
+                                        "但长句走的是在线合成，它没有英美音之分 —— 所以长句上点哪颗，" +
+                                        "听到的都是你在上面选的那个音色。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
