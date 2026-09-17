@@ -86,6 +86,16 @@ class PlayerService : Service() {
         /** 长句切分阈值：句长超过此值（ms）或字符数超过 LONG_SENTENCE_CHARS，在逗号处切分 */
         const val LONG_SENTENCE_MS = 6000L
         const val LONG_SENTENCE_CHARS = 40
+
+        /**
+         * loadAndPlay 发起后多久还没等到 onPrepared 就判定"prepareAsync 卡死"。
+         *
+         * 🔴【0917 阿亮报"播放暂停不管用、只有切歌能救回"的正解之一】
+         * 本地音频正常几十毫秒就 onPrepared；给 8 秒已经非常宽。
+         * 超时后再点播放键 = 直接重建播放器（而不是继续静静等），
+         * 否则这一处就是**永久失灵**：`togglePlayPause` 的准备中分支什么都不做。
+         */
+        const val PREPARE_STUCK_MS = 8000L
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -109,6 +119,15 @@ class PlayerService : Service() {
      *  未就绪时 playSentence 的 seek/pause 会错位或抛异常，故未就绪先记下待播句子，
      *  等 onPrepared 触发后再真正 seek+播放，避免「重启后点歌词播错句/状态不同步」。 */
     private var playerPrepared = false
+    /**
+     * 本次 loadAndPlay 的发起时刻（elapsedRealtime）。
+     *
+     * 🔴【0917 阿亮报"播放暂停不管用、只有切歌能救回"】`prepareAsync()` 有**永不回调**的可能
+     * （坏文件 / 存储卡抽风 / 被同路径的另一次 load 顶掉）。那时 `playerPrepared` 一直是 false，
+     * 而 `togglePlayPause` 的"准备中"分支只会静静 return ⇒ 播放键**永久失灵**。
+     * 有了这个时间戳就能判"准备太久 = 卡死"，就地重建（见 [PREPARE_STUCK_MS]）。
+     */
+    private var loadStartedAt = 0L
     private var pendingPlaySentenceIndex = -1
     private var pendingPlaySentenceStopAtEnd = false
     private var pendingPlaySentenceTimes = 1
@@ -240,7 +259,16 @@ class PlayerService : Service() {
                 // 播放/暂停键就永久失灵（只能靠切歌救回），正是「界面冻住、只有上下曲管用」的一环。
                 // 现在 loadAndPlay 会保留同一首歌的待播句：onPrepared 时若待播句已就绪优先播该句，
                 // 否则先按当前进度播、句子到位后再由补播机制跳到用户点的那句。
-                if (!s.isPlaying) {
+                //
+                // 🔴🔴【0917 阿亮报"播放暂停又不管用了"——第二次复发】还漏了另一半：
+                //   `if (!s.isPlaying)` 这个条件在"**state 说在播、实际 prepare 永远不回来**"时是 false
+                //   ⇒ 什么都不做，播放键就是块砖头。
+                //   `_state.isPlaying` 在切歌那一瞬间仍是**上一首的 true**（loadAndPlay 不清它，
+                //   要等 onPrepared 才更新）⇒ 这个窗口里只要 prepareAsync 卡住，就永久停在死分支。
+                //   补一条"准备超时 = 卡死 ⇒ 重建"的判定，覆盖掉这个洞。
+                val stuck = android.os.SystemClock.elapsedRealtime() - loadStartedAt > PREPARE_STUCK_MS
+                if (!s.isPlaying || stuck) {
+                    if (stuck) android.util.Log.w("XJPlayer", "prepare 超过 ${PREPARE_STUCK_MS}ms 没回调，判定卡死，重建播放器续播")
                     loadAndPlay(s.currentItem, autoPlay = true, initialPositionMs = s.positionMs)
                 }
             }
@@ -260,21 +288,37 @@ class PlayerService : Service() {
         }
         // 开始/恢复播放前抢回音频焦点（来电等抢占后也能重新拿到），否则系统可能继续把声音路由给别人
         requestAudioFocus()
-        val p = player ?: return
-        // 不用 !playerPrepared 守门：准备中调 start() 会抛异常（被下方 try/catch 吞掉，不崩），
-        // 但若 playerPrepared 因故卡 false 会让所有控制永久失效（只能切歌救回）。
         val s = _state.value
+        // 🔴【0917 阿亮报"整个界面没反应、播放暂停都不管用"】player 为 null 时老代码直接 return，
+        // 什么都不做 ⇒ 播放键跟死了一样。现在就地按当前进度重建（保留 currentItem / positionMs）。
+        val p = player ?: run {
+            if (s.currentItem != null) {
+                android.util.Log.w("XJPlayer", "play(): player 为空，按当前进度重建播放器")
+                loadAndPlay(s.currentItem, autoPlay = true, initialPositionMs = s.positionMs)
+            }
+            return
+        }
         // 停止后重新播放：重新挂载前台通知（否则 Android 8+ 会限制后台播放）
         if (!foregroundActive) {
             startForeground(NOTIFICATION_ID, buildNotification())
             foregroundActive = true
         }
+        // 不用 !playerPrepared 守门：准备中调 start() 会抛异常（被下方 try/catch 吞掉，不崩），
+        // 但若 playerPrepared 因故卡 false 会让所有控制永久失效（只能切歌救回）。
         if (!p.isPlaying) {
             try {
                 p.start()
                 applySpeed(p, s.speed)
-            } catch (_: Exception) {
-                // 极少数仍未准备好的情况：不抛异常、不更新 isPlaying，等下次再点
+            } catch (e: Exception) {
+                // 🔴🔴【0917 阿亮报"播放暂停不管用了、只有切歌能救回"】
+                // 走到这儿说明 MediaPlayer 已经处于 Error 态（start() 抛 IllegalStateException）。
+                // 老代码在这里**静默 return**：状态不更新、播放器不重建 ⇒ 再点一万次还是走到这儿，
+                // 按钮等于死了，只有切歌（走 loadAndPlay 重建）才能救 —— 阿亮描述的现象一字不差。
+                // 现在就地自愈：按"当前进度"重建播放器并续播，一次点击就能复活。
+                android.util.Log.w("XJPlayer", "start() 失败，播放器已进 Error 态，就地重建续播: ${e.message}")
+                if (s.currentItem != null) {
+                    loadAndPlay(s.currentItem, autoPlay = true, initialPositionMs = s.positionMs)
+                }
                 return
             }
         }
@@ -292,8 +336,12 @@ class PlayerService : Service() {
         }
         // 用户主动暂停：释放音频焦点，让别的音视频 App 能正常出声
         abandonAudioFocus()
-        val p = player ?: return
-        if (p.isPlaying) {
+        // 🔴【0917】这里原来是 `val p = player ?: return` —— player 一旦为 null（服务被回收/释放过），
+        // 后面的 `isPlaying = false` / stopTicker 全被跳过 ⇒ 状态卡在"正在播"，
+        // 播放键显示成暂停图标、点了却没反应，看着就是"键失零"。
+        // 改成：player 有没有都要把状态、ticker、通知收干净。
+        val p = player
+        if (p != null && p.isPlaying) {
             try {
                 p.pause()
             } catch (_: Exception) {
@@ -683,6 +731,7 @@ class PlayerService : Service() {
     // ---------------- 播放器内部 ----------------
 
     private fun loadAndPlay(item: AudioItem, autoPlay: Boolean, initialPositionMs: Long = 0L) {
+        loadStartedAt = android.os.SystemClock.elapsedRealtime()   // 供「prepare 卡死」判定用
         player?.release()
         val p = MediaPlayer()
         player = p

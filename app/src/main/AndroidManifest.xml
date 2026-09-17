@@ -21,6 +21,25 @@
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
 
+    <!--
+      🔴🔴 系统 TTS（文字转语音）必须在 <queries> 里声明，**少这一块 TextToSpeech 初始化会直接返 ERROR**。
+
+      为什么：targetSdk >= 30（我们这个 35）之后有**包可见性过滤**，
+      `TextToSpeech` 构造时要靠 PackageManager 去找 `INTENT_ACTION_TTS_SERVICE` 的引擎服务，
+      没声明就"看不见"任何引擎 ⇒ 回调拿 ERROR ⇒ 我们这边判定成"没有语音引擎"。
+      官方文档原文：Apps targeting Android 11 that use text-to-speech should declare
+      `TextToSpeech.Engine#INTENT_ACTION_TTS_SERVICE` in the `<queries>` elements of their manifest.
+
+      ⚠️ 最容易误判的地方：**系统「文字转语音设置」页自己能试听发声**，
+      因为那是系统 App，不受这个过滤约束。所以"系统里能发音 + 我们 App 报没引擎"是**同一个原因**，
+      不是两个矛盾的现象 —— 0917 阿亮真机就卡在这上面。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:name=".XuanjiApp"
         android:label="@string/app_name"

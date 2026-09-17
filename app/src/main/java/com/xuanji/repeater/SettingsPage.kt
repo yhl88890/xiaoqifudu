@@ -283,6 +283,7 @@ fun SettingsPage(
                             color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.padding(top = 8.dp),
                         )
+                        TtsDiagLine(ttsVer)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             TextButton(onClick = { openTtsSettings(context) }) {
                                 Text("去系统设置下载")
@@ -299,6 +300,7 @@ fun SettingsPage(
                             color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.padding(top = 8.dp),
                         )
+                        TtsDiagLine(ttsVer)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             TextButton(onClick = { openTtsSettings(context) }) {
                                 Text("去系统设置看看")
@@ -738,7 +740,8 @@ private fun openTtsSettings(ctx: Context) {
     }
     Toast.makeText(
         ctx,
-        "打不开系统设置，请手动去「设置 → 语言 / 无障碍 → 文字转语音」里下载英文语音包",
+        "打不开系统设置，请手动去「设置 → 无障碍（或更多设置）→ 文字转语音输出」：" +
+            "先看「首选引擎」是不是你想要的那个，再给它下英文语音包",
         Toast.LENGTH_LONG,
     ).show()
 }
@@ -755,6 +758,24 @@ private fun remindToastText(r: VocabReminder.Result): String = when (r) {
     VocabReminder.Result.DoneToday -> "已开启，今天已经复习过了，明天再提醒你"
     VocabReminder.Result.NoPermission -> "已开启，但系统没给通知权限，发不出来"
     VocabReminder.Result.Off -> "已关闭提醒"
+}
+
+/**
+ * 🔴【0917 二次排查】**只在出错时露脸的一行诊断** —— 系统里到底有几个 TTS 引擎能被我们看见。
+ *
+ * 存在的唯一理由是分清两种"没引擎"，它们修法完全不同（见 `Pronounce.engineReport()`）：
+ *   - **0 个** ⇒ 引擎在但**我们看不见** ⇒ manifest 少了 `<queries>` 的包可见性声明；
+ *   - **有引擎**却还是初始化失败 ⇒ 是引擎服务本身／默认引擎指向了坏引擎。
+ * 这轮确认完就可以删掉，别让它长期占着界面。
+ */
+@Composable
+private fun TtsDiagLine(ttsVer: Int) {
+    Text(
+        text = remember(ttsVer) { Pronounce.engineReport() },
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 4.dp),
+    )
 }
 
 @Composable

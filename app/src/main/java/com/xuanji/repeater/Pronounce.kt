@@ -1,6 +1,7 @@
 package com.xuanji.repeater
 
 import android.content.Context
+import android.content.Intent
 import android.media.MediaPlayer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -25,6 +26,7 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.CancellationException
+import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 
 /**
@@ -125,6 +127,26 @@ object Pronounce {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     @Volatile private var player: MediaPlayer? = null
 
+    /**
+     * 🔴🔴【0917 阿亮报"从复习出来回到播放页，整个界面都没反应了、播放暂停也不管用"】
+     * **TTS 的活必须离开主线程。**
+     *
+     * 为什么：`TextToSpeech` 的 `isLanguageAvailable` / `setLanguage` / `setSpeechRate` / `speak`
+     * / `stop` **全是 binder 调用** —— 它们会把调用线程一路挂到引擎进程上。引擎只要卡住
+     * （国产 ROM 上很常见：引擎正在重启、在等语音包、或者 build 的绑定本身是坏的），
+     * 调用线程就跟着一起挂死。
+     *
+     * 而 [speak] 的调用方全是主线程：`onClick = { Pronounce.speak(...) }`、复习页的
+     * `LaunchedEffect(current.id)`。以前这些 binder 调用就在主线程上同步跑 ⇒
+     * **整个界面冻住**，连播放键都没反应 —— 阿亮描述的"整个界面又没用了"。
+     *
+     * 用**单线程**执行器而不是 `Dispatchers.IO`：调用顺序仍然严格按点击先后走，
+     * 不会出现"两句发音并发、后点的先出声 / setLanguage 被另一个线程改掉"。
+     */
+    private val ttsWorker = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "xj-tts").apply { isDaemon = true }
+    }
+
     // ---------- 本地 TTS ----------
     /**
      * 系统 TTS 引擎。**初始化是异步的，首次可能要 1~2 秒** ⇒ 在 [init] 里就预热，
@@ -139,6 +161,19 @@ object Pronounce {
      */
     private enum class TtsInit { Pending, Ready, Failed }
     @Volatile private var ttsInit = TtsInit.Pending
+
+    /**
+     * 引擎有没有英文语音 —— **缓存值，不在主线程现查**。
+     *
+     * 🔴 为什么必须缓存：`isLanguageAvailable()` 是 binder 调用。老写法是设置页组合时
+     * `remember(ttsVer) { Pronounce.ttsStatus() }` 里现查一次，而组合跑在主线程 ——
+     * 引擎一卡，**设置页（乃至整个界面）当场冻住**。现在改成引擎就绪后由 [ttsWorker]
+     * 查一次存下来，`ttsStatus()` 退化成纯内存读取，一个 binder 调用都不剩。
+     */
+    @Volatile private var hasEnglishUs = false
+    @Volatile private var hasEnglishUk = false
+    /** 语言表查过了没有（没查完时状态报 [TtsStatus.Checking]，别误报"没英文包"） */
+    @Volatile private var langChecked = false
 
     private val _ttsVersion = MutableStateFlow(0)
 
@@ -163,14 +198,24 @@ object Pronounce {
     fun speak(word: String, accent: String) {
         val w = word.trim()
         if (w.isEmpty()) return
+        // ⚠️ 别改回"直接在这里往下跑"：调用方全是主线程，而下面每一步 TTS 都是 binder 调用，
+        //    引擎一卡就把主线程（= 整个界面）挂死。理由详见 [ttsWorker] 的注释。
+        ttsWorker.execute { speakInternal(w, accent) }
+    }
 
+    /** [speak] 的真身。**跑在 [ttsWorker] 上，不在主线程** —— 里面可以直接做阻塞的 TTS 调用。 */
+    private fun speakInternal(w: String, accent: String) {
         val src = appContext?.let { SpeakPrefs.loadSource(it) } ?: SpeakPrefs.SOURCE_AUTO
 
         // ① 用户强制全用本地发音
         if (src == SpeakPrefs.SOURCE_TTS) {
             if (ttsSpeak(w, accent)) return
-            Log.w(TAG, "设了「只用本地发音」但 TTS 用不了（没装英文语音包？），退回有道 len=${w.length}")
-            speakYoudao(w, accent)
+            // 🔴🔴 TTS 用不了时的兜底**绝不能直接喂 `speakYoudao`**：长句在有道上两种口音都必 500
+            //    ⇒ 一样是静音，等于"设了本地发音就彻底没声"。
+            //    0917 阿亮报"切到只用本地发音，复习里新加的句子完全没发音"就是这条 ——
+            //    走**正常分流**，长句至少还有硅基流动 / 有道切块两条路。
+            Log.w(TAG, "设了「只用本地发音」但 TTS 用不了，按普通通道兜底 len=${w.length}")
+            if (w.length > UK_MAX_LEN) speakLong(w, accent) else speakYoudao(w, accent)
             return
         }
 
@@ -355,7 +400,10 @@ object Pronounce {
     /** 有道人声这条路：本地缓存优先，拿不到就换另一个口音再试 */
     private fun speakYoudao(w: String, accent: String) {
         // 别跟 TTS 的声音叠在一起
-        try { tts?.stop() } catch (_: Exception) {}
+        // ⚠️ 必须 `if (ttsReady)` 守门：`tts` 对象在初始化**失败**时也是非空的（构造已赋值、
+        //    只是回调返了 ERROR），对一个绑定失败的引擎调 `stop()` 是 binder 调用，
+        //    可能把调用线程挂住。没就绪就别碰它。
+        if (ttsReady) try { tts?.stop() } catch (_: Exception) {}
         // ⚠️ 别改回去：有道接口 type=1 是英音、type=2 是美音（反直觉，但是事实）
         //
         // 🔴 口音选择（0917）：选了美音、但文本超过 [US_MAX_LEN] 时**直接用英音**。
@@ -578,6 +626,9 @@ object Pronounce {
                             Log.w(TAG, "TTS 朗读失败 id=$utteranceId code=$errorCode")
                         }
                     })
+                    // 语言可用性**在后台查一次缓存住**，别在设置页组合时现查：
+                    // `isLanguageAvailable` 是 binder 调用，在主线程上遇到卡住的引擎 = 界面冻住。
+                    ttsWorker.execute { refreshLanguages() }
                 }
             }
         } catch (e: Exception) {
@@ -602,8 +653,25 @@ object Pronounce {
         tts = null
         ttsReady = false
         ttsInit = TtsInit.Pending
+        hasEnglishUs = false
+        hasEnglishUk = false
+        langChecked = false
         _ttsVersion.value += 1
         warmUpTts()
+    }
+
+    /** 在 [ttsWorker] 上查一次英文语言可用性并存下来。**别在主线程调** */
+    private fun refreshLanguages() {
+        val t = tts ?: return
+        hasEnglishUs = runCatching {
+            t.isLanguageAvailable(Locale.US) >= TextToSpeech.LANG_AVAILABLE
+        }.getOrDefault(false)
+        hasEnglishUk = runCatching {
+            t.isLanguageAvailable(Locale.UK) >= TextToSpeech.LANG_AVAILABLE
+        }.getOrDefault(false)
+        langChecked = true
+        _ttsVersion.value += 1   // 通知设置页重算状态
+        Log.i(TAG, "TTS 语言表 us=$hasEnglishUs uk=$hasEnglishUk")
     }
 
     /**
@@ -697,9 +765,54 @@ object Pronounce {
             // 还没收到 init 回调 = 正在检查（**不是**没引擎）；回调已回来但没成功 = 真没有
             return if (ttsInit == TtsInit.Pending) TtsStatus.Checking else TtsStatus.NoEngine
         }
-        val t = tts ?: return TtsStatus.NoEngine
-        return if (t.isLanguageAvailable(Locale.US) >= TextToSpeech.LANG_AVAILABLE) TtsStatus.Ok
-        else TtsStatus.NoEnglish
+        // ⚠️ 这里只读缓存，**不许再调 t.isLanguageAvailable()** —— 那是 binder 调用，
+        //    而本函数是在设置页组合（主线程）里跑的，引擎一卡整个界面就冻住。
+        if (!langChecked) return TtsStatus.Checking
+        return if (hasEnglishUs) TtsStatus.Ok else TtsStatus.NoEnglish
+    }
+
+    /**
+     * 🔴【0917 二次排查用】**系统里到底有几个 TTS 引擎，能不能被我们看见。**
+     *
+     * 这张诊断牌存在的唯一理由：分清下面两种"没引擎"，它们**修法完全不同**：
+     *   - 返回**空列表** ⇒ 是 manifest 少了 `<queries>` 的**包可见性过滤**，引擎在但看不见
+     *     （现象：系统「文字转语音设置」页能试听发声，我们 App 却报没引擎）；
+     *   - 返回**有引擎**但我们初始化还是失败 ⇒ 是引擎服务本身有问题／默认引擎指向了一个坏引擎。
+     *
+     * 只在**出错时**才把它显示给阿亮看，正常（[TtsStatus.Ok]）一个字都不显示。
+     */
+    fun engineReport(): String {
+        val ctx = appContext ?: return "App 还没就绪"
+        // ① 我们**看得见**几个引擎（受包可见性过滤影响，所以才能反映 <queries> 有没有生效）
+        val found = runCatching {
+            ctx.packageManager.queryIntentServices(
+                Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0,
+            ).mapNotNull { it.serviceInfo?.packageName }.distinct()
+        }.getOrDefault(emptyList())
+        // ② 系统那边登记的默认引擎（读不到就跳过，不影响主结论）
+        val def = runCatching {
+            android.provider.Settings.Secure.getString(ctx.contentResolver, "tts_default_synth")
+        }.getOrNull()
+        // ③ 我们自己连上没、有没有英文包 —— 全是缓存值，零 binder 调用
+        val mine = when {
+            !ttsReady && ttsInit == TtsInit.Pending -> "我们还在连引擎"
+            !ttsReady -> "**我们连接引擎失败**"
+            !langChecked -> "我们已连上，还在查语音包"
+            hasEnglishUs -> "我们已连上，英文可用"
+            else -> "**我们连上了，但查不到英文包**"
+        }
+        return buildString {
+            append("看得见 ")
+            append(found.size)
+            append(" 个引擎")
+            if (found.isNotEmpty()) {
+                append("（")
+                append(found.joinToString("、") { it.substringAfterLast('.') })
+                append("）")
+            }
+            if (!def.isNullOrBlank()) append("；系统默认=").append(def.substringAfterLast('.'))
+            append("；").append(mine)
+        }
     }
 
     private fun md5(s: String): String =
