@@ -158,14 +158,8 @@ fun SettingsPage(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 SettingsSwitch("深色模式", darkMode, onDarkModeChange)
-                SettingsSwitch(
-                    text = "悬浮窗",
-                    checked = floatOn,
-                    onCheckedChange = onFloatChange,
-                    // 【0916】阿亮："悬浮窗应该做一下解释"。短说明就放这一项下面，
-                    // 完整权限清单在「软件介绍 → 权限说明」。
-                    note = "在其他应用上方显示歌词与播放控制。首次开启会跳系统授权页，需要允许「显示在其他应用上层」。",
-                )
+                // 【0917 精简】原来挂在这儿的 note 已搬进「软件介绍 → 悬浮窗」。
+                SettingsSwitch("悬浮窗", floatOn, onFloatChange)
             }
 
             // ---------------- 播放 ----------------
@@ -207,17 +201,11 @@ fun SettingsPage(
                         label = { Text("只用本地发音") },
                     )
                 }
-                Text(
-                    text = "自动：单词和短句用有道真人音（更自然）；整句太长的话有道读不了，" +
-                        "会自动改用在线语音合成（就是「识别」里填的那个 key，不用另外注册）；" +
-                        "只用本地发音：完全不联网，没网也能听。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
                 // 🔴 长句走在线合成，音色可选（v21）。不给入口的话，他觉得音色难听就只能回来找我改代码。
                 var sfVoice by remember { mutableStateOf(SpeakPrefs.loadSfVoice(context)) }
                 Text(
+                    // 【0917 精简】原来这上面有一段「自动：… 只用本地发音：…」的长说明，
+                    // 已整段搬进「软件介绍 → 朗读用哪个声音」。设置页只留标签和控件。
                     text = "长句用哪个音色",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -239,13 +227,8 @@ fun SettingsPage(
                         )
                     }
                 }
-                Text(
-                    text = "长句子超过有道的长度上限，就用这个音色在线合成；" +
-                        "单词和短句还是有道真人音，不受这里影响。换个音色后，之前听过的长句要重新合成一次。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
+                // 【0917 精简】原来这里还有一段「长句子超过有道的长度上限…」的说明，
+                // 已搬进「软件介绍 → 朗读用哪个声音」。
                 // 🔴 试听 = 自检。长句没声音的毛病以前是**静默失败**，只能远程看日志猜，
                 //    给他一个按钮：念一遍 + Toast 说明"这次走的是哪条通道"，出问题他自己就看见了。
                 TextButton(
@@ -357,9 +340,9 @@ fun SettingsPage(
                             ).show()
                         }
                     },
-                    // 🔴 「像每日任务」这句是 0917 阿亮定的口径，别删、也别写成"没词就不提醒"
-                    note = "像每日任务：到点就提醒你复习，有没有词都会说一声；" +
-                        "今天练过了就安静到第二天。点通知直接进复习页，不响也不震。",
+                    // 🔴 「像每日任务」那句是 0917 阿亮定的口径，别删、也别写成"没词就不提醒"
+                    // 【0917 精简】那句话本身没错，但按他的要求整句搬进了「软件介绍 → 在通知栏轮播生词」。
+                    //    这里不再挂 note —— 设置页只留标题和控件。
                 )
 
                 if (remindOn) {
@@ -385,12 +368,8 @@ fun SettingsPage(
                             )
                         }
                     }
-                    Text(
-                        text = "有词的时候轮播：只挑还没掌握的（连对 3 次的就不再出现），轮着来，不会老是同一个词。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
+                    // 【0917 精简】原来这里有一段「有词的时候轮播：只挑还没掌握的…」，
+                    // 已搬进「软件介绍 → 在通知栏轮播生词」。
                 }
             }
 
@@ -431,7 +410,21 @@ fun SettingsPage(
                     placeholder = { Text("粘贴服务商提供的 Key，仅存本机") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    // 【0917 收窄】原来是 fillMaxWidth() 撑满整行 —— 阿亮原话"一个功能选项里头
+                    //    拉了那么宽，我觉着不好"。收到 2/3 宽并居中。
+                    modifier = Modifier
+                        .fillMaxWidth(0.66f)
+                        .align(Alignment.CenterHorizontally)
+                        .padding(top = 8.dp),
+                )
+                // 【0917 新增】阿亮："所有要填 API 的地方要跟人说清楚，去哪申请、搜哪个关键词。"
+                //    设置页只留这一行"怎么弄"的指引；完整的「哪个模型 / 为什么用它 / 免费吗」
+                //    全在「关于 → 软件介绍 → 在线识别用哪个模型、上哪申请」那一节。
+                Text(
+                    text = "免费、免信用卡。搜「硅基流动」注册即可，申请步骤见「关于 → 软件介绍」。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
                 )
             }
 
@@ -448,13 +441,10 @@ fun SettingsPage(
                     placeholder = { Text("粘贴浏览器 cookie 里的 SESSDATA") },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text(
-                    text = "登录一次即记住：用于抓需登录的 B站 字幕。留空走游客，大部分视频不受影响。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
+                    // 【0917 收窄】同「识别」的 API Key：不再撑满整行。下面那段说明搬进了软件介绍。
+                    modifier = Modifier
+                        .fillMaxWidth(0.66f)
+                        .align(Alignment.CenterHorizontally),
                 )
             }
 
@@ -470,10 +460,16 @@ fun SettingsPage(
                     label = { Text("翻译模型") },
                     placeholder = { Text("Qwen/Qwen2.5-7B-Instruct") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    // 【0917 收窄】同「识别」的 API Key。
+                    modifier = Modifier
+                        .fillMaxWidth(0.66f)
+                        .align(Alignment.CenterHorizontally),
                 )
+                // 【0917】原来这里写的是"需 SiliconFlow Key。主模型排队/限流时自动切换 HY3 兜底。"
+                //    —— 那句话在设置页属于介绍，已搬进软件介绍。但"翻译模型"这个框光看名字
+                //    没人知道是干嘛的，所以留一行最短的"填了有什么用"，别的都不说。
                 Text(
-                    text = "需 SiliconFlow Key。主模型排队/限流时自动切换 HY3 限时免费版兜底。",
+                    text = "不填也能用；填了才会自动给整批字幕配中文。用的是「识别」那同一把 Key。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp),
@@ -533,25 +529,21 @@ fun SettingsPage(
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 }
 
-                DataRow(
-                    title = "导出备份",
-                    note = "生词本 + 字幕库打包成一个 JSON，存到你自己选的地方（网盘 / 电脑都行）。换手机、清数据前先来这一下。",
-                ) { exportLauncher.launch(DataBackup.defaultFileName()) }
+                // 【0917 精简】四条各自的长 note 全部搬进「软件介绍 → 数据（导出 / 导入）」，
+                //    设置页只留四个可点的标题。
+                DataRow(title = "导出备份") { exportLauncher.launch(DataBackup.defaultFileName()) }
 
-                DataRow(
-                    title = "导入备份",
-                    note = "从以前导出的 JSON 恢复。已有的不会重复加，也不会删你现在的任何东西。",
-                ) { importLauncher.launch(arrayOf("application/json", "text/plain")) }
+                DataRow(title = "导入备份") {
+                    importLauncher.launch(arrayOf("application/json", "text/plain"))
+                }
 
-                DataRow(
-                    title = "导出单词表（TXT）",
-                    note = "只导出单词（不含收藏的整句），一行一个，可以直接导入欧路 / 有道 / 不背单词的生词本。",
-                ) { wordListLauncher.launch(DataBackup.wordListFileName()) }
+                DataRow(title = "导出单词表（TXT）") {
+                    wordListLauncher.launch(DataBackup.wordListFileName())
+                }
 
-                DataRow(
-                    title = "导出 Anki 卡片（CSV）",
-                    note = "单词和收藏的整句都导，正面英文、背面中文（含音标、词性、来源）。Anki 里「导入文件」直接选它即可，分隔符保持默认的逗号。",
-                ) { ankiLauncher.launch(DataBackup.ankiCsvFileName()) }
+                DataRow(title = "导出 Anki 卡片（CSV）") {
+                    ankiLauncher.launch(DataBackup.ankiCsvFileName())
+                }
             }
 
             // ---------------- 关于 ----------------
@@ -586,14 +578,110 @@ fun SettingsPage(
                         title = { Text("软件介绍") },
                         text = {
                             Column(Modifier.verticalScroll(rememberScrollState())) {
+                                // 🔴🔴【0917 阿亮定的头版】他原话："要重点强调一下…我们这个软件最初
+                                //    最突出的功能就是这个「上一句」会重复 3 遍或者几遍，这个是可调的…
+                                //    跟其他家的复读类产品或者复读机都不一样，因为其他家的都是 AB 复读的最多。"
+                                //    ⇒ 「上一句复读」必须排第一，而且要把"跟别家怎么不一样"讲出来。
+                                //    事实核对（别写错）：默认 ×3，可选 1/3/5/7，入口在**播放页**的
+                                //    「重播次数」chip（**不在设置页**）；音频走 PlayerService.prevSentence()，
+                                //    视频共用同一份 RepeatPrefs，所以视频里不用单独调。
+                                IntroBlock(
+                                    "这个软件最不一样的地方：「上一句」会替你反复播",
+                                    "别的复读机想复读一句，你得自己掐头去尾圈一个 A 点、B 点，圈完还得清掉，换一句又得重圈 —— 这就是 AB 复读。\n" +
+                                        "这里不用圈。点一下「上一句」，它就把那一句反复播给你听，默认 3 遍，播完自己往下走。\n" +
+                                        "嫌少嫌多就调：播放页那颗「重播次数」，点开能选 1 / 3 / 5 / 7 遍，选完就记住。\n" +
+                                        "为什么能这么省事：句子的头尾是程序自己切好的（有歌词、字幕就按歌词切，没有就先在线识别断句），" +
+                                        "所以你点的是「一句」，不是一个时间点。\n" +
+                                        "音频和视频两个模式共用这一个设置 —— 在视频里听也照这个遍数来，不用两边各调一次。\n" +
+                                        "设成 1 遍就是只跳句、不重复。",
+                                )
+                                Spacer(Modifier.height(12.dp))
                                 IntroBlock(
                                     "阅读模式",
                                     "进入后，点任意句子 = 从该句开始复读（播到句尾自动停）；长按句子 = 展开本句翻译，并可整句或逐词加入生词本。无歌词/字幕的音频可先在顶栏点「生成字幕」在线识别。阅读模式会跟随你进来的模式：从音频模式进读音频字幕，从视频模式进读该视频字幕，点视频字幕某句会跳回视频并定位到那一句。",
                                 )
                                 Spacer(Modifier.height(12.dp))
+                                // 🔴🔴【0917 阿亮新增要求】他的原话："所有要填 API 的地方要跟人说清楚：
+                                //   用的是哪个模型？为什么用这个模型？去哪儿申请、官网是哪个、
+                                //   或者搜哪个关键词？它是免费的，这个在「为什么」里头就跟他说清楚。"
+                                //   ⇒ 这一节就是照这四条写的。顺序别乱：模型 → 为什么 → 怎么申请 → 花多少钱。
+                                //   ⚠️ 事实（0917 查过硅基流动官网价格页，别凭印象改）：
+                                //   TeleAI/TeleSpeechASR 与 FunAudioLLM/SenseVoiceSmall 都在官方
+                                //   **免费模型**名单里；新用户另送 16 元赠金（免费模型不吃赠金）。
+                                //   注册需手机号 + 实名认证，免信用卡；免费模型速率固定、不可提额。
+                                //   ⚠️ 正文里不许出现 markdown 星号 —— 这是纯 Text，会原样显示出来。
                                 IntroBlock(
                                     "在线识别（生成字幕）",
-                                    "无歌词文件的音频，可自动在线识别生成逐句英文文本，用于跟读 / 翻译。默认硅基流动（国内直连、免信用卡）；Groq / OpenAI 服务器在海外，需自行联网。Key 仅保存在本机，仅用于向所选服务商鉴权。",
+                                    "没有歌词文件的音频，可以先在线识别，自动生成逐句英文，用来跟读和翻译。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "① 用的哪个模型",
+                                    "硅基流动的 TeleAI/TeleSpeechASR。\n" +
+                                        "另外两个可选：Groq 的 whisper-large-v3、OpenAI 的 whisper-1。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "② 为什么默认用它",
+                                    "三个原因：\n" +
+                                        "1. 它是免费的。TeleAI/TeleSpeechASR 就在硅基流动的官方免费模型名单里，" +
+                                        "注册不用信用卡，用起来也不花钱。\n" +
+                                        "2. 服务器在国内，直连就能用，不用折腾网络。Groq 和 OpenAI 的服务器在海外，" +
+                                        "得自己解决联网，还可能要绑海外信用卡。\n" +
+                                        "3. 它返回的结果带每句话的时间点，这点最关键 —— 没有时间点就切不出句子，" +
+                                        "复读功能也就无从谈起。（硅基流动的 SenseVoiceSmall 识别也准，但它只回一整段" +
+                                        "纯文本、不给时间点，所以没选它。）",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "③ 上哪申请（三步）",
+                                    "1. 手机浏览器搜关键词「硅基流动」，进 cloud.siliconflow.cn 这个站。\n" +
+                                        "2. 手机号注册 → 按提示做实名认证（免费模型要实名之后才能用）。全程不用信用卡。\n" +
+                                        "3. 登录后在左边找到「API 密钥」→ 新建一个 → 把那串 sk- 开头的复制下来，" +
+                                        "粘到「设置 → 识别 · 自动生成字幕 → API Key」那个框里。\n" +
+                                        "粘完就能用了。这个 Key 只存在你手机上，只会发给硅基流动做验证，不会传到别处。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "④ 要花多少钱",
+                                    "识别用的是一个免费模型，所以正常用下来不花钱。新用户注册还会另送 16 元赠金" +
+                                        "（用不到也没关系，不会自动扣）。\n" +
+                                        "要注意的是：免费模型有速度上限、也不能提额 —— 偶尔会慢一点、忙的时候会排队，" +
+                                        "但不会偷偷扣钱。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "一把 Key 管四处",
+                                    "只需要填这一个 Key，下面四个地方都用它，不用分别去申请：\n" +
+                                        "· 在线识别字幕\n" +
+                                        "· 字幕翻译（给整批字幕配中文）\n" +
+                                        "· 长句的在线发音合成\n" +
+                                        "· 抓 B站 视频时的识别",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "国内还有别家吗？为什么没做进来",
+                                    "有。阿里云百炼、火山引擎（豆包）、讯飞都能做语音识别，但它们不是同一套接口：" +
+                                        "讯飞要三个密钥加自己算签名，火山要塞专用的请求头，百炼走的是另一条对话通道 —— " +
+                                        "每一家都得单独写一段适配代码，不是填个网址就能通用的。\n" +
+                                        "所以这个 App 目前只支持上面那三家（它们都是同一个标准接口）。" +
+                                        "你要是在别处看到教人填百炼、火山，在这个 App 里是连不上的，别白折腾。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "字幕翻译用哪个模型",
+                                    "默认 Qwen/Qwen2.5-7B-Instruct，走硅基流动的对话接口，跟识别共用那把 Key。" +
+                                        "主模型排队或者被限流的时候，会自动换成 tencent/Hy3 限时免费版兜底，不用你管。\n" +
+                                        "想再省一点，可以把「设置 → 字幕翻译 → 翻译模型」换成 tencent/Hunyuan-MT-7B" +
+                                        "（腾讯混元翻译专用模型，也是免费的）。\n" +
+                                        "另外，长按某一句查中文走的是另一条免费通道（有道 + MyMemory 竞速），" +
+                                        "根本不需要 Key，也不受这里影响。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "B站 SESSDATA（可选，不填也能用）",
+                                    "抓一部分 B站 视频的字幕需要登录状态才给。留空就走游客，大部分视频不受影响。" +
+                                        "这个东西得从浏览器 cookie 里翻出来，有点麻烦 —— 真需要的时候跟我说，我教你弄。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
@@ -646,15 +734,47 @@ fun SettingsPage(
                                         "卡正面那两个「美音」「英音」按钮一直都在（单词和句子都有），自动读只负责省掉你每次动手。",
                                 )
                                 Spacer(Modifier.height(12.dp))
+                                // 【0917 承接】设置页「发音」组原来那两段长说明（自动 / 只用本地发音、
+                                //    长句超过有道长度上限）整段搬到这里，跟原有的「朗读用哪个声音」合并成一条。
                                 IntroBlock(
                                     "朗读用哪个声音",
-                                    "分两段：单词和短句用有道的真人音（更自然）；整句太长的话有道读不了，" +
-                                        "会自动改用在线语音合成 —— 用的就是你「识别」里填的那个 API key，不用另外注册。" +
-                                        "在线合成的音色有 8 个（4 个女声、4 个男声），在「设置 → 发音 → 长句用哪个音色」里挑，" +
-                                        "挑完点旁边的「试听这个音色」当场听一句，它会告诉你这次走的是哪条路。" +
-                                        "换音色后，之前听过的长句要重新合成一次（缓存是按音色分开存的）。" +
-                                        "⚠️ 卡正面那两颗「美音」「英音」：单词和短句是两个真的不同的音；" +
-                                        "但长句走的是在线合成，而它没有英美音之分 —— 所以长句上点哪颗，听到的都是你选的那个音色。",
+                                    "分两段走：单词和短句用有道的真人音，更自然，而且免费、不用注册；" +
+                                        "整句太长的话有道读不了，会自动改成在线语音合成 —— 用的就是你「识别」里" +
+                                        "填的那个 Key，不用另外注册。\n" +
+                                        "在线合成有 8 个音色（4 个女声、4 个男声），在「设置 → 发音 → 长句用哪个音色」里挑，" +
+                                        "挑完点旁边的「试听这个音色」当场听一句，它还会告诉你这次走的是哪条路。" +
+                                        "换音色之后，之前听过的长句要重新合成一次（缓存是按音色分开存的）。\n" +
+                                        "「只用本地发音」是完全不联网的模式，没网也能听：它靠的是手机系统自带的语音引擎。" +
+                                        "前提是系统里装了英文语音包 —— 没装的话设置里会红字提示，点「去系统设置下载」跟着走就行。\n" +
+                                        "要注意：卡正面那两颗「美音」「英音」，单词和短句是两个真的不同的音；" +
+                                        "但长句走的是在线合成，它没有英美音之分 —— 所以长句上点哪颗，听到的都是你选的那个音色。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "悬浮窗（在其他应用上方显示）",
+                                    "打开后，你在别的 App 里也能看到歌词和播放控制，不用切回来。首次开启会跳系统授权页，" +
+                                        "需要允许「显示在其他应用上层」。\n" +
+                                        "不开完全不影响使用，只有你主动打开的时候才需要这个授权。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "在通知栏轮播生词",
+                                    "像每日任务：到点就提醒你复习，有没有词都会说一声；今天练过了就安静到第二天。" +
+                                        "点通知直接进复习页，不响也不震。多久换一个词可以自己调。\n" +
+                                        "有词的时候只挑还没掌握的（连对 3 次的就不再出现），轮着来，不会老是同一个词。\n" +
+                                        "这个功能要通知权限，开启的时候系统会问一次，不给的话提醒发不出来。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "数据（导出 / 导入）",
+                                    "导出备份：把生词本 + 字幕库打包成一个 JSON，存到你自己选的地方（网盘、电脑都行）。" +
+                                        "换手机、清数据之前先来这一下。\n" +
+                                        "导入备份：从以前导出的 JSON 恢复。已有的不会重复加，也不会删你现在的任何东西 —— " +
+                                        "只合并不覆盖，导错了也不丢东西。\n" +
+                                        "导出单词表（TXT）：只导出单词、不含收藏的整句，一行一个，" +
+                                        "可以直接导入欧路 / 有道 / 不背单词的生词本。\n" +
+                                        "导出 Anki 卡片（CSV）：单词和收藏的整句都导，正面英文、背面中文（含音标、词性、来源）。" +
+                                        "在 Anki 里点「导入文件」直接选它就行，分隔符保持默认的逗号。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
@@ -668,8 +788,11 @@ fun SettingsPage(
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
+                                    // 【0917】悬浮窗已经从这句里拆出去单独成条了（它自己有说明），
+                                    //    这里再提一遍会重复。
                                     "其他设置",
-                                    "主题颜色 / 深色模式调整外观；悬浮窗可在其他应用上方显示播放控制；「启动时继续播放」控制重新打开时是否续播。",
+                                    "主题颜色和深色模式调整外观（主题色在深色下会自动换成配套的一套）；" +
+                                        "「启动时继续播放」控制重新打开 App 时要不要接着上次的位置续播。",
                                 )
                                 Spacer(Modifier.height(14.dp))
                                 // 【0916】阿亮："什么功能需要什么权限也说一下"。
@@ -844,9 +967,11 @@ private fun SettingsSwitch(
     }
 }
 
-/** 「数据」分组里的一条：标题（可点）+ 下方灰字说明 */
+/** 「数据」分组里的一条：标题（可点）+ 下方灰字说明。
+ *  【0917 精简】`note` 改成可选 —— 阿亮要求设置页只留标题和控件，
+ *  四条导出/导入的长说明全搬进了「软件介绍 → 数据（导出 / 导入）」。 */
 @Composable
-private fun DataRow(title: String, note: String, onClick: () -> Unit) {
+private fun DataRow(title: String, note: String? = null, onClick: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -867,12 +992,14 @@ private fun DataRow(title: String, note: String, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Text(
-            text = note,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 2.dp, bottom = 4.dp),
-        )
+        if (!note.isNullOrBlank()) {
+            Text(
+                text = note,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, bottom = 4.dp),
+            )
+        }
     }
 }
 
