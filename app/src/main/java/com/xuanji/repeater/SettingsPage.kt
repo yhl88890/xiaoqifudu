@@ -322,10 +322,9 @@ fun SettingsPage(
                     ActivityResultContracts.RequestPermission()
                 ) { granted ->
                     if (granted) {
-                        val posted = VocabReminder.setOn(context, true)
                         Toast.makeText(
                             context,
-                            if (posted) "已开启，通知栏现在就有一个词" else "已开启，但生词本里暂时没有要复习的词",
+                            remindToastText(VocabReminder.setOn(context, true)),
                             Toast.LENGTH_LONG,
                         ).show()
                     } else {
@@ -349,16 +348,16 @@ fun SettingsPage(
                             notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
                         } else {
                             remindOn = true
-                            val posted = VocabReminder.setOn(context, true)
                             Toast.makeText(
                                 context,
-                                if (posted) "已开启，通知栏现在就有一个词" else "已开启，但生词本里暂时没有要复习的词",
+                                remindToastText(VocabReminder.setOn(context, true)),
                                 Toast.LENGTH_LONG,
                             ).show()
                         }
                     },
-                    note = "隔一阵子把还没记住的生词换到通知栏，点一下直接进复习页。" +
-                        "不响也不震，就是让你顺手瞄一眼。",
+                    // 🔴 「像每日任务」这句是 0917 阿亮定的口径，别删、也别写成"没词就不提醒"
+                    note = "像每日任务：到点就提醒你复习，有没有词都会说一声；" +
+                        "今天练过了就安静到第二天。点通知直接进复习页，不响也不震。",
                 )
 
                 if (remindOn) {
@@ -385,7 +384,7 @@ fun SettingsPage(
                         }
                     }
                     Text(
-                        text = "只提醒还没掌握的（连对 3 次的就不再出现）。轮着来，不会老是同一个词。",
+                        text = "有词的时候轮播：只挑还没掌握的（连对 3 次的就不再出现），轮着来，不会老是同一个词。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 6.dp),
@@ -615,8 +614,10 @@ fun SettingsPage(
                                     "入口在生词本右上角「复习 N」，N 是还没掌握的词数。玩法就一句话：" +
                                         "看到英文先在心里想意思 → 点一下卡片看答案 → 老实点「认识」或「不认识」。" +
                                         "答「认识」连对次数 +1，答「不认识」清零回到队列重来。" +
-                                        "一轮做多少张可以在「设置 → 复习」里改（10 / 20 / 30 / 50 / 100，默认 20），" +
-                                        "优先挑最久没看过的；答错的当场插回队尾再问一遍（最多来回 3 轮），" +
+                                        "一轮做多少张，就在复习页顶栏那颗「每轮 N 个」上点一下改（10~100，默认 20），" +
+                                        "不用再回设置页找。挑词是两段：一轮里固定留四分之一的名额给从来没复习过的词，" +
+                                        "剩下的按「最久没碰过的先上」排 —— 这样刚存的词不会被一堆老账压在底下，" +
+                                        "老账也不会永远轮不到。答错的当场插回队尾再问一遍（最多来回 3 轮），" +
                                         "所以一轮结束时你确实把这一批都认了一遍。走完报个数：这轮做了几张、认识几个、答对率多少。" +
                                         "「再来一轮」是把整个生词本重新排一轮（已经掌握的也会进来），" +
                                         "不是只补没掌握的那几个 —— 不然只剩一个没掌握时，你会连着好几轮都在看同一张卡。",
@@ -740,6 +741,20 @@ private fun openTtsSettings(ctx: Context) {
         "打不开系统设置，请手动去「设置 → 语言 / 无障碍 → 文字转语音」里下载英文语音包",
         Toast.LENGTH_LONG,
     ).show()
+}
+
+/**
+ * 开生词提醒之后要说的那句话。
+ *
+ * 🔴 别再把 [VocabReminder.Result.DoneToday] 说成"生词本里没有要复习的词"
+ * —— 0917 阿亮就是被那句话劝退的：他以为"没词=这功能没用"，
+ * 而实际上"没词也照样提醒、复习过了才安静"才是现在的口径。
+ */
+private fun remindToastText(r: VocabReminder.Result): String = when (r) {
+    VocabReminder.Result.Posted -> "已开启，通知栏现在就有一条"
+    VocabReminder.Result.DoneToday -> "已开启，今天已经复习过了，明天再提醒你"
+    VocabReminder.Result.NoPermission -> "已开启，但系统没给通知权限，发不出来"
+    VocabReminder.Result.Off -> "已关闭提醒"
 }
 
 @Composable

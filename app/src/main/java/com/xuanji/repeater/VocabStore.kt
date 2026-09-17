@@ -204,7 +204,12 @@ object VocabStore {
                 lastReviewedAt = System.currentTimeMillis(),
             )
         }
-        scope.launch { persist(context) }
+        scope.launch {
+            persist(context)
+            // 「今天已复习」这个判据是**读文件**算出来的（见 VocabReminder.reviewedToday），
+            // 所以必须等 persist 落盘之后再撤通知，否则刚好有闹钟挤在中间会读到旧文件。
+            VocabReminder.onReviewed(context)
+        }
     }
 
     /** 把某个词的「已掌握」状态清掉，重新进复习队列（长按 / 设置里用） */

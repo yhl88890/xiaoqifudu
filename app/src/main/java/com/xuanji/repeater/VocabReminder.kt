@@ -17,6 +17,13 @@ import java.io.File
 /**
  * 生词提醒（0917 新增）：**定时在通知栏换一个还没掌握的生词**。
  *
+ * 【它其实是个"每日任务"—— 0917 下午阿亮定的口径】
+ * 一开始写成"没词就不发"，他打开开关看到「已开启，但生词本里暂时没有要复习的词」，
+ * 于是一条通知都没有 ⇒ 在他看来等于"这开关是坏的"。他要的是**每日任务**：
+ *   - **有没有词都要提醒**（生词本空的也要提一句"先去存几个词"）；
+ *   - **只有"今天已经复习过"才闭嘴**，安静到第二天。
+ * 所以现在 [showNext] 有三个分支，其中两个是"发"，一个是"不发"。别改回"没词就 return"。
+ *
  * 【为什么用 AlarmManager 而不是 WorkManager】
  * WorkManager 要加一个依赖，而这里的需求就是"隔一阵子换一条通知"，用系统闹钟完全够。
  * 代价是要自己处理"闹钟丢了"的三种情况：开机、装新版 APK、被系统清掉
@@ -33,7 +40,8 @@ import java.io.File
  *   顺带一个好处 —— 用户不划掉的话，那条通知一直是"当前那个词"，天然就是"轮播"。
  * - 用 `ELAPSED_REALTIME`（**不加 _WAKEUP**）：设备睡着时就不发，醒来补发。
  *   静音通知没必要把手机唤醒，那样费电又没意义。
- * - 生词本里**全掌握了就不发**（见 [pickWord] 返回 null 的分支）—— 别没事找事。
+ * - 「今天已复习」的判据是**读 `vocab.json` 里最大的 `lastReviewedAt`**，不落新 SP 键
+ *   —— 这样从备份恢复数据后判据自动是对的。见 [reviewedToday]。
  */
 object VocabReminder {
 
@@ -46,6 +54,24 @@ object VocabReminder {
 
     /** 点通知带来的 extra，MainActivity 收到就跳到复习页 */
     const val EXTRA_GOTO_REVIEW = "goto_review"
+
+    /**
+     * [setOn] 的结果。设置页拿它决定 Toast 说什么
+     * —— 以前只返回 Boolean，于是"没权限"和"今天做完了"都只能报同一句话，说不清。
+     */
+    enum class Result {
+        /** 真发出去了 */
+        Posted,
+
+        /** 开着，但今天已经复习过 ⇒ 今天不再提醒（明天照旧） */
+        DoneToday,
+
+        /** 开着，但系统没给通知权限，发不出去 */
+        NoPermission,
+
+        /** 关掉了 */
+        Off,
+    }
 
     private const val NAME = "vocab_remind_prefs"
     private const val KEY_ON = "on"
@@ -93,17 +119,20 @@ object VocabReminder {
     /**
      * 开关。开 = 立刻排程，**并马上发第一条**（不用干等一个间隔，开了就能在通知栏看到效果）。
      *
-     * @return 开着的时候：是否真发出去了。false = 生词本空 / 全是已掌握的 / 没通知权限。
-     *         设置页拿这个返回值给提示 —— 否则"开了但没反应"没法解释。
+     * @return 见 [Result]。设置页拿这个返回值给提示 —— 否则"开了但没反应"没法解释。
      */
-    fun setOn(ctx: Context, on: Boolean): Boolean {
+    fun setOn(ctx: Context, on: Boolean): Result {
         sp(ctx).edit().putBoolean(KEY_ON, on).apply()
-        return if (on) {
-            schedule(ctx)
-            showNext(ctx)
-        } else {
+        if (!on) {
             cancel(ctx)
-            false
+            return Result.Off
+        }
+        schedule(ctx)
+        return when {
+            !hasNotifPermission(ctx) -> Result.NoPermission
+            reviewedToday(ctx) -> Result.DoneToday
+            showNext(ctx) -> Result.Posted
+            else -> Result.NoPermission
         }
     }
 
@@ -191,36 +220,96 @@ object VocabReminder {
     fun cancel(ctx: Context) {
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
         am?.cancel(tickIntent(ctx))
-        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm?.cancel(NOTIF_ID)
+        cancelNotification(ctx)
+    }
+
+    /** 只撤通知、**不动闹钟**：他刚复习完、或今天任务已完成时用。 */
+    private fun cancelNotification(ctx: Context) {
+        (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancel(NOTIF_ID)
+    }
+
+    /**
+     * 他刚答完一张卡 ⇒ 今天的"每日任务"就算做过了。
+     *
+     * 撤掉通知栏那条"还没复习"，**但不动闹钟**：明天 0 点之后 [reviewedToday] 自然变回 false，
+     * 轮播自己就活了，不需要重新排程。
+     * 调用点：`VocabStore.markReviewed`。
+     */
+    fun onReviewed(ctx: Context) {
+        if (!isOn(ctx)) return
+        cancelNotification(ctx)
     }
 
     // ---------- 发通知 ----------
 
     /**
-     * 取一个词并发通知。返回 false = 没有可发的（生词本空 / 全掌握了）⇒ 不发。
+     * 🔴 **有没有词都要发**（0917 下午阿亮改的口径）—— 这是这个函数唯一要记住的事。
      *
-     * 🔴 这里**直接读 `vocab.json`**，不走 `VocabStore`：
+     * 三个分支：
+     *  ① **今天已经复习过** ⇒ 不发，并且把上次那条"还没复习"撤掉
+     *     （他都练完了，通知栏还挂着"今天还没复习"就是误导）。安静到明天。
+     *  ② 有没掌握的词 ⇒ 轮播一个（[pickFrom]）。
+     *  ③ **生词本空的 / 全练熟了** ⇒ **也发**，文案改成引导他去存词或再练一轮。
+     *
+     * ⚠️ 以前 ③ 是 `return false` 直接静默，他打开开关一条都收不到 ⇒ 认定功能坏了。
+     *
+     * @return true = 真进通知栏了；false = 今天已完成 / 没权限 / 被系统挡了
+     */
+    fun showNext(ctx: Context): Boolean {
+        val snap = snapshot(ctx)
+
+        // ① 每日任务完成
+        if (snap.lastReviewedAt >= todayStart()) {
+            cancelNotification(ctx)
+            return false
+        }
+
+        // ② 有词：轮播
+        pickFrom(ctx, snap.pool)?.let { return notify(ctx, it.first, it.second) }
+
+        // ③ 没词：也要提醒
+        return if (snap.total > 0) {
+            notify(
+                ctx,
+                "今天还没复习",
+                "生词本里的词都练熟了。想再练就点进来，复习页有「再练一轮」。",
+            )
+        } else {
+            notify(
+                ctx,
+                "今天还没复习",
+                "生词本还是空的 —— 先去听几段，把不认识的词收进来。",
+            )
+        }
+    }
+
+    /** 生词本的一份快照：总条数、可提醒的词池、最近一次复习时间。 */
+    private class Snapshot(
+        val total: Int,
+        val pool: List<Pair<String, String>>,
+        val lastReviewedAt: Long,
+    )
+
+    /**
+     * 🔴 **直接读 `vocab.json`**，不走 `VocabStore`：
      * 广播接收器可能在进程刚起来、VocabStore 还没异步装填完的时候被调用，
      * 那时 `entries.value` 是空的，会误报"生词本是空的"。
      * 文件读取虽然笨，但在这种"后台被叫醒"的场景下反而最可靠。
      */
-    fun showNext(ctx: Context): Boolean {
-        val pick = pickWord(ctx) ?: return false
-        notify(ctx, pick.first, pick.second)
-        return true
-    }
-
-    /** 轮着取下一个未掌握的词。返回 (英文, 中文释义) */
-    private fun pickWord(ctx: Context): Pair<String, String>? {
+    private fun snapshot(ctx: Context): Snapshot {
         val f = File(ctx.filesDir, "vocab.json")
-        if (!f.exists()) return null
+        if (!f.exists()) return Snapshot(0, emptyList(), 0L)
 
+        var total = 0
+        var last = 0L
         val pool = ArrayList<Pair<String, String>>()
         runCatching {
             val arr = JSONObject(f.readText()).optJSONArray("entries") ?: return@runCatching
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
+                total++
+                last = maxOf(last, o.optLong("lastReviewedAt", 0L))
+
                 // 已掌握的不提醒（跟复习队列一个口径）
                 if (o.optInt("correctStreak", 0) >= VocabEntry.MASTERED_AT) continue
                 val text = o.optString("text").trim()
@@ -234,8 +323,25 @@ object VocabReminder {
                 pool.add(text to cn)
             }
         }
-        if (pool.isEmpty()) return null
+        return Snapshot(total, pool, last)
+    }
 
+    /** 今天已经复习过了没有？判据 = 有没有任何一条的 `lastReviewedAt` 落在今天。 */
+    private fun reviewedToday(ctx: Context): Boolean = snapshot(ctx).lastReviewedAt >= todayStart()
+
+    /** 今天 0 点（本地时区）。 */
+    private fun todayStart(): Long {
+        val c = java.util.Calendar.getInstance()
+        c.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        c.set(java.util.Calendar.MINUTE, 0)
+        c.set(java.util.Calendar.SECOND, 0)
+        c.set(java.util.Calendar.MILLISECOND, 0)
+        return c.timeInMillis
+    }
+
+    /** 轮着取下一个未掌握的词。池子空就返回 null。 */
+    private fun pickFrom(ctx: Context, pool: List<Pair<String, String>>): Pair<String, String>? {
+        if (pool.isEmpty()) return null
         // 轮播：每次取下一个，转一圈再来。比"老是同一个词"有用得多。
         val idx = sp(ctx).getInt(KEY_IDX, 0)
         val pick = pool[idx % pool.size]
@@ -243,11 +349,14 @@ object VocabReminder {
         return pick
     }
 
-    private fun notify(ctx: Context, title: String, body: String) {
+    private fun hasNotifPermission(ctx: Context): Boolean =
+        ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /** @return 真进通知栏了没有。没权限时**不要**假装成功（设置页的提示要准）。 */
+    private fun notify(ctx: Context, title: String, body: String): Boolean {
         // 通知权限（Android 13+）。没授权就别白忙，也不要崩。
-        if (ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
-        ) return
+        if (!hasNotifPermission(ctx)) return false
 
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
@@ -279,6 +388,7 @@ object VocabReminder {
             .setOnlyAlertOnce(true)
             .build()
         nm.notify(NOTIF_ID, n)
+        return true
     }
 }
 
