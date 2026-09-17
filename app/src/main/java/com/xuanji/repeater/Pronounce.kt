@@ -11,6 +11,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -129,6 +132,24 @@ object Pronounce {
      */
     private var tts: TextToSpeech? = null
     @Volatile private var ttsReady = false
+
+    /**
+     * 引擎初始化走到哪一步。🔴 `Pending` 只代表"**还没回调**"，**不代表没有引擎** ——
+     * 0917 那次误报就是把它当成"没引擎"了（见 [ttsStatus]）。
+     */
+    private enum class TtsInit { Pending, Ready, Failed }
+    @Volatile private var ttsInit = TtsInit.Pending
+
+    private val _ttsVersion = MutableStateFlow(0)
+
+    /**
+     * 引擎状态每变一次就 +1。设置页拿它当 `remember` 的 key 重算 [ttsStatus]。
+     *
+     * 【为什么要有它】老写法是"进设置页后轮询 3 秒，拿不到就不再刷" ——
+     * 引擎绑定慢一点就永远停在错误提示上，而且用户在系统里补装了语音包也不会自己变。
+     * 改成事件驱动，回调一回来界面就刷新。
+     */
+    val ttsVersion: StateFlow<Int> = _ttsVersion.asStateFlow()
 
     /**
      * 发音总入口。**签名别改** —— 全 App 十几处喇叭按钮都调它。
@@ -536,23 +557,53 @@ object Pronounce {
     private fun warmUpTts() {
         if (tts != null) return
         val ctx = appContext ?: return
-        tts = TextToSpeech(ctx) { status ->
-            ttsReady = status == TextToSpeech.SUCCESS
-            Log.i(TAG, "TTS 初始化 status=$status ready=$ttsReady")
-            if (ttsReady) {
-                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {}
-                    override fun onDone(utteranceId: String?) {}
-                    override fun onError(utteranceId: String?) {
-                        Log.w(TAG, "TTS 朗读失败 id=$utteranceId")
-                    }
+        ttsInit = TtsInit.Pending
+        _ttsVersion.value += 1
+        try {
+            tts = TextToSpeech(ctx) { status ->
+                ttsReady = status == TextToSpeech.SUCCESS
+                // 回调回来了才能定案：成功 = Ready，失败 = 真没有引擎（而不是"还没好"）
+                ttsInit = if (ttsReady) TtsInit.Ready else TtsInit.Failed
+                _ttsVersion.value += 1
+                Log.i(TAG, "TTS 初始化 status=$status ready=$ttsReady")
+                if (ttsReady) {
+                    tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+                        override fun onDone(utteranceId: String?) {}
+                        override fun onError(utteranceId: String?) {
+                            Log.w(TAG, "TTS 朗读失败 id=$utteranceId")
+                        }
 
-                    override fun onError(utteranceId: String?, errorCode: Int) {
-                        Log.w(TAG, "TTS 朗读失败 id=$utteranceId code=$errorCode")
-                    }
-                })
+                        override fun onError(utteranceId: String?, errorCode: Int) {
+                            Log.w(TAG, "TTS 朗读失败 id=$utteranceId code=$errorCode")
+                        }
+                    })
+                }
             }
+        } catch (e: Exception) {
+            // 构造函数本身就可能抛（引擎服务不可用）。别让整个 App 起不来，记一笔就完了
+            tts = null
+            ttsReady = false
+            ttsInit = TtsInit.Failed
+            _ttsVersion.value += 1
+            Log.w(TAG, "TTS 引擎构造失败: ${e.message}")
         }
+    }
+
+    /**
+     * 设置页「重新检查」：把引擎关掉重建一次。
+     *
+     * 【为什么需要它】用户可能刚在系统设置里装好英文语音包 / 刚启用引擎，
+     * 为了让它生效去重启 App 太蠢。重建一次就能拿到新状态。
+     * 注意 `warmUpTts` 开头有 `if (tts != null) return`，所以这里必须先把 `tts` 置空。
+     */
+    fun retryTts() {
+        runCatching { tts?.shutdown() }
+        tts = null
+        ttsReady = false
+        ttsInit = TtsInit.Pending
+        _ttsVersion.value += 1
+        warmUpTts()
     }
 
     /**
@@ -629,12 +680,24 @@ object Pronounce {
         return SpeakPrefs.SF_VOICES.firstOrNull { it.first == id }?.second ?: id
     }
 
-    /** 设置页拿它判断要不要提示"去系统里装英文语音包" */
-    enum class TtsStatus { NotReady, Ok, NoEnglish }
+    /**
+     * 设置页拿它决定提示什么。
+     *
+     * 🔴【0917 阿亮报："红字说系统里没有可用语音引擎，我去系统设置里看，我是有引擎的"】
+     * 老版本只有 `NotReady` 一档，把「**还在初始化**」和「**真的没有引擎**」混成了同一件事，
+     * 而且配的文案直接断言"系统里没有可用的语音引擎"。
+     * 引擎初始化是**异步**的（首次要绑引擎服务，国产 ROM 上更慢），只要比设置页那次
+     * 3 秒轮询慢一点，就会被判死刑并且**永远不再刷新** —— 看着就是误报。
+     * 现在拆成四档：检查中 / 正常 / 没英文语音包 / 真没有引擎，且由 [ttsVersion] 事件驱动刷新。
+     */
+    enum class TtsStatus { Checking, Ok, NoEnglish, NoEngine }
 
     fun ttsStatus(): TtsStatus {
-        val t = tts ?: return TtsStatus.NotReady
-        if (!ttsReady) return TtsStatus.NotReady
+        if (!ttsReady) {
+            // 还没收到 init 回调 = 正在检查（**不是**没引擎）；回调已回来但没成功 = 真没有
+            return if (ttsInit == TtsInit.Pending) TtsStatus.Checking else TtsStatus.NoEngine
+        }
+        val t = tts ?: return TtsStatus.NoEngine
         return if (t.isLanguageAvailable(Locale.US) >= TextToSpeech.LANG_AVAILABLE) TtsStatus.Ok
         else TtsStatus.NoEnglish
     }

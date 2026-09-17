@@ -60,7 +60,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
  * 设置页（**独立全屏页面**）
@@ -256,45 +256,55 @@ fun SettingsPage(
                         }
                     },
                 ) { Text("试听这个音色") }
-                // 本地发音靠系统的 TTS 引擎，国内不少 ROM 没预装英文语音包 ⇒ 主动提示，别让他以为坏了
-                var ttsStatus by remember { mutableStateOf(Pronounce.ttsStatus()) }
-                LaunchedEffect(Unit) {
-                    // 引擎初始化是异步的，刚进设置页时可能还没就绪，等一会儿再看一眼
-                    repeat(12) {
-                        delay(250)
-                        val s = Pronounce.ttsStatus()
-                        if (s != Pronounce.TtsStatus.NotReady) {
-                            ttsStatus = s
-                            return@LaunchedEffect
+                // 本地发音靠系统的 TTS 引擎，国内不少 ROM 没预装英文语音包、甚至没有引擎 ⇒ 主动提示，别让他以为坏了
+                //
+                // 🔴【0917 阿亮报："红字说系统里没有可用语音引擎，我去系统设置里看我是有引擎的，多邻国都能用"】
+                //    老写法是"进本页后轮询 3 秒，拿不到就不再刷新"，而引擎初始化是**异步**的
+                //    （首次要绑引擎服务，国产 ROM 上更慢）⇒ 只要比那 3 秒慢，就永远显示"没有引擎"，
+                //    他之后在系统里补装了也不会自己变 —— 看着就是误报。
+                //    现在改成事件驱动：Pronounce 每次状态变化都把 ttsVersion +1，这里跟着重算。
+                val ttsVer by Pronounce.ttsVersion.collectAsStateWithLifecycle()
+                val ttsStatus = remember(ttsVer) { Pronounce.ttsStatus() }
+                when (ttsStatus) {
+                    // 还在初始化：🔴 **不许用报错的口气**，也不断言"没有引擎"。
+                    // 就一行淡色小字，等回调回来自己会换掉。
+                    Pronounce.TtsStatus.Checking -> Text(
+                        text = "正在检查系统语音引擎…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    // 有英文语音，一切正常：什么都不说（没问题就别占他注意力）
+                    Pronounce.TtsStatus.Ok -> Unit
+                    Pronounce.TtsStatus.NoEnglish -> {
+                        Text(
+                            text = "系统里没有英文语音包，「本地发音」用不了，朗读还是走有道人声。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { openTtsSettings(context) }) {
+                                Text("去系统设置下载")
+                            }
+                            // 「重新检查」：他在系统里装完语音包不用重启 App
+                            TextButton(onClick = { Pronounce.retryTts() }) { Text("重新检查") }
                         }
                     }
-                    ttsStatus = Pronounce.ttsStatus()
-                }
-                // 🔴 两种"本地发音用不了"都要说清楚，不能让它静默：
-                //    - NoEnglish：引擎在，但没装英文语音包 ⇒ 只能去下载
-                //    - NotReady ：**压根没有可用的语音引擎**（部分国产 ROM 就这样）
-                //      ⇒ 这时长句子会退回有道、而有道对长文本必 500 ⇒ 又变成"没声音"。
-                //      阿亮报的"句子不响"就是这种静默失败，所以这里必须主动提示。
-                if (ttsStatus == Pronounce.TtsStatus.NoEnglish) {
-                    Text(
-                        text = "系统里没有英文语音包，「本地发音」用不了，朗读还是走有道人声。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    TextButton(onClick = { openTtsSettings(context) }) {
-                        Text("去系统设置下载")
-                    }
-                } else if (ttsStatus == Pronounce.TtsStatus.NotReady) {
-                    Text(
-                        text = "系统里没有可用的语音引擎，「本地发音」暂时用不了；" +
-                            "长句子会自动改用在线的语音合成，不影响听。想去系统设置里装也行。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    TextButton(onClick = { openTtsSettings(context) }) {
-                        Text("去系统设置看看")
+                    Pronounce.TtsStatus.NoEngine -> {
+                        Text(
+                            text = "没检测到可用的语音引擎，「本地发音」暂时用不了；" +
+                                "长句子会自动改用在线的语音合成，不影响听。想在系统里装也行。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { openTtsSettings(context) }) {
+                                Text("去系统设置看看")
+                            }
+                            TextButton(onClick = { Pronounce.retryTts() }) { Text("重新检查") }
+                        }
                     }
                 }
             }

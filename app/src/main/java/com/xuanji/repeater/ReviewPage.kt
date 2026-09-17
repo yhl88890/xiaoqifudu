@@ -110,7 +110,7 @@ fun ReviewPage(onBack: () -> Unit) {
     var accentOpen by remember { mutableStateOf(false) }
 
     /**
-     * 开新一轮：挑 [batchSize] 个，优先挑最久没看的。
+     * 开新一轮：挑 [batchSize] 个。选词规则见 [pickRound]（方案 B，0917 阿亮拍板）。
      *
      * `includeMastered`：
      *  - `false`（默认）—— **只挑没掌握的**。给「开始复习」用：进复习就该先练不会的。
@@ -128,10 +128,8 @@ fun ReviewPage(onBack: () -> Unit) {
         // 🔴【0917 阿亮报】这里原来写死 `!it.mastered` ⇒ 全部连对 3 次之后队列永远是空的，
         // 他就"没法再继续复习了"，页面只让他"攒新词"。学完了也该能接着练。
         // ⇒ 这一轮要不要把已掌握的词也放进来，交给调用方决定（ReadyState 的「再练一轮」传 true）。
-        val picked = allEntries
-            .filter { it.id !in excludeIds && (includeMastered || !it.mastered) }
-            .sortedBy { it.lastReviewedAt }
-            .take(batchSize)
+        val pool = allEntries.filter { it.id !in excludeIds && (includeMastered || !it.mastered) }
+        val picked = pickRound(pool, batchSize)
         queue = picked
         roundTotal = picked.size
         wrongThisRound = emptyList()
@@ -372,6 +370,65 @@ fun ReviewPage(onBack: () -> Unit) {
             }
         }
     }
+}
+
+/**
+ * 一轮复习挑哪些（0917 方案 B，阿亮拍板）。
+ *
+ * 【老逻辑错在哪】原来是 `sortedBy { lastReviewedAt }`。而 `lastReviewedAt` **从没复习过就是 0**，
+ * 0 一定小于任何真实时间戳 ⇒ 两个毛病：
+ *   ① 复习过一次的词，**永久掉到所有「没复习过」的后面**（哪怕那批堆了 300 个）；
+ *   ② 0 那批内部保留 `allEntries` 原顺序，而它是**最新入库在最前** ⇒
+ *      **刚存的词插队到老账前面**，跟他想要的"时间最久的优先"正好相反。
+ *
+ * 【现在怎么挑】两段式：
+ *   ① **新词保底**：从没复习过的（`lastReviewedAt <= 0`）先占 1/4 名额，按「入库最久」优先
+ *      —— 老账要往前赶，刚存的也不能石沉大海，两个诉求都照顾到。
+ *   ② **剩下名额**：全池子按「自上次复习（或入库）以来等了多久」从大到小排，等得最久的先上。
+ *
+ * 拼接顺序：保底那批排**前面**。理由：保底的意义就是"保证被看到"，
+ * 排在最后的话中途退出一张都不显示，保底等于白设。（想调就换最后那行的拼接顺序。）
+ *
+ * ⚠️ 「新词」= **从没复习过的全部**，不按入库天数算 —— 阿亮 8 月存了没碰过的词，
+ *    对他而言同样是新词，而且更该被看到。
+ * ⚠️ 单词/句子分开名额**这次没做**（他总共 3 条、2 条是长句，切了反而别扭）。要加再说。
+ */
+private fun pickRound(pool: List<VocabEntry>, batchSize: Int): List<VocabEntry> {
+    if (pool.isEmpty() || batchSize <= 0) return emptyList()
+    val now = System.currentTimeMillis()
+    fun waited(e: VocabEntry): Long = now - lastTouchAt(e)
+
+    val quota = (batchSize / NEWCOMER_DIVISOR).coerceAtLeast(1)
+    val newcomers = pool
+        .filter { it.lastReviewedAt <= 0L }
+        .sortedBy { lastTouchAt(it) }
+        .take(minOf(quota, batchSize))
+    val newcomerIds = newcomers.map { it.id }.toSet()
+
+    // ⚠️ 保底没进的那批新词**仍然留在这个池子里**，按"等了多久"一起竞争剩余名额 ——
+    //    它们等得久（入库早）自然排前面，等得短（昨天刚存）才真正需要保底。
+    val backlog = pool
+        .filter { it.id !in newcomerIds }
+        .sortedByDescending { waited(it) }
+        .take(batchSize - newcomers.size)
+
+    return newcomers + backlog
+}
+
+/** 新词保底名额 = 一轮的 1/4（一轮 20 个 ⇒ 保底 5 个给没碰过的） */
+private const val NEWCOMER_DIVISOR = 4
+
+/**
+ * 这个词「上一次被碰」是什么时候：复习过就用复习时间，没复习过就用入库时间。
+ *
+ * ⚠️ 老数据的 `addedAt` 可能是 0（字段是后加的），那就用 `id` 兜底 ——
+ * `VocabStore.add()` 里 `id = System.currentTimeMillis()`，所以 id 本身就是建条目那一刻的时间戳。
+ * 不兜这一下的话，那些词会算成"等了 50 年"，一股脑插到最前面。
+ */
+private fun lastTouchAt(e: VocabEntry): Long = when {
+    e.lastReviewedAt > 0L -> e.lastReviewedAt
+    e.addedAt > 0L -> e.addedAt
+    else -> e.id
 }
 
 /** 开场：告诉他还剩多少个、点一下开始 */
