@@ -66,8 +66,10 @@ fun ReviewPage(onBack: () -> Unit) {
     VocabStore.ensureLoaded(context)
     val allEntries by VocabStore.entries.collectAsStateWithLifecycle()
 
-    // 每轮 20 个：够一次碎片时间的量，太小要反复点开始、太大一轮走不完
-    val batchSize = 20
+    // 每轮多少个：设置里可调（默认 20，见 ReviewPrefs.BATCH_CHOICES）。
+    // 🔴 remember 只读一次就够 —— 改这个设置必须回设置页，再进来时这个页面是重建的，
+    //    不存在"读到旧值"的问题。别改成每次重组都读一遍 SP。
+    val batchSize = remember { ReviewPrefs.loadBatchSize(context) }
     // 本轮最多补几次错题，防止一直答错陷在死循环里出不来
     val maxRounds = 3
 
@@ -478,23 +480,30 @@ private fun ReviewCard(
                     textAlign = TextAlign.Center,
                 )
 
-                // 单词带发音按钮（句子不给，句子整句念没意义）
-                if (!entry.isSentence) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-                        PronounceChip(
-                            label = "美音",
-                            icon = XuanjiIcons.SpeakerUs,
-                            tint = MaterialTheme.colorScheme.primary,
-                            onClick = { Pronounce.speak(entry.text, "us") },
-                        )
-                        PronounceChip(
-                            label = "英音",
-                            icon = XuanjiIcons.SpeakerUk,
-                            tint = MaterialTheme.colorScheme.tertiary,
-                            onClick = { Pronounce.speak(entry.text, "uk") },
-                        )
-                    }
+                // 发音按钮：单词、句子都给了（0917 阿亮要求"句子也给加上"）。
+                // 原来是 `if (!entry.isSentence)`，理由写的是"句子整句念没意义" —— 已作废。
+                //
+                // 🔴🔴 但"英音/美音"这两颗按钮在句子上的实际效果，**跟他想的可能不一样**，别在 UI 上假装：
+                //   · 单词 / 短句（≤ Pronounce.UK_MAX_LEN = 40 字符）⇒ 走有道人声，
+                //     **美音英音是两个真的不同的音**；
+                //   · 长句（> 40 字符）⇒ 有道两种口音都会 HTTP 500，实际落到硅基流动在线合成，
+                //     而**那边没有英美音这个维度**（只有 8 个预置音色，见 SpeakPrefs.SF_VOICES）。
+                //     ⇒ 长句上这两颗按钮**只是跟单词卡片保持一致的外观**，点了听到的是同一个音色。
+                //   要真让长句也分英美音，得换服务商或自己做音频变调，别在这里偷偷糊弄。
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                    PronounceChip(
+                        label = "美音",
+                        icon = XuanjiIcons.SpeakerUs,
+                        tint = MaterialTheme.colorScheme.primary,
+                        onClick = { Pronounce.speak(entry.text, "us") },
+                    )
+                    PronounceChip(
+                        label = "英音",
+                        icon = XuanjiIcons.SpeakerUk,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        onClick = { Pronounce.speak(entry.text, "uk") },
+                    )
                 }
 
                 // ---- 背面：释义 ----
@@ -542,8 +551,13 @@ private fun ReviewCard(
                                 textAlign = TextAlign.Center,
                             )
                         } else {
+                            // 释义和翻译**都没有**时的兜底文案。
+                            // 🔴 原来说的是"（这个词当时没查到释义）"—— 单词上没毛病，
+                            //    但句子条目上也这么写就串味了（0917 阿亮问"背面你说的什么意思"）。
+                            //    所以他问过之后改成按类型分开说。
                             Text(
-                                text = "（这个词当时没查到释义）",
+                                text = if (entry.isSentence) "（这句当时没查到翻译）"
+                                else "（这个词当时没查到释义）",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

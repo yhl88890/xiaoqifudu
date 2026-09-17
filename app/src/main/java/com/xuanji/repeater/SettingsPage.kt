@@ -296,6 +296,42 @@ fun SettingsPage(
                 }
             }
 
+            // ---------------- 复习 ----------------
+            SettingsGroup("复习") {
+                // 0917 阿亮要求：每轮复习多少个要能自己设。
+                // 可选值跨度刻意拉大（10~100）—— 他说"有人只学 10 个，有人可能学 100 个"。
+                var batch by remember { mutableStateOf(ReviewPrefs.loadBatchSize(context)) }
+                Text(
+                    text = "每轮复习多少个",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ReviewPrefs.BATCH_CHOICES.forEach { n ->
+                        FilterChip(
+                            selected = batch == n,
+                            onClick = {
+                                batch = n
+                                ReviewPrefs.saveBatchSize(context, n)
+                            },
+                            label = { Text("$n") },
+                        )
+                    }
+                }
+                Text(
+                    text = "一轮最多复习这么多个（优先挑最久没看过的）。词少选 10 个，" +
+                        "词多、想一口气过完就选 100。改完下次进复习页生效。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+
             // ---------------- 识别 ----------------
             SettingsGroup("识别 · 自动生成字幕") {
                 var asrProvider by remember { mutableStateOf(AsrPrefs.loadProvider(context)) }
@@ -518,9 +554,11 @@ fun SettingsPage(
                                     "入口在生词本右上角「复习 N」，N 是还没掌握的词数。玩法就一句话：" +
                                         "看到英文先在心里想意思 → 点一下卡片看答案 → 老实点「认识」或「不认识」。" +
                                         "答「认识」连对次数 +1，答「不认识」清零回到队列重来。" +
-                                        "一轮 20 张，优先挑最久没看过的；答错的当场插回队尾再问一遍（最多来回 3 轮），" +
+                                        "一轮做多少张可以在「设置 → 复习」里改（10 / 20 / 30 / 50 / 100，默认 20），" +
+                                        "优先挑最久没看过的；答错的当场插回队尾再问一遍（最多来回 3 轮），" +
                                         "所以一轮结束时你确实把这一批都认了一遍。走完报个数：这轮做了几张、认识几个、答对率多少。" +
-                                        "「再来一轮」会从剩下没掌握的里面再凑 20 张。",
+                                        "「再来一轮」是把整个生词本重新排一轮（已经掌握的也会进来），" +
+                                        "不是只补没掌握的那几个 —— 不然只剩一个没掌握时，你会连着好几轮都在看同一张卡。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
@@ -541,7 +579,18 @@ fun SettingsPage(
                                         "切完立刻用新口音念一遍当前这张，你马上能听出区别。" +
                                         "开关和口音都会记住，下次进来还是你上次的选择。" +
                                         "默认是关的 —— 发音要联网下音频，不打招呼就出声会吓人一跳，所以留给你自己开一次。" +
-                                        "卡正面那两个「美音」「英音」按钮一直都在，自动读只负责省掉你每次动手。",
+                                        "卡正面那两个「美音」「英音」按钮一直都在（单词和句子都有），自动读只负责省掉你每次动手。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                IntroBlock(
+                                    "朗读用哪个声音",
+                                    "分两段：单词和短句用有道的真人音（更自然）；整句太长的话有道读不了，" +
+                                        "会自动改用在线语音合成 —— 用的就是你「识别」里填的那个 API key，不用另外注册。" +
+                                        "在线合成的音色有 8 个（4 个女声、4 个男声），在「设置 → 发音 → 长句用哪个音色」里挑，" +
+                                        "挑完点旁边的「试听这个音色」当场听一句，它会告诉你这次走的是哪条路。" +
+                                        "换音色后，之前听过的长句要重新合成一次（缓存是按音色分开存的）。" +
+                                        "⚠️ 卡正面那两颗「美音」「英音」：单词和短句是两个真的不同的音；" +
+                                        "但长句走的是在线合成，而它没有英美音之分 —— 所以长句上点哪颗，听到的都是你选的那个音色。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
