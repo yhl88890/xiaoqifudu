@@ -299,42 +299,6 @@ fun SettingsPage(
                 }
             }
 
-            // ---------------- 复习 ----------------
-            SettingsGroup("复习") {
-                // 0917 阿亮要求：每轮复习多少个要能自己设。
-                // 可选值跨度刻意拉大（10~100）—— 他说"有人只学 10 个，有人可能学 100 个"。
-                var batch by remember { mutableStateOf(ReviewPrefs.loadBatchSize(context)) }
-                Text(
-                    text = "每轮复习多少个",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 6.dp),
-                )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    ReviewPrefs.BATCH_CHOICES.forEach { n ->
-                        FilterChip(
-                            selected = batch == n,
-                            onClick = {
-                                batch = n
-                                ReviewPrefs.saveBatchSize(context, n)
-                            },
-                            label = { Text("$n") },
-                        )
-                    }
-                }
-                Text(
-                    text = "一轮最多复习这么多个（优先挑最久没看过的）。词少选 10 个，" +
-                        "词多、想一口气过完就选 100。改完下次进复习页生效。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-            }
-
             // ---------------- 生词提醒 ----------------
             SettingsGroup("生词提醒") {
                 // 0917 阿亮要做「通知栏轮播生词」：隔一阵子换一个还没记住的词，瞄一眼就当复习。

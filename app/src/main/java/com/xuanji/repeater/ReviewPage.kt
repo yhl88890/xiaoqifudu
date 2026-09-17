@@ -20,10 +20,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -45,6 +47,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlin.math.roundToInt
 
 /**
  * 复习页（0916 新增）——补上学习闭环里唯一断掉的那环。
@@ -66,10 +69,15 @@ fun ReviewPage(onBack: () -> Unit) {
     VocabStore.ensureLoaded(context)
     val allEntries by VocabStore.entries.collectAsStateWithLifecycle()
 
-    // 每轮多少个：设置里可调（默认 20，见 ReviewPrefs.BATCH_CHOICES）。
-    // 🔴 remember 只读一次就够 —— 改这个设置必须回设置页，再进来时这个页面是重建的，
-    //    不存在"读到旧值"的问题。别改成每次重组都读一遍 SP。
-    val batchSize = remember { ReviewPrefs.loadBatchSize(context) }
+    // 每轮多少个：**在本页顶栏那颗胶囊里调**（0917 阿亮第二轮要求）。
+    // 他原来让我放设置页，用了一次就说"放设置里不合理"——理由是这玩意儿是**做题前一刻**
+    // 才需要决定的，跑回设置页改完再进来，思路就断了。
+    // 🔴 必须是 mutableState：滑杆一拖就得立刻反映到这页的显示上。
+    //    老写法 `remember { ReviewPrefs.loadBatchSize(context) }` 是只读一次的常量，改不动。
+    // 生效时机：只影响**下一轮**（`startNewRound` 才会用）；本轮队列已经装填好了，不去动它。
+    var batchSize by remember { mutableStateOf(ReviewPrefs.loadBatchSize(context)) }
+    // 滑杆小弹窗（跟生词本那个排序菜单一样：点一下弹出、点外面收起）
+    var batchOpen by remember { mutableStateOf(false) }
     // 本轮最多补几次错题，防止一直答错陷在死循环里出不来
     val maxRounds = 3
 
@@ -180,6 +188,22 @@ fun ReviewPage(onBack: () -> Unit) {
                 // （生词本页同款问题：「← 生词本（3）」读成「返回生词本」）。
                 // 他拍板："只留返回的小三角儿，页面名去掉"。⇒ 标题删了，别再顺手加回来。
                 Spacer(modifier = Modifier.weight(1f))
+                // 每轮多少个：靠右、跟返回小三角同一行（0917 阿亮指定的位置）。
+                // 🔴 只在**没在答题时**出现（开场页 / 结算页）。
+                //    答题中顶栏已经挤了「自动读 + 口音胶囊 + 剩 N」，再塞一颗必然换行或截断
+                //    （他 font_scale 1.1~1.3，字本来就胖）。而且这本来就是个"开始前先定好"的值。
+                if (!inSession && totalCount > 0) {
+                    BatchSizeControl(
+                        batchSize = batchSize,
+                        open = batchOpen,
+                        onOpen = { batchOpen = true },
+                        onDismiss = { batchOpen = false },
+                        onPick = { n ->
+                            batchSize = n
+                            ReviewPrefs.saveBatchSize(context, n)
+                        },
+                    )
+                }
                 // 自动发音：只在真正做题时出现（开场页/结算页没卡片可念，摆在那儿是噪音）
                 if (inSession) {
                     AutoSpeakControl(
@@ -635,6 +659,84 @@ private fun ReviewCard(
                     text = "先回想一下意思，再点屏幕看答案",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 每轮复习多少个（0917 第二轮：从设置页搬到复习页顶栏）。
+ *
+ * 交互照生词本那个「排序 ▾」来：一颗小胶囊，点一下就地弹菜单，点外面收起。
+ * 菜单里是个滑杆（10~100，步长 5）—— 他要求"小弹窗滑动可以选择 10~100"。
+ *
+ * 【为什么不用 FilterChip 那套】原来在设置页就是 5 颗 chips（10/20/30/50/100）。
+ * 他说"放设置里不合理"——这玩意儿是做题前一刻才决定的，跑去设置页改完再回来，
+ * 思路就断了。搬到顶栏之后还要 chips 占一行就更挤了 ⇒ 换成滑杆。
+ *
+ * 【为什么拖的时候不落盘】滑杆一拖 onValueChange 会连续触发几十次，
+ * 每次都写 SharedPreferences 属于无谓的 IO。这里存一份 draft，**松手**
+ * （onValueChangeFinished）才 onPick 一次。所以中途 app 被杀掉，改的是没保存的值 —— 可以接受。
+ */
+@Composable
+private fun BatchSizeControl(
+    batchSize: Int,
+    open: Boolean,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit,
+    onPick: (Int) -> Unit,
+) {
+    // key 用 open：每次重新打开都按"当前真实设置"重新对齐，不会残留上次拖到一半的值
+    var draft by remember(open) { mutableStateOf(batchSize.toFloat()) }
+
+    Box {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier
+                .padding(end = 16.dp)
+                .clickable(onClick = onOpen),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    text = "每轮 $batchSize 个",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.width(3.dp))
+                Text(
+                    text = if (open) "▴" else "▾",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        DropdownMenu(expanded = open, onDismissRequest = onDismiss) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp).width(230.dp)) {
+                Text(
+                    text = "每轮复习 ${draft.roundToInt()} 个",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Slider(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    valueRange = ReviewPrefs.BATCH_MIN.toFloat()..ReviewPrefs.BATCH_MAX.toFloat(),
+                    // 步长 5 ⇒ 10/15/…/100 共 19 档，中间插值数是 17
+                    steps = (ReviewPrefs.BATCH_MAX - ReviewPrefs.BATCH_MIN) / ReviewPrefs.BATCH_STEP - 1,
+                    onValueChangeFinished = { onPick(draft.roundToInt()) },
+                )
+                Text(
+                    text = "优先挑最久没看过的。改完从下一轮开始生效。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 10.dp),
                 )
             }
         }
