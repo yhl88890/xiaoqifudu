@@ -1,5 +1,9 @@
 package com.xuanji.repeater
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -41,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 
 /**
  * 设置页（**独立全屏页面**）
@@ -157,6 +163,87 @@ fun SettingsPage(
                 // ⚠️【0916 待办】这一项其实不该在设置里：它是临时操作状态（开→拖模块→关），
                 //    不是偏好项。理想位置是播放页上直接给个入口。这轮先保留，避免改动面过大。
                 SettingsSwitch("播放页编辑模式", layoutEdit, onLayoutEditChange)
+            }
+
+            // ---------------- 发音 ----------------
+            SettingsGroup("发音") {
+                var speakSource by remember { mutableStateOf(SpeakPrefs.loadSource(context)) }
+                Text(
+                    text = "朗读用哪个声音",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = speakSource == SpeakPrefs.SOURCE_AUTO,
+                        onClick = {
+                            speakSource = SpeakPrefs.SOURCE_AUTO
+                            SpeakPrefs.saveSource(context, SpeakPrefs.SOURCE_AUTO)
+                        },
+                        label = { Text("自动") },
+                    )
+                    FilterChip(
+                        selected = speakSource == SpeakPrefs.SOURCE_TTS,
+                        onClick = {
+                            speakSource = SpeakPrefs.SOURCE_TTS
+                            SpeakPrefs.saveSource(context, SpeakPrefs.SOURCE_TTS)
+                        },
+                        label = { Text("只用本地发音") },
+                    )
+                }
+                Text(
+                    text = "自动：单词和短句用有道真人音（更自然），整句太长的话有道读不了，会自动改用本地发音；" +
+                        "只用本地发音：完全不联网，没网也能听。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                // 本地发音靠系统的 TTS 引擎，国内不少 ROM 没预装英文语音包 ⇒ 主动提示，别让他以为坏了
+                var ttsStatus by remember { mutableStateOf(Pronounce.ttsStatus()) }
+                LaunchedEffect(Unit) {
+                    // 引擎初始化是异步的，刚进设置页时可能还没就绪，等一会儿再看一眼
+                    repeat(12) {
+                        delay(250)
+                        val s = Pronounce.ttsStatus()
+                        if (s != Pronounce.TtsStatus.NotReady) {
+                            ttsStatus = s
+                            return@LaunchedEffect
+                        }
+                    }
+                    ttsStatus = Pronounce.ttsStatus()
+                }
+                // 🔴 两种"本地发音用不了"都要说清楚，不能让它静默：
+                //    - NoEnglish：引擎在，但没装英文语音包 ⇒ 只能去下载
+                //    - NotReady ：**压根没有可用的语音引擎**（部分国产 ROM 就这样）
+                //      ⇒ 这时长句子会退回有道、而有道对长文本必 500 ⇒ 又变成"没声音"。
+                //      阿亮报的"句子不响"就是这种静默失败，所以这里必须主动提示。
+                if (ttsStatus == Pronounce.TtsStatus.NoEnglish) {
+                    Text(
+                        text = "系统里没有英文语音包，「本地发音」用不了，朗读还是走有道人声。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    TextButton(onClick = { openTtsSettings(context) }) {
+                        Text("去系统设置下载")
+                    }
+                } else if (ttsStatus == Pronounce.TtsStatus.NotReady) {
+                    Text(
+                        text = "系统里没有可用的语音引擎，「本地发音」暂时用不了；" +
+                            "遇到长句子可能会没声音。可以先去系统设置里装一个。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    TextButton(onClick = { openTtsSettings(context) }) {
+                        Text("去系统设置看看")
+                    }
+                }
             }
 
             // ---------------- 识别 ----------------
@@ -468,6 +555,33 @@ fun SettingsPage(
  * 设置分组：分区标题（主色小字加粗）在**卡片外**，设置项在**卡片内**。
  * 【0916】靠「容器」分区，而不是靠字号差 —— 比原来靠 3 档字号硬分清楚得多。
  */
+/**
+ * 跳到系统的「文字转语音」设置页，让用户下载英文语音包。
+ * ⚠️ `com.android.settings.TTS_SETTINGS` **不是官方常量**，部分 ROM 认不出 ⇒ 兜底跳应用详情页。
+ */
+private fun openTtsSettings(ctx: Context) {
+    val candidates = listOf(
+        Intent("com.android.settings.TTS_SETTINGS"),
+        Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${ctx.packageName}"),
+        ),
+    )
+    for (i in candidates) {
+        try {
+            ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return
+        } catch (_: Exception) {
+            // 换下一个候选
+        }
+    }
+    Toast.makeText(
+        ctx,
+        "打不开系统设置，请手动去「设置 → 语言 / 无障碍 → 文字转语音」里下载英文语音包",
+        Toast.LENGTH_LONG,
+    ).show()
+}
+
 @Composable
 private fun SettingsGroup(
     title: String,

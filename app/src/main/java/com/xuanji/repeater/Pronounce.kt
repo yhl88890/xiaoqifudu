@@ -2,6 +2,8 @@ package com.xuanji.repeater
 
 import android.content.Context
 import android.media.MediaPlayer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +18,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.CancellationException
 import kotlin.coroutines.resume
 
@@ -62,6 +65,18 @@ object Pronounce {
      */
     private const val US_MAX_LEN = 16
 
+    /**
+     * 🔴🔴 有道**英音**的长度上限（0917 二次实测才发现的，之前一直以为英音不限长）。
+     * 实测：45 字符 → 200 OK；68 字符 → 500。边界在 45~68 之间，保守取 40。
+     * ⚠️ 超过这条线的文本**美音英音会双双 500** —— 那个"失败就换另一个口音"的回退机制
+     *    这时候等于白写，结果是**整句彻底静默**（阿亮报的"句子不响"就是这个）。
+     *    ⇒ 所以超长文本直接交给本地 TTS，见 [speak] 里的分流。
+     */
+    private const val UK_MAX_LEN = 40
+
+    /** TTS 语速。先固定 1.0；以后要做"慢速跟读"再把它开成设置项 */
+    private const val TTS_SPEECH_RATE = 1.0f
+
     // ---------- 本地缓存 ----------
     /** 缓存目录 `<cacheDir>/voice/`。用 cacheDir 不用 filesDir：系统空间紧张时清掉无所谓，重下就行 */
     private const val CACHE_DIR = "voice"
@@ -77,15 +92,57 @@ object Pronounce {
     /** 由 [XuanjiApp.onCreate] 调一次，别的地方不用管 */
     fun init(context: Context) {
         appContext = context.applicationContext
+        warmUpTts()
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     @Volatile private var player: MediaPlayer? = null
 
-    /** accent: "us" 美音 / "uk" 英音 */
+    // ---------- 本地 TTS ----------
+    /**
+     * 系统 TTS 引擎。**初始化是异步的，首次可能要 1~2 秒** ⇒ 在 [init] 里就预热，
+     * 不然用户点第一下小喇叭会因为引擎还没就绪而没反应。
+     */
+    private var tts: TextToSpeech? = null
+    @Volatile private var ttsReady = false
+
+    /**
+     * 发音总入口。**签名别改** —— 全 App 十几处喇叭按钮都调它。
+     *
+     * 分流（0917）：
+     *   ① 设置里选了「只用本地发音」 ⇒ 直接 TTS（离线）；TTS 用不了才退回有道
+     *   ② 文本超过 [UK_MAX_LEN] ⇒ 有道两种口音**必 500**，直接交给本地 TTS
+     *      —— 这就是"单词能响、长句完全不响"的修法
+     *   ③ 其余 ⇒ 走有道（短的走美音、长的走英音），带本地缓存
+     */
     fun speak(word: String, accent: String) {
         val w = word.trim()
         if (w.isEmpty()) return
+
+        val src = appContext?.let { SpeakPrefs.loadSource(it) } ?: SpeakPrefs.SOURCE_AUTO
+
+        // ① 用户强制全用本地发音
+        if (src == SpeakPrefs.SOURCE_TTS) {
+            if (ttsSpeak(w, accent)) return
+            Log.w(TAG, "设了「只用本地发音」但 TTS 用不了（没装英文语音包？），退回有道 len=${w.length}")
+            speakYoudao(w, accent)
+            return
+        }
+
+        // ② 超长文本：有道两种口音都会 500，那两轮请求就别发了
+        if (w.length > UK_MAX_LEN && ttsReady && ttsSpeak(w, accent)) {
+            Log.i(TAG, "len=${w.length} 超过有道上限 $UK_MAX_LEN，改走本地 TTS")
+            return
+        }
+
+        // ③ 有道人声
+        speakYoudao(w, accent)
+    }
+
+    /** 有道人声这条路：本地缓存优先，拿不到就换另一个口音再试 */
+    private fun speakYoudao(w: String, accent: String) {
+        // 别跟 TTS 的声音叠在一起
+        try { tts?.stop() } catch (_: Exception) {}
         // ⚠️ 别改回去：有道接口 type=1 是英音、type=2 是美音（反直觉，但是事实）
         //
         // 🔴 口音选择（0917）：选了美音、但文本超过 [US_MAX_LEN] 时**直接用英音**。
@@ -233,6 +290,77 @@ object Pronounce {
                 finish(false)
             }
         }
+
+    // ---------- 本地 TTS ----------
+
+    /** 预热引擎。初始化回调是异步的，就绪前 [speak] 不会走 TTS 分支 */
+    private fun warmUpTts() {
+        if (tts != null) return
+        val ctx = appContext ?: return
+        tts = TextToSpeech(ctx) { status ->
+            ttsReady = status == TextToSpeech.SUCCESS
+            Log.i(TAG, "TTS 初始化 status=$status ready=$ttsReady")
+            if (ttsReady) {
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {}
+                    override fun onDone(utteranceId: String?) {}
+                    override fun onError(utteranceId: String?) {
+                        Log.w(TAG, "TTS 朗读失败 id=$utteranceId")
+                    }
+
+                    override fun onError(utteranceId: String?, errorCode: Int) {
+                        Log.w(TAG, "TTS 朗读失败 id=$utteranceId code=$errorCode")
+                    }
+                })
+            }
+        }
+    }
+
+    /**
+     * 用本地 TTS 读。返回 true = 已经交给引擎了。
+     * ⚠️ 有的引擎/ROM **没有独立的英音 voice** ⇒ 自动降级成美音，别当成设置没生效。
+     * ⚠️ 系统里没有英文语音包时返回 false（设置页会提示去下载）。
+     */
+    private fun ttsSpeak(text: String, accent: String): Boolean {
+        val t = tts
+        if (t == null || !ttsReady) return false
+
+        val want = if (accent == "uk") Locale.UK else Locale.US
+        val loc = when {
+            t.isLanguageAvailable(want) >= TextToSpeech.LANG_AVAILABLE -> want
+            t.isLanguageAvailable(Locale.US) >= TextToSpeech.LANG_AVAILABLE -> {
+                if (want != Locale.US) Log.i(TAG, "TTS 没有英音 voice，降级用美音")
+                Locale.US
+            }
+            else -> {
+                Log.w(TAG, "TTS 没有英文语音包，读不了")
+                return false
+            }
+        }
+
+        // 跟有道的播放器互斥，别叠着响
+        releasePlayer()
+        return try {
+            t.language = loc
+            t.setSpeechRate(TTS_SPEECH_RATE)
+            val r = t.speak(text, TextToSpeech.QUEUE_FLUSH, null, "xj${System.currentTimeMillis()}")
+            if (r != TextToSpeech.SUCCESS) Log.w(TAG, "TTS speak 返回 $r")
+            r == TextToSpeech.SUCCESS
+        } catch (e: Exception) {
+            Log.w(TAG, "TTS speak 异常: ${e.message}")
+            false
+        }
+    }
+
+    /** 设置页拿它判断要不要提示"去系统里装英文语音包" */
+    enum class TtsStatus { NotReady, Ok, NoEnglish }
+
+    fun ttsStatus(): TtsStatus {
+        val t = tts ?: return TtsStatus.NotReady
+        if (!ttsReady) return TtsStatus.NotReady
+        return if (t.isLanguageAvailable(Locale.US) >= TextToSpeech.LANG_AVAILABLE) TtsStatus.Ok
+        else TtsStatus.NoEnglish
+    }
 
     private fun md5(s: String): String =
         MessageDigest.getInstance("MD5").digest(s.toByteArray())
