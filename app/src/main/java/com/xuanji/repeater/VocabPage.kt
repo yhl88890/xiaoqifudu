@@ -49,11 +49,12 @@ import java.util.Locale
  * 数据由 VocabStore（JSON 持久化 + StateFlow）驱动。
  */
 @Composable
-fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
+fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}, onStats: () -> Unit = {}) {
     val context = LocalContext.current
     VocabStore.ensureLoaded(context)
     val entries by VocabStore.entries.collectAsStateWithLifecycle()
     var showClearConfirm by remember { mutableStateOf(false) }
+    var showStats by remember { mutableStateOf(false) }
 
     // ---- 筛选 / 搜索（0916：生词本超过 200 条后，翻列表找不到词）----
     // ⚠️ 刻意不持久化：每次进来都从「全部」开始。
@@ -78,10 +79,9 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
 
     // 没掌握的条数：复习入口上直接显示，一眼知道还有多少要练
     val pending = entries.count { !it.mastered }
-    val masteredCount = entries.size - pending
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // 头部：返回 + 复习 + 清空
+        // 头部：返回 + 清空（复习入口已挪到下方概览行，见 0918）
         //
         // 🔴【0917 阿亮】这里原来在返回箭头右边跟着一行「生词本（3）」当标题。
         // 问题：**这串字在「阅读模式」顶栏右侧是"入口按钮"，到了这一页又成了"标题"**，
@@ -89,7 +89,7 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
         // （复习页同理：「← 复习」读成「返回复习」）。
         // 他的原话："这个逻辑不太对吧"，然后拍板"只留返回的小三角儿"。
         // ⇒ 所以标题去掉了，**别再顺手加回来**。
-        // 条数信息没丢：下一行的「共 N 条 · 已掌握 N 条」本来就在写。
+        // 条数信息没丢：下方筛选档（全部/未掌握/已掌握）本来就在写。
         Row(
             modifier = Modifier.fillMaxWidth().height(48.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -98,18 +98,6 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
                 Icon(XuanjiIcons.Back, contentDescription = "返回")
             }
             Spacer(modifier = Modifier.weight(1f))
-            // 复习入口：只要生词本里有东西就给（哪怕全掌握了，进去也能再练）
-            if (entries.isNotEmpty()) {
-                TextButton(onClick = onReview) {
-                    Icon(
-                        XuanjiIcons.Repeat,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (pending > 0) "复习 $pending" else "复习")
-                }
-            }
             TextButton(
                 onClick = { showClearConfirm = true },
                 enabled = entries.isNotEmpty(),
@@ -139,11 +127,23 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
                 modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "共 ${entries.size} 条 · 已掌握 $masteredCount 条",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                TextButton(onClick = onStats) {
+                    Text(
+                        text = "学习统计",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = onReview) {
+                    Icon(
+                        XuanjiIcons.Repeat,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(if (pending > 0) "复习 $pending" else "复习")
+                }
                 Spacer(modifier = Modifier.weight(1f))
 
                 // ---- 排序入口（0917）----
@@ -306,6 +306,10 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
                 }
             },
         )
+    }
+
+    if (showStats) {
+        StatsPage(onBack = { showStats = false })
     }
 }
 
