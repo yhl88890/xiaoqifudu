@@ -1599,7 +1599,15 @@ class PlayerService : Service() {
         val all = AudioScanner.scan(this, IgnorePrefs.load(this))
         val items = saved.paths.mapNotNull { path -> all.firstOrNull { it.path == path } }
         if (items.isEmpty()) {
-            PlaybackPrefs.clear(this)
+            // 【0918 修·阿亮"新版本前两次启动记不住播放进度"】
+            // 旧代码在这里无条件 clear()，等于"只要这次扫不出来就把存档删了"。
+            // 但扫描会是**暂时性**失败的：冷启时媒体权限还没授予（restorePlayback 跑在
+            // 权限申请之前）、媒体库尚未就绪、外置存储刚挂载 —— 这些情况下
+            // AudioScanner 会返回空列表，存档就被误删，播放进度永久丢失，
+            // 于是表现为"装完新版本前几次启动记不住"。
+            // 只有「扫描确实读到了媒体库内容、但存档里的路径一个都不在」才能判定
+            // 那些文件真的被删了，这时清存档才有意义。
+            if (all.isNotEmpty()) PlaybackPrefs.clear(this)
             return
         }
         val idx = saved.index.coerceIn(0, items.size - 1)

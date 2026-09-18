@@ -428,24 +428,6 @@ fun SettingsPage(
                 )
             }
 
-            // ---------------- B站 ----------------
-            SettingsGroup("B站 账号（可选）") {
-                var biliSess by remember { mutableStateOf(AsrPrefs.loadBiliSessdata(context)) }
-                OutlinedTextField(
-                    value = biliSess,
-                    onValueChange = {
-                        biliSess = it
-                        AsrPrefs.saveBiliSessdata(context, it)
-                    },
-                    label = { Text("B站 SESSDATA（登录态）") },
-                    placeholder = { Text("粘贴浏览器 cookie 里的 SESSDATA") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    // 【0917 铺开】撤销 v31 的 66% 收窄 —— 他说改短了看着别扭。
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-
             // ---------------- 翻译 ----------------
             SettingsGroup("字幕翻译") {
                 var translateModel by remember { mutableStateOf(AsrPrefs.loadTranslateModel(context)) }
@@ -461,6 +443,25 @@ fun SettingsPage(
                     label = { Text("翻译模型") },
                     placeholder = { Text("不填也行；填了才会自动配中文") },
                     singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            // ---------------- B站 ----------------
+            // 【0918 阿亮："B站账号可选和字幕翻译上下位置换一下，就是可选的都放到下边儿"】
+            SettingsGroup("B站 账号（可选）") {
+                var biliSess by remember { mutableStateOf(AsrPrefs.loadBiliSessdata(context)) }
+                OutlinedTextField(
+                    value = biliSess,
+                    onValueChange = {
+                        biliSess = it
+                        AsrPrefs.saveBiliSessdata(context, it)
+                    },
+                    label = { Text("B站 SESSDATA（登录态）") },
+                    placeholder = { Text("粘贴浏览器 cookie 里的 SESSDATA") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    // 【0917 铺开】撤销 v31 的 66% 收窄 —— 他说改短了看着别扭。
                     modifier = Modifier.fillMaxWidth(),
                 )
             }

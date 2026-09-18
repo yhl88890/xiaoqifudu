@@ -1072,7 +1072,16 @@ class MainActivity : ComponentActivity() {
         val missingPerms = permissions.filter {
             ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
-        val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+        // 【0918 修·阿亮"新版本前两次启动记不住播放进度"】
+        // 上面 LaunchedEffect(svc) 里的 restorePlayback() 跑在权限申请**之前**，
+        // 那一刻媒体权限还没拿到，AudioScanner 扫不出任何音频 ⇒ 恢复必然失败。
+        // 旧代码这里回调是空的，等于白白浪费掉这一轮；拿到权限后补一次，让它有机会真正恢复。
+        // restorePlayback 自带「已有播放内容就跳过」的守卫，用户已经手动开始播放时不会被打断。
+        val permLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) { granted ->
+            if (granted.values.any { it }) PlayerService.instance?.restorePlayback()
+        }
 
         // 权限请求必须等组合完成后再发起（launcher 需要先完成初始化），
         // 否则在组合函数体内直接 launch() 会抛 "Launcher has not been initialized"
