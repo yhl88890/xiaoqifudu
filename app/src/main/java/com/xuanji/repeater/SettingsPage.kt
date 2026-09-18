@@ -391,8 +391,16 @@ fun SettingsPage(
                 }
             }
 
-            // ---------------- 识别 ----------------
-            SettingsGroup("识别 · 自动生成字幕") {
+            // ---------------- 识别 · 翻译（共用一把 Key） ----------------
+            // 【0918 阿亮："把它跟那个填 API Key 的放到一个类目里头，放到一块儿"】
+            //  原来「字幕翻译」是独立一组，里面放一个**手填框** —— 他的原话："看着像要我填东西，
+            //  这个误导很严重"，而且识别那边是下拉、这边是手填，同一页两套做法。
+            //  现在两处一起改：
+            //   ① 两组并成一组（本来就是同一件事：同一把 Key、同一家硅基流动，
+            //      软件介绍里那句「一把 Key 管四处」说的就是这个）
+            //   ② 翻译模型改成跟「识别服务商」**同款的下拉**（`PickerRow`），**不给手填**
+            //      ⇒ 从根上消灭"型号打错一个字母就静默失败"
+            SettingsGroup("识别 · 翻译") {
                 var asrProvider by remember { mutableStateOf(AsrPrefs.loadProvider(context)) }
                 // 【0917 阿亮："识别服务商也一样，那 3 个服务商也给它弄成点击小弹窗，
                 //    放到『识别服务商』这几个字的右边，这不又少了两行"】
@@ -426,24 +434,19 @@ fun SettingsPage(
                         .fillMaxWidth()
                         .padding(top = 4.dp),
                 )
-            }
-
-            // ---------------- 翻译 ----------------
-            SettingsGroup("字幕翻译") {
-                var translateModel by remember { mutableStateOf(AsrPrefs.loadTranslateModel(context)) }
-                OutlinedTextField(
-                    value = translateModel,
-                    onValueChange = {
+                // 【0918】手填框 → 下拉。可选模型见 `SubtitleTranslator.Model`（三个都在硅基流动）。
+                var translateModel by remember {
+                    mutableStateOf(SubtitleTranslator.Model.ofId(AsrPrefs.loadTranslateModel(context)))
+                }
+                PickerRow(
+                    label = "翻译模型",
+                    options = SubtitleTranslator.Model.values().toList(),
+                    current = translateModel,
+                    labelOf = { it.label },
+                    onPick = {
                         translateModel = it
-                        AsrPrefs.saveTranslateModel(context, it)
+                        AsrPrefs.saveTranslateModel(context, it.id)
                     },
-                    // 【0917 铺开】撤销 v31 的 66% 收窄（同「识别」）。原来下面那行
-                    //    「不填也能用；填了才会自动给整批字幕配中文」也撤了 —— 信息并进
-                    //    placeholder，省一行。
-                    label = { Text("翻译模型") },
-                    placeholder = { Text("不填也行；填了才会自动配中文") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
 
@@ -660,11 +663,13 @@ fun SettingsPage(
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
                                     "字幕翻译用哪个模型",
-                                    "默认 Qwen/Qwen2.5-7B-Instruct，走硅基流动的对话接口，跟识别共用那把 Key。" +
-                                        "主模型排队或者被限流的时候，会自动换成 tencent/Hy3 限时免费版兜底，不用你管。\n" +
-                                        "想再省一点，可以把「设置 → 字幕翻译 → 翻译模型」换成 tencent/Hunyuan-MT-7B" +
-                                        "（腾讯混元翻译专用模型，也是免费的）。\n" +
-                                        "另外，长按某一句查中文走的是另一条免费通道（有道 + MyMemory 竞速），" +
+                                    "设置 →「识别 · 翻译」里头那个「翻译模型」，是个下拉，点一下就能换，一共三个：" +
+                                        "通义千问（默认）、混元翻译（专用）、混元 Hy3（免费）。\n" +
+                                        "三个都在硅基流动上，共用同一把 Key，换哪个都不用重新申请。" +
+                                        "平时用默认那个就行；想让字幕翻得更准，可以换成「混元翻译（专用）」——" +
+                                        "腾讯专门做翻译的模型，免费，翻字幕比通用模型地道。\n" +
+                                        "另外它会自己兜底：选的那个排队或者被限流了，会自动换成混元免费版接着干，不用你管。\n" +
+                                        "还有，长按某一句查中文走的是另一条免费通道（有道 + MyMemory 竞速），" +
                                         "根本不需要 Key，也不受这里影响。",
                                 )
                                 Spacer(Modifier.height(12.dp))

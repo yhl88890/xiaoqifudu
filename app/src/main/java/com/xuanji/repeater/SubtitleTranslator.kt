@@ -24,6 +24,29 @@ object SubtitleTranslator {
     const val DEFAULT_PRIMARY_MODEL = "Qwen/Qwen2.5-7B-Instruct"
     private const val BASE_URL = "https://api.siliconflow.cn/v1"
 
+    /**
+     * 字幕翻译可选的模型（设置页做成下拉选，**不让用户手填型号**）。
+     *
+     * 🔴 **三个都在硅基流动上** —— 同一个 [BASE_URL]、同一把 Key，区别只是模型。
+     *    （识别服务商那栏选什么，跟这里无关：翻译恒定走硅基流动。）
+     *
+     * 【0918 阿亮："那个框看着像要我填东西，这个误导很严重"】
+     *   原来是个 `OutlinedTextField` 手填型号 —— 打错一个字母就静默失败，
+     *   而且"清空"会存下空串（`getString` 的默认值只在键不存在时生效）⇒ 更坏。
+     */
+    enum class Model(val id: String, val label: String) {
+        QWEN("Qwen/Qwen2.5-7B-Instruct", "通义千问（默认）"),
+        HUNYUAN_MT("tencent/Hunyuan-MT-7B", "混元翻译（专用）"),
+        HY3("tencent/Hy3", "混元 Hy3（免费）"),
+        ;
+
+        companion object {
+            /** 按 id 反查；空串 / 未知 id（旧存档、手填残留）**一律回落默认**，绝不把空模型名发给接口。 */
+            fun ofId(id: String?): Model =
+                values().firstOrNull { it.id == id?.trim() } ?: QWEN
+        }
+    }
+
     /** 排队/限流特征（命中即触发切换兜底模型） */
     private val QUEUE_HINTS = listOf(
         "queue", "rate", "ratelimit", "rate_limit", "overload", "overloaded",
@@ -46,21 +69,25 @@ object SubtitleTranslator {
     ): List<String> = withContext(Dispatchers.IO) {
         val result = MutableList(english.size) { "" }
         if (apiKey.isBlank() || english.isEmpty()) return@withContext result
+        // 🔴【0918 保底】主模型名为空（旧版手填框被清空留下的空串）⇒ 空模型名会 400，
+        //    而那个错误不算"排队"，进不了兜底分支 ⇒ 字幕翻译**静默变空**。
+        //    这里统一回落默认模型，从后端再保一层（设置页已改成下拉，正常不会再出现空串）。
+        val primary = primaryModel.ifBlank { DEFAULT_PRIMARY_MODEL }
         try {
             var from = 0
             while (from < english.size) {
                 val to = min(from + batchSize, english.size)
                 val batch = english.subList(from, to)
                 // 先主模型；主模型排队/限流则切换 HY3 兜底
-                val (primaryRes, primaryErr) = callModel(batch, apiKey, baseUrl, primaryModel)
+                val (primaryRes, primaryErr) = callModel(batch, apiKey, baseUrl, primary)
                 val translated = if (primaryRes != null) {
                     primaryRes
-                } else if (primaryErr != null && isQueueError(primaryErr) && fallbackModel != primaryModel) {
-                    Log.w(TAG, "主模型($primaryModel)排队/限流，切换 HY3 兜底: $primaryErr")
+                } else if (primaryErr != null && isQueueError(primaryErr) && fallbackModel != primary) {
+                    Log.w(TAG, "主模型($primary)排队/限流，切换 HY3 兜底: $primaryErr")
                     val (fbRes, fbErr) = callModel(batch, apiKey, baseUrl, fallbackModel)
                     fbRes ?: run { Log.w(TAG, "HY3 兜底也失败: $fbErr"); emptyList() }
                 } else {
-                    Log.w(TAG, "翻译失败($primaryModel): $primaryErr")
+                    Log.w(TAG, "翻译失败($primary): $primaryErr")
                     emptyList()
                 }
                 for (i in batch.indices) {

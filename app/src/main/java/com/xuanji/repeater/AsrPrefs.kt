@@ -30,10 +30,17 @@ object AsrPrefs {
     fun saveKey(ctx: Context, key: String) =
         sp(ctx).edit().putString(KEY_KEY, key.trim()).apply()
 
-    /** 字幕翻译模型（硅基流动 chat 模型）。默认 Qwen/Qwen2.5-7B-Instruct；排队时自动切 HY3。 */
+    /**
+     * 字幕翻译模型（硅基流动 chat 模型）。默认 Qwen/Qwen2.5-7B-Instruct；排队时自动切 HY3。
+     *
+     * 🔴【0918】`getString` 的默认值**只在"键不存在"时生效** —— 旧版手填框被清空会把**空串**存进来，
+     *   读出来也是空串 ⇒ 空模型名发给接口 = 400 且不触发兜底 = 翻译静默变空。
+     *   所以这里统一用 `ifBlank` 回落默认值，**不管存档里是什么**都给出一个合法模型 id。
+     */
     fun loadTranslateModel(ctx: Context): String =
-        sp(ctx).getString(KEY_TRANSLATE_MODEL, "Qwen/Qwen2.5-7B-Instruct")
-            ?: "Qwen/Qwen2.5-7B-Instruct"
+        sp(ctx).getString(KEY_TRANSLATE_MODEL, "")
+            .orEmpty()
+            .ifBlank { SubtitleTranslator.DEFAULT_PRIMARY_MODEL }
 
     fun saveTranslateModel(ctx: Context, v: String) =
         sp(ctx).edit().putString(KEY_TRANSLATE_MODEL, v.trim()).apply()
