@@ -176,9 +176,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
-/** 页面：播放页 / 选集页 / 阅读模式页 / 文件夹页 / 生词本页 */
-enum class Page { PLAYER, TRACK, READING, FOLDER, VOCAB, REVIEW, VIDEO }
-
 // ===== 视频模式 UI 状态：提升到文件级(进程内常驻),切页面/旋转不丢,回视频页自动续播 =====
 private var videoUri by mutableStateOf<Uri?>(null)
 /** 视频的真实文件路径：从文件管理器选视频时才有。有了它就能直接读同目录 .srt（不再靠猜 Uri） */
@@ -435,14 +432,6 @@ private fun clearVideoHandoffPrefs(context: Context) {
         apply()
     }
 }
-
-fun encodeSentences(list: List<Sentence>): String =
-    list.joinToString("\n") { "${it.startMs}\t${it.endMs}\t${it.text.replace("\n", " ")}" }
-fun decodeSentences(s: String): List<Sentence> =
-    if (s.isBlank()) emptyList() else s.lines().mapNotNull { line ->
-        val p = line.split("\t")
-        if (p.size == 3) runCatching { Sentence(p[0].toLong(), p[1].toLong(), p[2]) }.getOrNull() else null
-    }
 
 
 /**

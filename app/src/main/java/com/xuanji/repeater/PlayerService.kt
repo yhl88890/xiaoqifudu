@@ -49,17 +49,6 @@ import kotlinx.coroutines.withContext
  * 视频开始播放时 MainActivity 把这套控制器塞进来，本服务的 MediaSession 回调/音频焦点
  * 就转发到视频；切走视频模式时 detach，恢复成纯音频控制。
  */
-interface ExternalMediaController {
-    fun play()
-    fun pause()
-    fun isPlaying(): Boolean
-    fun position(): Long
-    fun duration(): Long
-    fun seekTo(ms: Long)
-    fun skipNext()
-    fun skipPrev()
-    fun title(): String
-}
 
 class PlayerService : Service() {
 
