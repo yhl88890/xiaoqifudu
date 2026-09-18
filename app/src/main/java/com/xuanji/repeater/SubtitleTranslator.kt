@@ -16,8 +16,16 @@ import kotlin.math.min
  * - **地址 / 模型 / 兜底全部跟着「识别服务商」走**（v44）。以前地址写死硅基流动，
  *   用户换成 Groq 填 Groq 的 Key 之后，翻译会拿着 Groq 的 Key 去敲硅基流动 ⇒ 401 ⇒
  *   而 401 不算"排队" ⇒ 兜底不触发 ⇒ **字幕翻译静默变空**。
- * - 主模型遇到排队/限流（HTTP 429/503、或返回排队/过载/繁忙等提示）时，
- *   自动切换到**同一家**的另一个模型兜底（模型名跨家不通用，不能切到别家去）。
+ * - 主模型**不可用**时自动切换到**同一家**的另一个模型兜底（模型名跨家不通用，不能切到别家去）。
+ *   "不可用"包含三种：
+ *     ① 排队/限流（HTTP 429/503、或返回排队/过载/繁忙等提示）
+ *     ② 模型被官方**下线 / 改名** ⇒ 回 400 / 404
+ *     ③ 返回内容解析不出来（模型不听话、吐了段废话）
+ *   🔴【0918 阿亮点出来的】以前只有①会兜底，②③ 被判成"这不是排队"⇒ 不换模型 ⇒
+ *     **翻译静默变空**（界面上一点提示都没有）。现在凡是"服务器给了回应"的都换模型再试一次。
+ *   唯一**不**兜底的是纯连接异常 / 超时：换模型救不了断网，只会把等待时间翻倍。
+ * - 同一段视频里只要兜底成功过一次，**后面的批次直接用兜底模型**，
+ *   不再"每批都先拿下线模型失败一次"（长视频十几批 ⇒ 十几倍无谓请求）。
  * - 没有配置 Key 时返回与输入等长的空列表（调用方再退回免费翻译通道）。
  * - 全程失败也不抛异常，翻译缺失不影响「英文识别 + 播放学习」主流程。
  */
@@ -124,24 +132,39 @@ object SubtitleTranslator {
         //    （设置页已改成下拉，正常不会再有空串；这里是后端的最后一道。）
         val primary = primaryModel.ifBlank { Model.defaultFor(AsrProvider.SILICONFLOW).id }
         try {
+            // 这一段实际在用的模型。兜底一旦成功就把它记住 —— 主模型整段下线时，
+            // 后续批次直接用兜底，不用每批都先撞一次墙（长视频十几批 = 十几倍无谓请求 + 十几倍延迟）。
+            var activeModel = primary
             var from = 0
             while (from < english.size) {
                 val to = min(from + batchSize, english.size)
                 val batch = english.subList(from, to)
-                // 先主模型；主模型排队/限流则**在同一家里**换个模型兜底
-                val (primaryRes, primaryErr) = callModel(batch, apiKey, baseUrl, primary)
-                val translated = if (primaryRes != null) {
-                    primaryRes
-                } else if (primaryErr != null && isQueueError(primaryErr) && fallbackModel != primary) {
-                    Log.w(TAG, "主模型($primary)排队/限流，切同家兜底($fallbackModel): $primaryErr")
-                    val (fbRes, fbErr) = callModel(batch, apiKey, baseUrl, fallbackModel)
-                    fbRes ?: run { Log.w(TAG, "兜底($fallbackModel)也失败: $fbErr"); emptyList() }
-                } else {
-                    Log.w(TAG, "翻译失败($primary): $primaryErr")
-                    emptyList()
+                val (res1, err1) = callModel(batch, apiKey, baseUrl, activeModel)
+                var translated = res1
+                if (translated == null) {
+                    // 🔴【0918】原来这里有个 `isQueueError(err1)` 的门槛，只有排队/限流才兜底。
+                    //   模型下线回的是 400/404，过不了那道门 ⇒ 直接 emptyList ⇒ **翻译静默变空**。
+                    //   现在换成 isWorthSwapping：只要服务器给了回应（含解析失败）就值得换模型再试。
+                    if (err1 != null && fallbackModel != activeModel && isWorthSwapping(err1)) {
+                        val why = if (isQueueError(err1)) "排队/限流" else "不可用（可能已下线/改名）"
+                        Log.w(TAG, "$activeModel $why，切同家兜底 $fallbackModel: $err1")
+                        val (res2, err2) = callModel(batch, apiKey, baseUrl, fallbackModel)
+                        if (res2 != null) {
+                            translated = res2
+                            if (activeModel != fallbackModel) {
+                                Log.i(TAG, "余下批次改用兜底模型 $fallbackModel（主模型 $primary 不可用）")
+                                activeModel = fallbackModel
+                            }
+                        } else {
+                            Log.w(TAG, "兜底 $fallbackModel 也失败: $err2")
+                        }
+                    } else {
+                        Log.w(TAG, "翻译失败($activeModel): $err1")
+                    }
                 }
+                val got = translated ?: emptyList()
                 for (i in batch.indices) {
-                    if (i < translated.size) result[from + i] = translated[i]
+                    if (i < got.size) result[from + i] = got[i]
                 }
                 from = to
             }
@@ -212,9 +235,22 @@ object SubtitleTranslator {
         }
     }
 
-    /** 判断错误文案是否属于排队/限流（应切换兜底模型）。 */
+    /** 判断错误文案是否属于排队/限流（只用来区分日志措辞，**不再当兜底的门槛**）。 */
     private fun isQueueError(err: String): Boolean {
         val lower = err.lowercase()
         return QUEUE_HINTS.any { lower.contains(it) }
     }
+
+    /**
+     * 值不值得**换个模型再试一次**。
+     *
+     * 🔴【0918】以前门槛是 `isQueueError` —— 只认排队/限流。模型被下线/改名时接口回 400/404，
+     *   文案里没有排队特征 ⇒ 不兜底 ⇒ 翻译静默变空。现在放宽成"服务器给了回应就值得换"：
+     *   - `HTTP 4xx/5xx: ...` ⇒ 值：可能就是这个模型没了，换同家的另一个多半能活
+     *   - `解析翻译结果失败: ...` ⇒ 值：这个模型不听话，换一个试试
+     *   - 其它（`connect timed out` / `Unable to resolve host` / `Connection reset` 等）⇒ 不值：
+     *     换模型救不了断网，只会让等待时间翻倍（超时 30s ⇒ 每批 60s）
+     */
+    private fun isWorthSwapping(err: String): Boolean =
+        err.startsWith("HTTP ") || err.startsWith("解析")
 }
