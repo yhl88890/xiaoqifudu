@@ -344,7 +344,6 @@ private val videoAsrScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
 // ===== 视频现场持久化：URI / 进度 / 字幕存 SharedPreferences，进程被杀后下次启动可恢复 =====
 private const val PREFS_VIDEO = "xuanji_video"
-private const val PREFS_CRASH = "xuanji_crash"
 private const val CRASH_WINDOW_MS = 3000L      // 兜底计数窗口
 private const val CRASH_MAX_IN_WINDOW = 5      // 窗口内崩这么多次就说明救不回来，交还系统
 // 进程级幂等：Activity 重建（旋转/配置变更）会重走 onCreate，兜底只能装一次，
@@ -908,30 +907,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-        }
-    }
-
-    /** 把异常现场存到 SP：万一真闪退了，这段信息能直接拿来定位，不用再靠猜 */
-    private fun saveLastCrash(context: Context, t: Throwable) {
-        try {
-            val sb = StringBuilder()
-            sb.append(t.javaClass.name).append(": ").append(t.message ?: "").append("\n")
-            t.stackTrace.take(15).forEach { sb.append("    at ").append(it).append("\n") }
-            // 必须 commit 不能 apply：进程马上就要被杀，异步落盘来不及写，现场就丢了
-            context.getSharedPreferences(PREFS_CRASH, Context.MODE_PRIVATE).edit()
-                .putString("last", sb.toString())
-                .putLong("time", System.currentTimeMillis())
-                .commit()
-        } catch (_: Throwable) { }
-    }
-
-    /** 启动时把上次闪退的堆栈打进日志：真出了事，插上 USB 一条 logcat 就能捞到现场，不用复现 */
-    private fun logLastCrash(context: Context) {
-        runCatching {
-            val sp = context.getSharedPreferences(PREFS_CRASH, Context.MODE_PRIVATE)
-            val last = sp.getString("last", null) ?: return
-            val time = sp.getLong("time", 0L)
-            android.util.Log.e("XJ_LASTCRASH", "上次崩溃时间=${java.util.Date(time)}\n$last")
         }
     }
 
@@ -1524,88 +1499,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-}
-
-/** 启动动画：高清照片（640px）淡入 → 放大到屏幕宽度 → 定格 → 淡出，露出播放页 */
-@Composable
-private fun SplashOverlay(onDone: () -> Unit) {
-    val alpha = remember { Animatable(0f) } // 初始透明，先淡入衔接系统启动窗
-    val startSize = 96.dp
-    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
-    // 关键：Image 本身按屏幕宽度渲染，再用 graphicsLayer 从 96dp 缩放到全宽，
-    // 避免"先压到 96dp 低分辨率再放大"导致的最后一秒变花。
-    val initialScale = (startSize.value / screenWidth.value).coerceAtLeast(0.01f)
-    val scale = remember { Animatable(initialScale) }
-    LaunchedEffect(Unit) {
-        // B: 快速淡入（120ms），避免首帧硬切
-        alpha.animateTo(1f, animationSpec = tween(120, easing = LinearEasing))
-        // A: 照片从 96dp 放大到与屏幕同宽
-        scale.animateTo(1f, animationSpec = tween(480, easing = FastOutSlowInEasing))
-        // C: 定格 100ms，视觉上有"到位"停顿感
-        delay(100)
-        // 淡出：透明度降到最低，透出播放页
-        alpha.animateTo(0f, animationSpec = tween(300, easing = LinearEasing))
-        onDone()
-    }
-    Box(
-        modifier = Modifier.fillMaxSize().background(Color(0xFFABB1A8)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Image(
-            painter = painterResource(R.drawable.ic_splash_photo),
-            contentDescription = null,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .size(screenWidth)
-                .graphicsLayer {
-                    scaleX = scale.value
-                    scaleY = scale.value
-                    this.alpha = alpha.value
-                },
-        )
-    }
-}
-
-/**
- * 视频 ASR 短句合并：TeleSpeechASR 的 segment 粒度偶发偏碎（一两词一句），
- * 把时长 < 1200ms 的短句与相邻句合并，字幕行更整、点句复读听感更自然。
- * 逻辑对齐 PlayerService.mergeShortSentences（优先并下一个，无则并上一个）。
- */
-private fun mergeShortAsrSentences(list: List<Sentence>): List<Sentence> {
-    val shortMs = 1200L
-    // 相邻两句间隔超过 5 秒就别硬并：分片识别时若中间某段失败被跳过，
-    // 前后两句会隔着整个失败段（10 分钟），并起来就是一句点下去要播十分钟的巨无霸
-    val gapLimitMs = 5000L
-    val out = list.toMutableList()
-    var changed = true
-    while (changed) {
-        changed = false
-        var k = 0
-        while (k < out.size) {
-            val n = out[k]
-            if (n.endMs - n.startMs < shortMs && out.size > 1 && n.text.isNotEmpty()) {
-                val next = out.getOrNull(k + 1)
-                if (next != null && next.text.isNotEmpty() && next.startMs - n.endMs <= gapLimitMs) {
-                    // 注意必须写 ${n.text}：写成 "$n.text" 会被 Kotlin 解析成 ${n} 的 toString 再拼上字面量 ".text"，
-                    // 结果字幕里出现 "Sentence(startMs=..., text=xxx).text" 这种鬼文本
-                    out[k] = Sentence(n.startMs, next.endMs, "${n.text} ${next.text}".trim())
-                    out.removeAt(k + 1)
-                    changed = true
-                    continue
-                }
-                val prev = out.getOrNull(k - 1)
-                if (prev != null && prev.text.isNotEmpty() && n.startMs - prev.endMs <= gapLimitMs) {
-                    out[k - 1] = Sentence(prev.startMs, n.endMs, "${prev.text} ${n.text}".trim())
-                    out.removeAt(k)
-                    changed = true
-                    k--
-                    continue
-                }
-            }
-            k++
-        }
-    }
-    return out
 }
 
 // ===== 视频播放控制（文件级）：控制条 / 系统媒体中心 / 音频焦点 共用同一套状态 =====
@@ -2572,101 +2465,6 @@ private fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false)
                 }
             }
         }
-    }
-}
-
-/** 视频进度条：直接拖动 seek，支持 overlay 白配色与主界面主题配色。 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun VideoProgressSlider(
-    currentMs: Long,
-    durationMs: Long,
-    onSeek: (Long) -> Unit,
-    overlay: Boolean = false,
-) {
-    val totalMs = durationMs.coerceAtLeast(1L)
-    val fraction = (currentMs.coerceIn(0L, totalMs).toFloat() / totalMs).coerceIn(0f, 1f)
-    val trackH = 4.dp
-    val thumbR = 6.dp
-    val inert = Color.White.copy(alpha = 0.4f)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(28.dp)
-            .padding(horizontal = 8.dp)
-            // 点击轨道 → 跳转
-            .pointerInput(totalMs) {
-                detectTapGestures { offset ->
-                    onSeek((offset.x / size.width * totalMs).toLong().coerceIn(0L, totalMs))
-                }
-            }
-            // 拖动 thumb → 连续跳转
-            .pointerInput(totalMs) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        onSeek((offset.x / size.width * totalMs).toLong().coerceIn(0L, totalMs))
-                    },
-                    onDrag = { change, _ ->
-                        onSeek((change.position.x / size.width * totalMs).toLong().coerceIn(0L, totalMs))
-                        change.consume()
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val centerY = size.height / 2f
-            val w = size.width
-            val tx = fraction * w
-            // 轨道与 thumb 都严格画在 centerY → 小圆点处于进度条正中（不再偏上）
-            drawLine(color = inert, start = Offset(0f, centerY), end = Offset(w, centerY), strokeWidth = trackH.toPx(), cap = StrokeCap.Round)
-            if (tx > 0f) {
-                drawLine(color = Color.White, start = Offset(0f, centerY), end = Offset(tx, centerY), strokeWidth = trackH.toPx(), cap = StrokeCap.Round)
-            }
-            drawCircle(color = Color.White, radius = thumbR.toPx(), center = Offset(tx, centerY))
-        }
-    }
-}
-
-/** 视频控制条：与音频模式统一的 5 键（上一曲 / 上一句 / 播放 / 下一句 / 下一曲）。
- *  上一句/下一句 点按=上一句/下一句，长按=快退/快进 10 秒。 */
-@OptIn(ExperimentalFoundationApi::class)
-/** 点按=单击(tap)跳一句；按住=按住的整个期间持续触发 hold(true)，松手触发 hold(false)。
- *  【0903 bug 修复】原来用 detectTapGestures(onPress)：按下立即 hold(true)，一旦手指移动
- *  （左滑唤出 B站 输入框正好压在下一句键上）onPress 协程被手势取消，hold(false) 永不执行 →
- *  2x 快进永远停不下来（暂停/再播仍是快进，只有切曲才恢复）。改成自实现手势：
- *  - 手指移动超过 touch slop → 判定为「拖动」（交给父级 draggable），不触发 hold/tap；
- *  - 按住不动超过 HOLD_TRIGGER_MS 才进入 hold，松手/被抢占都保证发 hold(false)。 */
-private const val HOLD_TRIGGER_MS = 250L   // 按下多久才算「长按快进/快退」（避开拖动误触）
-private fun Modifier.pressHold(
-    onTap: () -> Unit,
-    onHoldChange: (Boolean) -> Unit,
-): Modifier = this.pointerInput(Unit) {
-    val slopPx = viewConfiguration.touchSlop.toDouble()
-    awaitEachGesture {
-        val down = awaitFirstDown()
-        val id = down.id
-        val startX = down.position.x
-        val startY = down.position.y
-        val startMs = System.currentTimeMillis()
-        var holding = false
-        var aborted = false   // 手指移动超 slop 或被父手势消费 → 判定拖动
-        while (true) {
-            val event = awaitPointerEvent()
-            val change = event.changes.firstOrNull { it.id == id } ?: break
-            if (!change.pressed) break                 // 松手
-            if (change.isConsumed) { aborted = true; break }  // 被 draggable 抢走
-            val dx = change.position.x - startX
-            val dy = change.position.y - startY
-            if (dx * dx + dy * dy > slopPx * slopPx) { aborted = true; break }  // 拖动
-            if (!holding && System.currentTimeMillis() - startMs >= HOLD_TRIGGER_MS) {
-                holding = true
-                onHoldChange(true)
-            }
-        }
-        // 无论怎么结束（松手/被抢占/手势取消），都保证恢复 —— 修复快进停不下来的根因
-        if (holding) onHoldChange(false)
-        else if (!aborted) onTap()
     }
 }
 
