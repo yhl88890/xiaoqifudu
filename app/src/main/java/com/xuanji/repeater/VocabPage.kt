@@ -26,6 +26,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,7 +51,7 @@ import java.util.Locale
  * 数据由 VocabStore（JSON 持久化 + StateFlow）驱动。
  */
 @Composable
-fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}, onStats: () -> Unit = {}) {
+fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
     val context = LocalContext.current
     VocabStore.ensureLoaded(context)
     val entries by VocabStore.entries.collectAsStateWithLifecycle()
@@ -127,22 +129,34 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}, onStats: () -> Unit
                 modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, bottom = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onStats) {
+                TextButton(
+                    onClick = { showStats = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                ) {
                     Text(
                         text = "学习统计",
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                TextButton(onClick = onReview) {
+                FilledTonalButton(
+                    onClick = onReview,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                ) {
                     Icon(
                         XuanjiIcons.Repeat,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (pending > 0) "复习 $pending" else "复习")
+                    Text(
+                        text = if (pending > 0) "复习 $pending" else "复习",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
                 }
                 Spacer(modifier = Modifier.weight(1f))
 
@@ -152,17 +166,18 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}, onStats: () -> Unit
                 // 排序是设置、不是高频切换 ⇒ 压成一个文字按钮，点一下弹三项。
                 // ⚠️ 这三项**要持久化**（跟上面的筛选故意相反）：见 VocabPrefs.kt 的说明。
                 Box {
-                    TextButton(onClick = { sortOpen = true }) {
+                    TextButton(
+                        onClick = { sortOpen = true },
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                    ) {
                         Text(
                             text = sort.label,
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Spacer(modifier = Modifier.width(2.dp))
                         Text(
                             text = if (sortOpen) "▴" else "▾",
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     AppDropdownMenu(expanded = sortOpen, onDismissRequest = { sortOpen = false }) {
