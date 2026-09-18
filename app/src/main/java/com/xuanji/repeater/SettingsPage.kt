@@ -171,7 +171,7 @@ fun SettingsPage(
                 //    这句主要防一个误会：别以为它是"显示视频画面"的悬浮窗。
                 SettingsSwitch(
                     "悬浮窗", floatOn, onFloatChange,
-                    note = "别的 App 上看歌词、台词",
+                    note = "别的 App 看歌词台词",
                 )
             }
 
@@ -186,13 +186,13 @@ fun SettingsPage(
                 //      他原话："1 不用，因为这字儿太多了。应该要换行了吧。"
                 SettingsSwitch(
                     "启动时继续播放", resumeOn, onResumeChange,
-                    note = "只管音频，不管视频",
+                    note = "只管音频",
                 )
                 // ⚠️【0916 待办，仍未做】这一项其实不该在设置里：它是临时操作状态（开→拖模块→关），
                 //    不是偏好项。理想位置是播放页上直接给个入口。0919 先用括号说明缓解，位置照旧。
                 SettingsSwitch(
                     "播放页编辑模式", layoutEdit, onLayoutEditChange,
-                    note = "拖动换位、拉伸",
+                    note = "拖动换位拉伸",
                 )
             }
 
@@ -1053,18 +1053,23 @@ private fun SettingsSwitch(
         )
         if (!note.isNullOrBlank()) {
             // 【0919 阿亮】说明不另占一行 ⇒ 塞进「标签」和「开关」中间的空隙，两边加全角括号。
-            // 🔴🔴 字号 `labelSmall`(11sp)，**比标签小**。这是实测逼出来的，别往上调：
-            //    他的 `font_scale` 是 1.1~1.3。同字号(14sp)时三条全被截成「…」；降到 12sp 还是截
-            //    （最窄那行是「启动时继续播放」，标签本身就吃掉 349px，只剩 ~425px 给说明）。
-            //    11sp 才全档位放得下 —— 且文案必须短（见下面的三条 note，都是压着宽度写的）。
-            // 🔴 判断"有没有被截断"**只能看截图**：`uiautomator dump` 的 `text` 返回的是**原文**，
-            //    渲染成「…」它照样给你完整字符串（本次就被它骗过一轮，差点当成排版没问题）。
-            // 🔴 想改这两处的字号/文案 ⇒ 必须重新跑 font_scale 1.3 的截图验收。
+            // 🔴 字号 `labelSmall`(11sp)，**比标签小**。这是实测逼出来的，别往上调：
+            //    同字号(14sp)时三条全被截成「…」；降到 12sp 还是截。11sp 才够。
+            // 🔴🔴 **`maxLines = 2` 是故意的"保险丝"，别改回 1**（0919 阿亮要求「1.5 倍以内一律显示全」）：
+            //    正常字号下三条都只占一行，**看不出区别**；只有放不下时（超大字号 / 窄屏）
+            //    才会折成两行，宁可把行撑高，也不让字被吃掉。
+            // 🔴🔴 **判断"有没有被截断"只能看截图**：`uiautomator dump` 的 `text` 返回的是**原文**，
+            //    渲染成「…」它照样给你完整字符串（v47 就被它骗过一轮，当成排版没问题）。
+            // 🔴🔴 **而且必须在"真机宽度"的模拟器上验**：模拟器默认 ≈392dp 逻辑宽，真机常见 360dp，
+            //    差这 33dp 就是"放得下 / 截断"的分界。验前先 `adb shell wm density 480`，
+            //    验完 `wm density reset`。**v48 就是因为没调窄，误判成"1.3 没问题"，
+            //    结果阿亮 145% 的真机上照样是「（只管音频，不管视…）」。**
+            // 🔴 文案长度是**压着 360dp 屏在 1.5 倍下的可用宽度**写的，改长了一定要重跑上面两步验收。
             Text(
                 text = "（$note）",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f).padding(start = 4.dp),
             )
