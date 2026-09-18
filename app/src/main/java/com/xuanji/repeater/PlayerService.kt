@@ -96,6 +96,19 @@ class PlayerService : Service() {
          * 否则这一处就是**永久失灵**：`togglePlayPause` 的准备中分支什么都不做。
          */
         const val PREPARE_STUCK_MS = 8000L
+
+        /**
+         * 【0918】用户拖完进度条后的「seek 宽限期」（ms）。
+         *
+         * `MediaPlayer.seekTo` 是**异步**的：真正生效前那几百毫秒里 `currentPosition`
+         * 还停在旧位置。而 ticker 每 250ms 就拿 `currentPosition` 覆盖 `state.positionMs`
+         * ⇒ 刚拖过去的位置立刻被打回旧值，用户看到的就是「拖了没反应」，
+         * 或者「拖完再点播放，还是从原来那个进度开始」。
+         * 这段时间内只要读数明显偏离目标就忽略，等播放器跟上来（或超时）再恢复同步。
+         */
+        const val SEEK_GRACE_MS = 800L
+        /** 判定"播放器位置已经跟到 seek 目标"的容差（ms） */
+        const val SEEK_ALIGN_TOLERANCE = 400L
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -113,6 +126,10 @@ class PlayerService : Service() {
     private var pendingRepeatLeft: Int = 0
     /** 句尾 seek 进行中标志：防止 seek 完成前 ticker 重复触发边界处理（会多扣复读次数/重复 seek） */
     private var inBoundarySeek = false
+    /** 【0918】用户手动拖进度条的目标位置；-1 = 无挂起 seek。
+     *  配合 [SEEK_GRACE_MS] 防止 ticker 拿异步 seek 未生效的旧读数把位置打回去。 */
+    private var seekTargetMs: Long = -1L
+    private var seekGraceUntil: Long = 0L
     /** 前台通知是否已挂载（停止后重新播放需重新挂载） */
     private var foregroundActive = false
     /** MediaPlayer 是否已完成 prepare（prepareAsync 是异步的）。
@@ -356,16 +373,42 @@ class PlayerService : Service() {
     }
 
     fun seekTo(ms: Long) {
-        val p = player ?: return
+        val target = ms.coerceAtLeast(0L)
+        // 【0918 修·阿亮报"拖进度条没反应"】旧代码 `val p = player ?: return` ——
+        // player 一旦为空（服务被回收 / 播放器被释放），拖进度条就是**静默 return**，
+        // 界面纹丝不动，用户看到的就是"拖了没反应"。现在就地按目标位置重建播放器。
+        val p = player ?: run {
+            val item = _state.value.currentItem ?: return
+            android.util.Log.w("XJPlayer", "seekTo(): player 为空，按目标位置重建到 $target")
+            loadAndPlay(item, autoPlay = false, initialPositionMs = target)
+            return
+        }
         // 用户手动拖进度条 = 明确放弃之前点的待播句，否则句子到位后会被补播抢走位置
         clearPendingPlaySentence()
-        p.seekTo(ms.coerceAtLeast(0L).toInt())
+        // 【0918 修】MediaPlayer 在 Preparing / Error 态下 seekTo 会抛 IllegalStateException。
+        // 这里是在 UI 手势回调里直接调的，抛出去就是崩溃。包一层，失败就地按目标位置重建。
+        try {
+            p.seekTo(target.toInt())
+        } catch (e: Exception) {
+            android.util.Log.w("XJPlayer", "seekTo 失败(${e.message})，就地重建到目标位置")
+            val item = _state.value.currentItem
+            if (item != null) {
+                loadAndPlay(item, autoPlay = false, initialPositionMs = target)
+                return
+            }
+        }
+        // 【0918 修·"拖了没反应"的另一半】seek 是异步的，宽限期内不让 ticker 用旧读数打回：
+        seekTargetMs = target
+        seekGraceUntil = android.os.SystemClock.elapsedRealtime() + SEEK_GRACE_MS
         pendingSentenceStart = -1L
         pendingSentenceEnd = -1L
         pendingSentenceIndex = -1
         pendingRepeatLeft = 0
         // 拖进度条退出句子模式：歌词高亮按新位置定位
-        _state.value = _state.value.copy(positionMs = ms.coerceAtLeast(0L), currentSentenceIndex = -1)
+        _state.value = _state.value.copy(positionMs = target, currentSentenceIndex = -1)
+        // 【0918 修】ticker 若已停（曲终 / 暂停之后），state.positionMs 就再没人跟真实播放器
+        // 同步，界面会冻在旧值上、后续拖动看起来"不动"。这里补启，保证拖完能持续跟手。
+        startTicker()
         savePlayback()
     }
 
@@ -1531,12 +1574,20 @@ class PlayerService : Service() {
                 if (s.currentIndex < s.playlist.size - 1) {
                     playNextIndex(s.currentIndex + 1)
                 } else {
-                    _state.value = s.copy(isPlaying = false, positionMs = 0)
-                    player?.seekTo(0)
-                    stopTicker()
-                    abandonAudioFocus()
-                    updateMediaSession()
-                    updateNotification()
+                    // 【0918 修·阿亮报"曲目变成 0000 / 上次进度没了 / 拖进度条跟播放暂停都不管用"】
+                    // 旧代码这里是三连：`positionMs = 0` + `player?.seekTo(0)` + `stopTicker()`，
+                    // 三个都踩坑（0918 探针日志实锤）：
+                    //  ① `stopTicker()` 之后 `state.positionMs` 再没人跟真实播放器同步 ——
+                    //     界面上的位置从此**失去真值**（实测：曲终后连续 18 秒零 tick）；
+                    //  ② 播放器停在 MediaPlayer 的 **PlaybackCompleted** 态，该态下 seek 之后
+                    //     再 `start()` 位置不可靠（实测 seekTo(5619) 后 start() 读到 6007）
+                    //     ⇒ 用户「拖了进度条，再点播放还是从原来的进度开始」；
+                    //  ③ 此刻 `positionMs` 已是 0，用户随手退出 → `onDestroy → savePlayback()`
+                    //     就把这个 **0 写进存档** ⇒ 下次冷启「曲目 0:00、记不住进度」。
+                    //     阿亮"装完新版本前两次记不住、第三次才好"正是这条：曲终存 0 → 冷启 0:00；
+                    //     他拖一下播一会儿再退出，存档才重新有真值。
+                    // 现在：复位到「本曲开头 + 暂停」的确定状态，并且**保留 ticker**。
+                    resetToTrackStart()
                 }
             }
             PlayMode.LOOP_LIST -> {
@@ -1544,6 +1595,35 @@ class PlayerService : Service() {
                 playNextIndex(next)
             }
         }
+    }
+
+    /** 【0918】曲终（列表末尾）后把播放器复位成「本曲开头 + 暂停」的确定状态。
+     *
+     *  🔴 不能只 `player?.seekTo(0)`：MediaPlayer 播完停在 **PlaybackCompleted** 态，
+     *  该态下 seek 之后再 `start()` 位置不可靠（实测 seekTo(5619) → start() 读到 6007）。
+     *  必须先 `start()` 把它拉出该态、再 `pause()` 停住。
+     *  🔴 也不能 `stopTicker()`：ticker 是 `state.positionMs` 与真实播放器的**唯一同步源**，
+     *  停掉之后界面位置失去真值 —— 拖进度条看着不动、退出时把 0 写进存档。
+     *  ⚠️ `start()` 会有一瞬间出声，立刻 `pause()` 掉；万一某些机型在 PlaybackCompleted 态
+     *  start 抛异常，走 fallback 重建播放器（同样停在开头、不自动播）。 */
+    private fun resetToTrackStart() {
+        val p = player
+        if (p != null) {
+            try {
+                p.start()      // 脱离 PlaybackCompleted（唯一可靠手段）
+                p.pause()      // 立刻停 ⇒ 干净的 Paused 态
+                p.seekTo(0)    // 回到开头
+            } catch (e: Exception) {
+                android.util.Log.w("XJPlayer", "曲终复位失败(${e.message})，改为重建播放器")
+                _state.value.currentItem?.let { loadAndPlay(it, autoPlay = false, initialPositionMs = 0L) }
+                return
+            }
+        }
+        _state.value = _state.value.copy(isPlaying = false, positionMs = 0L)
+        startTicker()      // 【关键】保留 ticker：位置必须一直与真实播放器对齐
+        abandonAudioFocus()
+        updateMediaSession()
+        updateNotification()
     }
 
     private fun playNextIndex(index: Int) {
@@ -1616,6 +1696,19 @@ class PlayerService : Service() {
             currentIndex = idx,
             currentItem = items[idx],
             playMode = saved.playMode,
+            // 【0918 修·阿亮报"前两次启动记不住进度"】必须把**进度**一起恢复。
+            // 旧代码漏了这一行 ⇒ 恢复现场后 `state.positionMs` 一直是默认值 0。
+            // 而下面「上次活跃是视频模式」的分支会直接 return —— 那时 onPrepared 永不发生，
+            // 这个 0 就成了 state 里的"真值"；用户随手退出 → `onDestroy → savePlayback()`
+            // 把 0 写回存档 ⇒ 下次冷启曲目 0:00。等他切回音频播过一段再退出，存档才重新有真值，
+            // 于是表现为"前两次记不住、第三次才好"。
+            positionMs = saved.positionMs.coerceAtLeast(0L),
+            // 【0918】总时长也一起恢复：不加载音频播放器时（上次活跃是视频）没有 onPrepared，
+            // durationMs 会一直是 0，界面就成了「0:04 / 0:00」这种半截状态。
+            // AudioItem.durationMs 本来就来自媒体库，直接拿来用。
+            durationMs = items[idx].durationMs.coerceAtLeast(
+                saved.positionMs.coerceAtLeast(0L)
+            ),
             sentences = emptyList(),
             currentSentenceIndex = -1,
             waveform = FloatArray(0),
@@ -1700,9 +1793,22 @@ class PlayerService : Service() {
                 } catch (e: Exception) {
                     continue // MediaPlayer 状态异常（未 prepared/已释放）：跳过本轮，ticker 不崩
                 }
+                // 【0918 修·阿亮报"拖了进度条没反应 / 拖完点播放还是从原来进度开始"】
+                // seekTo 是异步的：生效前播放器还报着旧位置，若直接写进 state 就把用户刚拖到的
+                // 位置打回去了。宽限期内只要读数明显偏离目标就跳过本轮，等播放器跟上来再恢复同步。
+                if (seekTargetMs >= 0) {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val aligned = kotlin.math.abs(pos - seekTargetMs) <= SEEK_ALIGN_TOLERANCE
+                    if (!aligned && now < seekGraceUntil) continue
+                    seekTargetMs = -1L
+                }
                 _state.value = _state.value.copy(positionMs = pos)
                 // 节流保存播放现场（每 2 秒），进程被杀兜底
-                if (++tickCount % 8 == 0) savePlayback()
+                // 节流保存播放现场（每 2 秒），进程被杀兜底。
+                // 【0918】只在**真正在播**时落盘：曲终/暂停后位置不会再变（且 seekTo、pause()
+                // 里本来都会各自存一次），若照旧每 2 秒写一次盘，就会在 App 闲置时无谓地
+                // 持续写 SharedPreferences。
+                if (++tickCount % 8 == 0 && _state.value.isPlaying) savePlayback()
                 if (pendingSentenceEnd <= 0) continue
                 if (pos >= pendingSentenceEnd - HIGH_PRECISION_WINDOW) {
                     // 接近句尾：高精度轮询。播放头越过句尾 + SEEK_AHEAD_MS（输出缓冲补偿）后
