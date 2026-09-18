@@ -109,6 +109,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -135,6 +136,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
@@ -166,6 +168,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -689,6 +692,45 @@ private suspend fun recognizeBySegments(
 internal val videoMpRef = arrayOfNulls<MediaPlayer?>(1)
 internal var videoMpSourceUri: Uri? = null
 
+/**
+ * 字号缩放的「天花板」——超过它就一律按 1.3 渲染。
+ *
+ * 【v48 · 2026-09-19 阿亮拍板】起因：全 App **没有任何自适应机制**
+ * （全仓 grep `fontScale` / `AutoSize` / `TextAutoSize` 零命中），字号一大就只能靠当初怎么写。
+ * 实测（模拟器 5 档，证据 `截图/2026-09-19-字号自适应-*.png`）：
+ *   · `maxLines = 1` 的文字 ⇒ 1.6 起被截成「…」；
+ *   · **固定 dp 高**的盒子 ⇒ 2.0 时底栏「音频模式」折两行、**第二行被屏幕裁掉**；
+ *   · **固定 dp 宽**的字位 ⇒ 2.0 时生词本「美/英」被压扁、和后面音标粘在一起。
+ * ⇒ 方案只做「锁天花板」这一条（不做逐个改盒子）。代价照实说：开无障碍超大字的用户，
+ *   在我们 App 里享受不到那么大的字 —— 但界面不会坏。
+ *
+ * 🔴 用 `coerceAtMost` 而**不是** `coerceIn`：只有"放大"会撑坏布局，"缩小"不会；
+ *    设下限等于替用户改设置，别做。
+ * 🔴 天花板取 **1.3**：既是系统"字体大小"滑杆的最大档，也是实测全 App 都还正常的最后一档。
+ *    ⚠️ 想改这个数 ⇒ 必须重跑 0.85/1.0/1.3/1.6/2.0 五档截图验收。
+ * ⚠️ **只覆盖 Compose 画的界面**。`FloatLyricsService` 的悬浮窗是另一个 Window，
+ *    不一定走这棵组合树 ⇒ 它仍按系统 fontScale 渲染，**这里管不到**。
+ */
+private const val MAX_FONT_SCALE = 1.3f
+
+/**
+ * 全 App 的主题包装（替代直接用 `MaterialTheme`）。
+ * 除了套主题，唯一额外的事就是**把 `LocalDensity` 的 `fontScale` 钳到 [MAX_FONT_SCALE]** ——
+ * `sp` 的 px 换算走的就是它，所以钳在这里 = 全 App 的 `sp` 字号一起被限高。
+ * `dp` 不受影响（它只看 `density`，不看 `fontScale`）⇒ 间距、图标大小照旧。
+ */
+@Composable
+private fun XuanjiTheme(colorScheme: ColorScheme, content: @Composable () -> Unit) {
+    val system = LocalDensity.current
+    val appDensity = remember(system.density, system.fontScale) {
+        if (system.fontScale <= MAX_FONT_SCALE) system
+        else Density(system.density, MAX_FONT_SCALE)
+    }
+    CompositionLocalProvider(LocalDensity provides appDensity) {
+        MaterialTheme(colorScheme = colorScheme, content = content)
+    }
+}
+
 class MainActivity : ComponentActivity() {
 
     /** Compose 响应式持有服务引用（绑定完成后触发重组） */
@@ -784,7 +826,9 @@ class MainActivity : ComponentActivity() {
             var darkMode by remember { mutableStateOf(ThemePrefs.loadDark(context)) }
             var splashDone by remember { mutableStateOf(appSplashShownThisProcess) }
             val colorScheme = remember(themeIndex, darkMode) { xuanjiColorScheme(themeIndex, darkMode) }
-            MaterialTheme(colorScheme = colorScheme) {
+            // 【v48】原来这里直接是 `MaterialTheme(...)`。换成 `XuanjiTheme` 只为多一层
+            // 「字号天花板」（见文件上方 MAX_FONT_SCALE 注释）；主题行为一字未改。
+            XuanjiTheme(colorScheme = colorScheme) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     Surface(modifier = Modifier.fillMaxSize()) {
                         AppRoot(
