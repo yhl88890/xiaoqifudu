@@ -188,11 +188,17 @@ object Pronounce {
     /**
      * 发音总入口。**签名别改** —— 全 App 十几处喇叭按钮都调它。
      *
-     * 分流（0917）：
-     *   ① 设置里选了「只用本地发音」 ⇒ 直接 TTS（离线）；TTS 用不了才退回有道
-     *   ② 文本超过 [UK_MAX_LEN] ⇒ 有道两种口音**必 500**，直接交给本地 TTS
-     *      —— 这就是"单词能响、长句完全不响"的修法
-     *   ③ 其余 ⇒ 走有道（短的走美音、长的走英音），带本地缓存
+     * 分流（0919 定稿，**这一层没有开关了**）：
+     *   ① 文本超过 [UK_MAX_LEN]（40 字符）⇒ 长句通道 [speakLong]：在线合成 → 本地 TTS → 有道切块
+     *   ② 其余 ⇒ 有道人声（短的走美音、长的走英音），带本地缓存
+     *
+     * 🔴🔴【0919 删掉了「只用本地发音」那个开关（阿亮拍的，理由见 `SpeakPrefs` 文件头）】
+     *   原来这里第一刀是"用户选了只用本地发音 ⇒ 先试系统 TTS"，现在整段删了。核心原因：
+     *   它**名不副实** —— 系统 TTS 读不出来时下面照样联网，它承诺的离线保证不了；
+     *   而对"本地 TTS 用不了"的机器（他真机就是）它 100% 等价于「自动」。
+     *   ⇒ **别再把那个分支加回来**（连带 `SpeakPrefs.loadSource` 也删了）。
+     *   ⚠️ 当年踩的坑记着：那条路不能直接喂 `speakYoudao` —— 长句在有道上必 500 ⇒
+     *     "设了本地发音就彻底没声"（0917 他报过），所以才改成"往下走普通通道"。
      */
     fun speak(word: String, accent: String) {
         val w = word.trim()
@@ -204,27 +210,13 @@ object Pronounce {
 
     /** [speak] 的真身。**跑在 [ttsWorker] 上，不在主线程** —— 里面可以直接做阻塞的 TTS 调用。 */
     private fun speakInternal(w: String, accent: String) {
-        val src = appContext?.let { SpeakPrefs.loadSource(it) } ?: SpeakPrefs.SOURCE_AUTO
-
-        // ① 用户强制全用本地发音
-        if (src == SpeakPrefs.SOURCE_TTS) {
-            if (ttsSpeak(w, accent)) return
-            // 🔴🔴 TTS 用不了时的兜底**绝不能直接喂 `speakYoudao`**：长句在有道上两种口音都必 500
-            //    ⇒ 一样是静音，等于"设了本地发音就彻底没声"。
-            //    0917 阿亮报"切到只用本地发音，复习里新加的句子完全没发音"就是这条 ——
-            //    走**正常分流**，长句至少还有硅基流动 / 有道切块两条路。
-            Log.w(TAG, "设了「只用本地发音」但 TTS 用不了，按普通通道兜底 len=${w.length}")
-            if (w.length > UK_MAX_LEN) speakLong(w, accent) else speakYoudao(w, accent)
-            return
-        }
-
-        // ② 超长文本：有道两种口音都会 500，那两轮请求就别发了 ⇒ 走长句专用通道
+        // ① 超长文本：有道两种口音都会 500，那两轮请求就别发了 ⇒ 走长句专用通道
         if (w.length > UK_MAX_LEN) {
             speakLong(w, accent)
             return
         }
 
-        // ③ 有道人声
+        // ② 有道人声
         speakYoudao(w, accent)
     }
 
