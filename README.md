@@ -63,12 +63,14 @@ App 一共 **7 个页面**（`Page` 枚举定义在 `AppPages.kt`）：
 | `PlaybackPrefs.kt` | 一次已保存的播放现场（续播） |
 | `RepeatPrefs.kt` | 复读次数 / 倍速（**音频与视频共享**） |
 
-### 播放页 UI
+### 播放页 / 选集页 UI
 | 文件 | 职责 |
 |---|---|
 | `PlayerPage.kt` | 播放页（模块化布局，编辑模式可拖动 / 调高） |
 | `SentenceListView.kt` | 句子列表骨架：播放器内嵌列表 与 阅读模式列表**共用** |
 | `PlayerLayoutPrefs.kt` | 播放页模块的排序 / 高度持久化 |
+| `TrackPage.kt` | 选集页：当前文件所在文件夹的音频列表，当前项高亮 |
+| `AudioItem.kt` | 一条音频（选集列表的数据模型） |
 
 ### 视频模式
 | 文件 | 职责 |
@@ -115,6 +117,15 @@ App 一共 **7 个页面**（`Page` 枚举定义在 `AppPages.kt`）：
 
 ### 外观与通用
 `SettingsPage.kt`（设置页：各项开关 + **数据导出**入口 + App 内「软件介绍」）、`ThemeState.kt` / `ThemeMenu.kt`（主题色 + 全 App 统一下拉菜单）、`XuanjiIcons.kt`（手绘矢量图标，避免引入大图标库）、`SplashOverlay.kt`（启动动画）、`FloatLyricsService.kt`（悬浮歌词）、`CrashGuard.kt`（崩溃现场落盘）
+
+> 🛠 **这张地图会过期。** 一旦新增 / 删除 / 搬迁了源文件，记得回来同步它，再跑一下校验：
+>
+> ```bash
+> python ../tools/check_doc_map.py
+> ```
+>
+> 它会告诉你：地图里有没有写过期的文件名、哪些新文件漏写了、上面那句「N 个文件 / 约 M 万行」还对不对。
+> 全绿就说明地图没过期。
 
 ---
 
