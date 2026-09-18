@@ -92,18 +92,17 @@ object Pronounce {
     /** TTS 语速。先固定 1.0；以后要做"慢速跟读"再把它开成设置项 */
     private const val TTS_SPEECH_RATE = 1.0f
 
-    // ---------- 硅基流动 TTS（长句专用，v21）----------
-    /** 语音合成端点。**跟「识别」是同一个 key**，所以阿亮不用再注册任何账号 */
-    private const val SF_ENDPOINT = "https://api.siliconflow.cn/v1/audio/speech"
-    /** 模型名。voice 字段要写成 `模型名:音色` 这种前缀形式 */
-    private const val SF_MODEL = "FunAudioLLM/CosyVoice2-0.5B"
+    // ---------- 在线 TTS（长句专用，v21；🔴 v44 起跟着「识别服务商」走）----------
+    // 🔴🔴 端点 / 模型名 / 音色表 / 输出格式 / 长度上限**全在 `AsrProvider` 的 tts* 字段里**，
+    //    这里一个都不许写死 —— 写死就等于"用户换了服务商之后，长句静默变哑"。
+    //    （v44 之前这里写死 `api.siliconflow.cn/v1/audio/speech` + CosyVoice2，就是那个 bug。）
     /** 合成+下载的总超时。长句合成比下单词音频慢，给宽一点 */
     private const val SF_TIMEOUT_MS = 20000L
     /** socket 读超时（等服务器合成的时间） */
     private const val SF_READ_TIMEOUT_MS = 20000
     /** 切块串播时，单块的播放上限（一块约 40 字符 ≈ 8 秒，给足余量） */
     private const val PLAY_TIMEOUT_MS = 20000L
-    /** 日志/缓存里给硅基流动用个标记，跟有道的 type 1/2 区分开 */
+    /** 日志/缓存里给"在线合成"用个标记，跟有道的 type 1/2 区分开 */
     private const val SF_TYPE = 9
 
     // ---------- 本地缓存 ----------
@@ -231,58 +230,79 @@ object Pronounce {
 
     /**
      * 长句专用通道（v21）。**三道防线，目标是"任何情况下都得有声"**：
-     *   ① [sfFetchToCache] 硅基流动 TTS —— 复用「识别」那把 key，不挑长度，一句一次请求
+     *   ① [ttsFetchToCache] 在线合成 —— 用**当前服务商**的地址/模型/音色，共用「识别」那把 key
      *   ② 系统 TTS —— 离线，但国产 ROM 常没英文语音包（阿亮真机就发不出声）
      *   ③ [speakYoudaoChunked] 有道切块串播 —— 切碎了喂给有道，最差也是真人音
      *
      * 【为什么必须三道】上一版只做了 ②，结果在阿亮机器上：引擎在、`speak()` 返 SUCCESS，
      * 但预置音色是 server 型、连不上 ⇒ 静默。长句等于没修。所以 ① 顶上去当主力，③ 兜底。
+     *
+     * ⚠️ ① 不是每次都发得出去：这家没 TTS、没填 key、或句子超过这家单次合成的长度上限
+     *    （Groq 只有 200 字符）时 [ttsFetchToCache] 直接返 null，安静地往 ②③ 降级 —— 不会哑。
      */
     private fun speakLong(w: String, accent: String) {
         scope.launch(Dispatchers.IO) {
             releasePlayer()
 
-            // ① 硅基流动
-            val f = withTimeoutOrNull(SF_TIMEOUT_MS) { sfFetchToCache(w) }
+            // ① 在线合成（服务商决定走哪家）
+            val f = withTimeoutOrNull(SF_TIMEOUT_MS) { ttsFetchToCache(w) }
             if (f != null && withTimeoutOrNull(PREPARE_TIMEOUT_MS) { playFile(f, SF_TYPE) } == true) {
-                Log.i(TAG, "长句走硅基流动 TTS len=${w.length}")
+                Log.i(TAG, "长句走在线合成 len=${w.length}")
                 return@launch
             }
 
             // ② 系统 TTS
             if (ttsSpeak(w, accent)) {
-                Log.i(TAG, "硅基流动拿不到，长句退回本地 TTS len=${w.length}")
+                Log.i(TAG, "在线合成拿不到，长句退回本地 TTS len=${w.length}")
                 return@launch
             }
 
             // ③ 有道切块（最后一道，保证有声）
-            Log.w(TAG, "硅基流动+本地TTS 都不行，长句改走有道切块 len=${w.length}")
+            Log.w(TAG, "在线合成+本地TTS 都不行，长句改走有道切块 len=${w.length}")
             speakYoudaoChunked(w, accent)
         }
     }
 
     /**
-     * 向硅基流动要一段语音：POST，body 里的 `input` 就是要读的原文。
-     * 响应体**直接就是 mp3 二进制**（不是 JSON、不是 URL），所以照抄 [fetchToCache] 的
+     * 向**当前服务商**要一段语音：POST，body 里的 `input` 就是要读的原文。
+     * 响应体**直接就是音频二进制**（不是 JSON、不是 URL），所以照抄 [fetchToCache] 的
      * "下到 .part 再原子改名"那套即可，缓存文件同样进 `<cacheDir>/voice/`。
      *
-     * 拿不到（没填 key / 401 / 402 余额不足 / 超时 / 非 200）返回 null，交给调用方往下降级。
+     * 🔴【v44】端点 / 模型 / 音色 / 格式 / 长度上限**全部从 [AsrProvider] 读**。
+     *   以前这些写死在硅基流动上 ⇒ 用户切到 Groq 并填了 Groq 的 Key 之后，
+     *   这里会拿着 Groq 的 Key 去敲硅基流动 ⇒ 401 ⇒ **长句静默变哑**。
+     *
+     * 拿不到（没填 key / 这家没 TTS / 句子超过长度上限 / 401 / 402 余额不足 / 超时 / 非 200）
+     * 一律返回 null，交给调用方往下降级（系统 TTS → 有道切块）—— **不会没声音**。
      * ⚠️ 返回值是 `suspend` 的：整个合成 + 下载都在协程里，不会卡 UI。
      */
-    private suspend fun sfFetchToCache(w: String): File? {
+    private suspend fun ttsFetchToCache(w: String): File? {
         val ctx = appContext ?: return null
         val key = AsrPrefs.loadKey(ctx).trim()
         if (key.isEmpty()) {
-            Log.i(TAG, "没填过 API key（设置→识别），硅基流动 TTS 跳过")
+            Log.i(TAG, "没填过 API key（设置→识别），在线合成跳过")
             return null
         }
 
-        val voice = SpeakPrefs.loadSfVoice(ctx)
+        val p = AsrProvider.current(ctx)
+        if (!p.hasTts) {
+            Log.i(TAG, "${p.label} 没有语音合成接口，长句跳过在线合成")
+            return null
+        }
+        // 超长就别发：这家一定拒，省一次必然失败的网络往返（Groq Orpheus 上限就是 200 字符）
+        if (!p.ttsFits(w)) {
+            Log.w(TAG, "${p.label} 单次合成上限 ${p.ttsMaxChars} 字符，本句 ${w.length} ⇒ 跳过在线合成")
+            return null
+        }
+
+        val voice = SpeakPrefs.loadVoice(ctx, p)
         val dir = File(ctx.cacheDir, CACHE_DIR)
         if (!dir.exists() && !dir.mkdirs()) return null
 
-        // 🔴 缓存名必须带音色：换了音色要重新合成，不能跟旧音色串着用
-        val file = File(dir, "sf_${voice}_${md5(w)}.mp3")
+        // 🔴 缓存名必须带「服务商 + 音色」：换了谁都得重新合成，不能跟别家 / 别的音色串着用。
+        //    硅基流动沿用老的 `sf_` 前缀 ⇒ v44 之前下过的缓存在升级后**继续命中**，不用重下。
+        val stem = if (p == AsrProvider.SILICONFLOW) "sf" else "tts_" + p.name.lowercase()
+        val file = File(dir, "${stem}_${voice}_${md5(w)}.${p.ttsFormat}")
         if (file.length() > 0) return file
 
         val tmp = File(dir, file.name + ".part")
@@ -290,17 +310,19 @@ object Pronounce {
 
         // ⚠️ 别手拼 JSON：`input` 里但凡有引号/换行/中文，手拼出来的就是坏 JSON
         val payload = JSONObject().apply {
-            put("model", SF_MODEL)
+            put("model", p.ttsModel)
             put("input", w)
-            put("voice", "$SF_MODEL:$voice")
-            put("response_format", "mp3")
-            put("speed", 1.0)
+            // 硅基流动 CosyVoice 要 `模型名:音色` 这种前缀；Groq / OpenAI 直接写音色名
+            put("voice", if (p.ttsVoicePrefixed) "${p.ttsModel}:$voice" else voice)
+            put("response_format", p.ttsFormat)
+            // ⚠️ 只在这家认这个参数时才发（Groq 官方只列了 model/input/voice/response_format）
+            if (p.ttsSupportsSpeed) put("speed", 1.0)
         }.toString()
 
         var conn: HttpURLConnection? = null
         var ok = false
         try {
-            conn = (URL(SF_ENDPOINT).openConnection() as HttpURLConnection).apply {
+            conn = (URL(p.ttsEndpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = SF_READ_TIMEOUT_MS
@@ -325,15 +347,15 @@ object Pronounce {
                 }
                 ok = tmp.length() > 0
             } else {
-                // 401 key 错 / 402 余额不足 / 4xx 参数不对 —— 都降级，但日志要能看出是哪种
+                // 401 key 错 / 402 余额不足 / 4xx 参数不对 —— 都降级，但日志要能看出是哪种、哪家
                 val msg = runCatching { conn.errorStream?.bufferedReader()?.readText() }.getOrNull()
-                Log.w(TAG, "硅基流动 TTS 失败 HTTP $code ${msg?.take(160)}")
+                Log.w(TAG, "${p.label} 在线合成失败 HTTP $code ${msg?.take(160)}")
             }
         } catch (e: CancellationException) {
             tmp.delete()
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "硅基流动 TTS 异常: ${e.message}")
+            Log.w(TAG, "${p.label} 在线合成异常: ${e.message}")
         } finally {
             try { conn?.disconnect() } catch (_: Exception) {}
         }
@@ -716,7 +738,8 @@ object Pronounce {
      *
      * 【为什么必须要有它】长句没声音这类毛病的失败是**静默的** —— 界面上什么都不会发生，
      * 只能靠远程看 logcat 去猜卡在哪一步，阿亮为此白跑了两轮。
-     * 有了它：没填 key / key 不对 / 余额不足 / 网络不通 / 能下不能播，他自己点一下就看见。
+     * 有了它：没填 key / key 不对 / 余额不足 / 网络不通 / 能下不能播 /
+     * **这句超过这家单次合成的长度上限**，他自己点一下就看见。
      */
     fun testLongSentence(text: String, onResult: (String) -> Unit) {
         scope.launch(Dispatchers.Main) {
@@ -724,28 +747,34 @@ object Pronounce {
                 val ctx = appContext ?: return@withContext "App 还没就绪，稍后再试"
                 releasePlayer()
 
-                if (AsrPrefs.loadKey(ctx).isBlank()) {
-                    if (ttsSpeak(text, "us")) "没填 API key（去上面「识别」那个框里填一个）——这次用的是系统本地发音"
-                    else "没填 API key，系统里也没有英文语音包 —— 长句子会没声音"
-                } else {
-                    val f = withTimeoutOrNull(SF_TIMEOUT_MS) { sfFetchToCache(text) }
-                    if (f != null && withTimeoutOrNull(PREPARE_TIMEOUT_MS) { playFile(f, SF_TYPE) } == true) {
-                        "在线合成正常，音色「${sfVoiceLabel(ctx)}」"
-                    } else if (ttsSpeak(text, "us")) {
-                        "在线合成没成功（key 不对 / 余额不足 / 网络不通）——这次用的是系统本地发音"
-                    } else {
-                        "在线合成没成功，系统本地发音也不行 —— 长句会自动改成有道切块朗读"
+                val p = AsrProvider.current(ctx)
+                when {
+                    AsrPrefs.loadKey(ctx).isBlank() ->
+                        if (ttsSpeak(text, "us")) "没填 API key（去上面「识别 · 翻译」那个框里填一个）—— 这次用的是系统本地发音"
+                        else "没填 API key，系统里也没有英文语音包 —— 长句子会没声音"
+                    // ⚠️ 这个分支现在是活的（v44 之前 TTS 只有硅基流动一家，永远走不到）
+                    !p.hasTts ->
+                        if (ttsSpeak(text, "us")) "${p.label} 没有语音合成接口 —— 这次用的是系统本地发音"
+                        else "${p.label} 没有语音合成接口，系统本地发音也不行 —— 长句会自动改成有道切块朗读"
+                    // 🔴 刻意点名这条：Groq 单次上限只有 200 字符，长句撞上就等于"换回别的嗓子"，
+                    //    不是坏了。不写出来的话，他会以为设置没生效。
+                    !p.ttsFits(text) ->
+                        if (ttsSpeak(text, "us")) "${p.label} 单次最多合成 ${p.ttsMaxChars} 字符，这句 ${text.length} 字符超了 —— 这次用的是系统本地发音"
+                        else "${p.label} 单次最多合成 ${p.ttsMaxChars} 字符（这句 ${text.length} 字符超了），系统本地发音也不行 —— 长句会自动改成有道切块朗读"
+                    else -> {
+                        val f = withTimeoutOrNull(SF_TIMEOUT_MS) { ttsFetchToCache(text) }
+                        if (f != null && withTimeoutOrNull(PREPARE_TIMEOUT_MS) { playFile(f, SF_TYPE) } == true) {
+                            "${p.label} 在线合成正常，音色「${p.voiceLabel(SpeakPrefs.loadVoice(ctx, p))}」"
+                        } else if (ttsSpeak(text, "us")) {
+                            "在线合成没成功（key 不对 / 余额不足 / 网络不通）—— 这次用的是系统本地发音"
+                        } else {
+                            "在线合成没成功，系统本地发音也不行 —— 长句会自动改成有道切块朗读"
+                        }
                     }
                 }
             }
             onResult(msg)
         }
-    }
-
-    /** 音色 id → 中文标签，找不到就原样返回（设置页显示用） */
-    private fun sfVoiceLabel(ctx: Context): String {
-        val id = SpeakPrefs.loadSfVoice(ctx)
-        return SpeakPrefs.SF_VOICES.firstOrNull { it.first == id }?.second ?: id
     }
 
     /**

@@ -129,6 +129,13 @@ fun SettingsPage(
         ) {
             val context = LocalContext.current
 
+            // 🔴🔴【v44 阿亮："你选哪个模型就填哪个模型的 API 吗？总不能是代码里地址写死的呢"】
+            //   他是对的。服务商从这一版起是**「识别 + 字幕翻译 + 长句发音」三处共用的总开关**，
+            //   所以这个状态必须提到**页面级**：
+            //   下面「发音」组在「识别 · 翻译」组**前面**，原来它是那组里的局部变量，
+            //   发音组根本读不到 ⇒ 换了服务商音色列表不会跟着变（= 拿别家的音色 id 发请求 = 4xx = 长句哑）。
+            var asrProvider by remember { mutableStateOf(AsrProvider.current(context)) }
+
             // ---------------- 外观 ----------------
             SettingsGroup("外观") {
                 Text(
@@ -198,9 +205,12 @@ fun SettingsPage(
                 //      （Pronounce.speakInternal 的兜底），所以这里只是**界面上不引导你去调**，
                 //      不是逻辑上彻底断掉，别把置灰理解成"这条通道被删了"。
                 val autoMode = speakSource == SpeakPrefs.SOURCE_AUTO
-                var sfVoice by remember { mutableStateOf(SpeakPrefs.loadSfVoice(context)) }
-                var sfMenu by remember { mutableStateOf(false) }
-                val sfLabel = SpeakPrefs.SF_VOICES.firstOrNull { it.first == sfVoice }?.second ?: sfVoice
+                // 🔴【v44】音色跟着「识别服务商」走。`remember(asrProvider)` 是必须的：
+                //   换家时要**重新读这一家的**音色存档，否则会拿着别家的音色 id 去发请求
+                //   （接口 4xx ⇒ 长句静默变哑，界面上什么都看不出来）。
+                var voiceId by remember(asrProvider) { mutableStateOf(SpeakPrefs.loadVoice(context, asrProvider)) }
+                var voiceMenu by remember { mutableStateOf(false) }
+                val voiceLabel = asrProvider.voiceLabel(voiceId)
                 // 置灰用的淡化色：Material 的禁用态惯例是 38% 不透明度
                 val dim = MaterialTheme.colorScheme.onSurfaceVariant
                 val dimOff = dim.copy(alpha = 0.38f)
@@ -231,27 +241,29 @@ fun SettingsPage(
                 ) {
                     Box {
                         OutlinedButton(
-                            onClick = { sfMenu = true },
-                            enabled = autoMode,
+                            onClick = { voiceMenu = true },
+                            // 这家没有语音合成接口时按钮也置灰（目前三家都有，属于保险）
+                            enabled = autoMode && asrProvider.hasTts,
                             contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp),
                         ) {
                             // 不指定 style ⇒ 默认 `labelLarge`(14sp)，跟左边标题同号
-                            Text(sfLabel)
+                            Text(voiceLabel)
                             Spacer(modifier = Modifier.size(6.dp))
                             Text("▾")
                         }
                         AppDropdownMenu(
-                            expanded = sfMenu,
-                            onDismissRequest = { sfMenu = false },
+                            expanded = voiceMenu,
+                            onDismissRequest = { voiceMenu = false },
                         ) {
-                            SpeakPrefs.SF_VOICES.forEach { (id, label) ->
+                            // 🔴 v44：音色表来自当前服务商，不是写死的那 8 个
+                            asrProvider.ttsVoices.forEach { (id, label) ->
                                 DropdownMenuItem(
                                     // 勾选标记跟播放页「重播次数」那个下拉保持同一套写法
-                                    text = { Text(if (id == sfVoice) "$label ✓" else label) },
+                                    text = { Text(if (id == voiceId) "$label ✓" else label) },
                                     onClick = {
-                                        sfVoice = id
-                                        SpeakPrefs.saveSfVoice(context, id)
-                                        sfMenu = false
+                                        voiceId = id
+                                        SpeakPrefs.saveVoice(context, asrProvider, id)
+                                        voiceMenu = false
                                     },
                                 )
                             }
@@ -401,17 +413,16 @@ fun SettingsPage(
             //   ② 翻译模型改成跟「识别服务商」**同款的下拉**（`PickerRow`），**不给手填**
             //      ⇒ 从根上消灭"型号打错一个字母就静默失败"
             SettingsGroup("识别 · 翻译") {
-                var asrProvider by remember { mutableStateOf(AsrPrefs.loadProvider(context)) }
                 // 【0917 阿亮："识别服务商也一样，那 3 个服务商也给它弄成点击小弹窗，
                 //    放到『识别服务商』这几个字的右边，这不又少了两行"】
+                // 🔴 这个控制的是**整页三处**（识别 / 翻译 / 发音），状态在页面顶部，别在这儿再声明一个。
                 PickerRow(
                     label = "识别服务商",
                     options = AsrProvider.values().toList(),
-                    current = AsrProvider.values().firstOrNull { it.name == asrProvider }
-                        ?: AsrProvider.SILICONFLOW,
+                    current = asrProvider,
                     labelOf = { it.label },
                     onPick = {
-                        asrProvider = it.name
+                        asrProvider = it
                         AsrPrefs.saveProvider(context, it.name)
                     },
                 )
@@ -434,18 +445,26 @@ fun SettingsPage(
                         .fillMaxWidth()
                         .padding(top = 4.dp),
                 )
-                // 【0918】手填框 → 下拉。可选模型见 `SubtitleTranslator.Model`（三个都在硅基流动）。
-                var translateModel by remember {
-                    mutableStateOf(SubtitleTranslator.Model.ofId(AsrPrefs.loadTranslateModel(context)))
+                // 【0918 手填框 → 下拉】【v44 列表跟着服务商走】
+                //   🔴 模型名跨家不通用：把 `Qwen/...` 发给 Groq 直接 400，而 400 不算"排队"
+                //      ⇒ 不进兜底 ⇒ 翻译静默变空。所以必须 `forProvider(asrProvider)`；
+                //      而且 `remember(asrProvider)` —— 换家时要重新读**这一家**存的模型。
+                var translateModel by remember(asrProvider) {
+                    mutableStateOf(
+                        SubtitleTranslator.Model.ofId(
+                            asrProvider,
+                            AsrPrefs.loadTranslateModel(context, asrProvider),
+                        )
+                    )
                 }
                 PickerRow(
                     label = "翻译模型",
-                    options = SubtitleTranslator.Model.values().toList(),
+                    options = SubtitleTranslator.Model.forProvider(asrProvider),
                     current = translateModel,
                     labelOf = { it.label },
                     onPick = {
                         translateModel = it
-                        AsrPrefs.saveTranslateModel(context, it.id)
+                        AsrPrefs.saveTranslateModel(context, asrProvider, it.id)
                     },
                 )
             }
@@ -649,7 +668,9 @@ fun SettingsPage(
                                         "· 在线识别字幕\n" +
                                         "· 字幕翻译（给整批字幕配中文）\n" +
                                         "· 长句的在线发音合成\n" +
-                                        "· 抓 B站 视频时的识别",
+                                        "· 抓 B站 视频时的识别\n" +
+                                        "这四处全都跟着上面「识别服务商」那一栏走：你换成 Groq，四处一起换成 Groq，" +
+                                        "所以要填的是那一家自己的 Key，别混着来。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
@@ -663,14 +684,37 @@ fun SettingsPage(
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
                                     "字幕翻译用哪个模型",
-                                    "设置 →「识别 · 翻译」里头那个「翻译模型」，是个下拉，点一下就能换，一共三个：" +
-                                        "通义千问（默认）、混元翻译（专用）、混元 Hy3（免费）。\n" +
-                                        "三个都在硅基流动上，共用同一把 Key，换哪个都不用重新申请。" +
-                                        "平时用默认那个就行；想让字幕翻得更准，可以换成「混元翻译（专用）」——" +
+                                    "设置 →「识别 · 翻译」里头那个「翻译模型」，是个下拉，点一下就能换。" +
+                                        "里面有哪几个，是跟着上面「识别服务商」变的：\n" +
+                                        "· 选硅基流动 → 通义千问（默认）、混元翻译（专用）、混元 Hy3（免费），这三个都免费；\n" +
+                                        "· 选 Groq → GPT-OSS 120B（默认）、GPT-OSS 20B、Llama 3.3 70B；\n" +
+                                        "· 选 OpenAI → GPT-4o mini（默认）、GPT-4o。\n" +
+                                        "为什么不能混着挑？因为这三家的模型名字互不通用 —— 把硅基流动的模型名发给 Groq，" +
+                                        "对方直接拒收，而且这种「拒收」不会触发换模型重试，结果是字幕中文悄悄变成空的，" +
+                                        "界面上一点提示都没有。所以列表跟着服务商走，让你选不出错的东西。\n" +
+                                        "想让字幕翻得更准，硅基流动那档可以换成「混元翻译（专用）」——" +
                                         "腾讯专门做翻译的模型，免费，翻字幕比通用模型地道。\n" +
-                                        "另外它会自己兜底：选的那个排队或者被限流了，会自动换成混元免费版接着干，不用你管。\n" +
+                                        "另外它会自己兜底：选的那个排队或者被限流了，会自动换成同一家的另一个模型接着干，不用你管。\n" +
                                         "还有，长按某一句查中文走的是另一条免费通道（有道 + MyMemory 竞速），" +
                                         "根本不需要 Key，也不受这里影响。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                // 【v44】新增一整节。这条是用户自己指出来的 bug（原话见 HANDBOOK
+                                //    「服务商 / Key / 地址 三者错配」），而且**设置页的位置一点没动** ——
+                                //    不写清楚他会以为"没改"或者"少了什么"。
+                                IntroBlock(
+                                    "换了「识别服务商」，翻译和发音会跟着一起换",
+                                    "以前只有「识别字幕」认那一栏，翻译和长句发音的地址是写死在程序里的 —— " +
+                                        "你换成 Groq、填了 Groq 的 Key，结果是识别能用、字幕翻译和长句朗读偷偷坏掉，" +
+                                        "界面上还看不出来。现在这三处统一了：选哪家，识别、翻译、长句发音就全走哪家，" +
+                                        "共用同一把 Key。\n" +
+                                        "顺带说两件跟「换家」有关的事：\n" +
+                                        "· 音色列表也跟着换。硅基流动是「沉稳女声」那 8 个中文名，" +
+                                        "Groq 是 Autumn / Troy 那几个英文名，OpenAI 是 Alloy / Nova 那几个。" +
+                                        "每家记各家的，切回来还是你原先挑的那个。\n" +
+                                        "· Groq 的长句合成有两条硬限制：一次最多 200 个字符，而且只出 wav 格式。" +
+                                        "超过 200 字符的句子它会自动跳过在线合成、改用系统本地发音或者有道切块 —— " +
+                                        "所以偶尔会听到音色不一样，那不是坏了。点「试听这个音色」会告诉你这次实际走的哪条路。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(

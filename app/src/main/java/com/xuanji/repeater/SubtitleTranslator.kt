@@ -10,40 +10,68 @@ import java.net.URL
 import kotlin.math.min
 
 /**
- * 字幕翻译（对接硅基流动 SiliconFlow 的 chat/completions）。
+ * 字幕翻译（走当前[服务商][AsrProvider]的 chat/completions，OpenAI 兼容）。
  *
  * - 批量把英文字幕翻译成中文，减少调用次数。
+ * - **地址 / 模型 / 兜底全部跟着「识别服务商」走**（v44）。以前地址写死硅基流动，
+ *   用户换成 Groq 填 Groq 的 Key 之后，翻译会拿着 Groq 的 Key 去敲硅基流动 ⇒ 401 ⇒
+ *   而 401 不算"排队" ⇒ 兜底不触发 ⇒ **字幕翻译静默变空**。
  * - 主模型遇到排队/限流（HTTP 429/503、或返回排队/过载/繁忙等提示）时，
- *   自动切换到兜底模型 [fallbackModel]（腾讯混元 Hy3：tencent/Hy3，当前 SiliconFlow 限时免费版）。
+ *   自动切换到**同一家**的另一个模型兜底（模型名跨家不通用，不能切到别家去）。
  * - 没有配置 Key 时返回与输入等长的空列表（调用方再退回免费翻译通道）。
  * - 全程失败也不抛异常，翻译缺失不影响「英文识别 + 播放学习」主流程。
  */
 object SubtitleTranslator {
     private const val TAG = "SubtitleTranslator"
-    const val FALLBACK_MODEL = "tencent/Hy3"
-    const val DEFAULT_PRIMARY_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-    private const val BASE_URL = "https://api.siliconflow.cn/v1"
 
     /**
-     * 字幕翻译可选的模型（设置页做成下拉选，**不让用户手填型号**）。
+     * 字幕翻译可选模型 —— **每个模型都归属于某一家服务商**。
      *
-     * 🔴 **三个都在硅基流动上** —— 同一个 [BASE_URL]、同一把 Key，区别只是模型。
-     *    （识别服务商那栏选什么，跟这里无关：翻译恒定走硅基流动。）
+     * 🔴🔴【v44】模型名**跨家不通用**：把 `Qwen/Qwen2.5-7B-Instruct` 发给 Groq 直接 400，
+     *   而 400 不算"排队" ⇒ 不进兜底分支 ⇒ **翻译静默变空，界面上看不出来**。
+     *   所以列表必须跟着「识别服务商」走；地址也一样（原来这里写死 `api.siliconflow.cn`，已删）。
      *
      * 【0918 阿亮："那个框看着像要我填东西，这个误导很严重"】
      *   原来是个 `OutlinedTextField` 手填型号 —— 打错一个字母就静默失败，
      *   而且"清空"会存下空串（`getString` 的默认值只在键不存在时生效）⇒ 更坏。
+     *   ⇒ 改成下拉，本枚举就是下拉的全部选项。**加模型前先核对官方模型表**，
+     *     写进一个不存在的型号 = 400 = 静默变空。
      */
-    enum class Model(val id: String, val label: String) {
-        QWEN("Qwen/Qwen2.5-7B-Instruct", "通义千问（默认）"),
-        HUNYUAN_MT("tencent/Hunyuan-MT-7B", "混元翻译（专用）"),
-        HY3("tencent/Hy3", "混元 Hy3（免费）"),
+    enum class Model(val provider: AsrProvider, val id: String, val label: String) {
+        // ---------------- 硅基流动（国内直连、免信用卡，三个都在官方免费名单里） ----------------
+        QWEN(AsrProvider.SILICONFLOW, "Qwen/Qwen2.5-7B-Instruct", "通义千问（默认）"),
+        HUNYUAN_MT(AsrProvider.SILICONFLOW, "tencent/Hunyuan-MT-7B", "混元翻译（专用）"),
+        HY3(AsrProvider.SILICONFLOW, "tencent/Hy3", "混元 Hy3（免费）"),
+        // ---------------- Groq（按官方生产模型表取的三个，`openai/gpt-oss-120b` 是它推荐的默认） ----------------
+        GROQ_OSS120B(AsrProvider.GROQ, "openai/gpt-oss-120b", "GPT-OSS 120B（默认）"),
+        GROQ_OSS20B(AsrProvider.GROQ, "openai/gpt-oss-20b", "GPT-OSS 20B（更快）"),
+        GROQ_LLAMA70B(AsrProvider.GROQ, "llama-3.3-70b-versatile", "Llama 3.3 70B"),
+        // ---------------- OpenAI（按量计费、要绑卡） ----------------
+        OPENAI_4O_MINI(AsrProvider.OPENAI, "gpt-4o-mini", "GPT-4o mini（默认）"),
+        OPENAI_4O(AsrProvider.OPENAI, "gpt-4o", "GPT-4o（更准更贵）"),
         ;
 
         companion object {
-            /** 按 id 反查；空串 / 未知 id（旧存档、手填残留）**一律回落默认**，绝不把空模型名发给接口。 */
-            fun ofId(id: String?): Model =
-                values().firstOrNull { it.id == id?.trim() } ?: QWEN
+            /** 某一家有哪些模型 —— 设置页那个下拉就用它 */
+            fun forProvider(p: AsrProvider): List<Model> = values().filter { it.provider == p }
+
+            /** 某一家默认用哪个（列表第一个） */
+            fun defaultFor(p: AsrProvider): Model = forProvider(p).first()
+
+            /** id 是不是这一家的合法模型名 */
+            fun isValidFor(p: AsrProvider, id: String?): Boolean =
+                forProvider(p).any { it.id == id?.trim() }
+
+            /**
+             * 按 id 反查。空串 / 未知 id / **别家的 id** 一律回落这家默认 ——
+             * 绝不把非法模型名发给接口（发出去就是 400 + 静默变空）。
+             */
+            fun ofId(p: AsrProvider, id: String?): Model =
+                forProvider(p).firstOrNull { it.id == id?.trim() } ?: defaultFor(p)
+
+            /** 排队/限流兜底：**在同一家里**换另一个模型（跨家换等于把别家的名字发过去） */
+            fun fallbackFor(p: AsrProvider, primaryId: String): String =
+                forProvider(p).firstOrNull { it.id != primaryId }?.id ?: primaryId
         }
     }
 
@@ -55,37 +83,59 @@ object SubtitleTranslator {
     )
 
     /**
-     * 批量翻译。返回与 english 等长的中文列表（翻译失败项为 ""）。
-     * @param primaryModel 主模型（默认 Qwen/Qwen2.5-7B-Instruct，可在设置里改）
-     * @param fallbackModel 兜底模型（默认腾讯混元 Hy3 限时免费版）
+     * 批量翻译（对外主入口）。返回与 english 等长的中文列表（翻译失败项为 ""）。
+     *
+     * 🔴 **地址 / 主模型 / 兜底模型全部由 [provider] 推出来**，调用方不要再自己拼字符串。
+     * @param primaryModelId 主模型 id；传 null / 空 / 非法 / **别家的 id** 都自动回落这家的默认
      */
     suspend fun translateBatch(
         english: List<String>,
         apiKey: String,
-        primaryModel: String = DEFAULT_PRIMARY_MODEL,
-        fallbackModel: String = FALLBACK_MODEL,
-        baseUrl: String = BASE_URL,
-        batchSize: Int = 25
+        provider: AsrProvider,
+        primaryModelId: String? = null,
+        batchSize: Int = 25,
+    ): List<String> {
+        val primary = Model.ofId(provider, primaryModelId)
+        return translateBatchAt(
+            english = english,
+            apiKey = apiKey,
+            primaryModel = primary.id,
+            fallbackModel = Model.fallbackFor(provider, primary.id),
+            baseUrl = provider.chatBaseUrl,
+            batchSize = batchSize,
+        )
+    }
+
+    /**
+     * 底层批量翻译。⚠️ 参数全部由 [translateBatch] 解析好，**别直接调它** ——
+     * 少那一层 `ofId` 校验就多一条"把别家的模型名发出去"的路。
+     */
+    private suspend fun translateBatchAt(
+        english: List<String>,
+        apiKey: String,
+        primaryModel: String,
+        fallbackModel: String,
+        baseUrl: String,
+        batchSize: Int,
     ): List<String> = withContext(Dispatchers.IO) {
         val result = MutableList(english.size) { "" }
         if (apiKey.isBlank() || english.isEmpty()) return@withContext result
-        // 🔴【0918 保底】主模型名为空（旧版手填框被清空留下的空串）⇒ 空模型名会 400，
-        //    而那个错误不算"排队"，进不了兜底分支 ⇒ 字幕翻译**静默变空**。
-        //    这里统一回落默认模型，从后端再保一层（设置页已改成下拉，正常不会再出现空串）。
-        val primary = primaryModel.ifBlank { DEFAULT_PRIMARY_MODEL }
+        // 🔴【0918 保底】空模型名会 400，而那个错误不算"排队"，进不了兜底分支 ⇒ 翻译**静默变空**。
+        //    （设置页已改成下拉，正常不会再有空串；这里是后端的最后一道。）
+        val primary = primaryModel.ifBlank { Model.defaultFor(AsrProvider.SILICONFLOW).id }
         try {
             var from = 0
             while (from < english.size) {
                 val to = min(from + batchSize, english.size)
                 val batch = english.subList(from, to)
-                // 先主模型；主模型排队/限流则切换 HY3 兜底
+                // 先主模型；主模型排队/限流则**在同一家里**换个模型兜底
                 val (primaryRes, primaryErr) = callModel(batch, apiKey, baseUrl, primary)
                 val translated = if (primaryRes != null) {
                     primaryRes
                 } else if (primaryErr != null && isQueueError(primaryErr) && fallbackModel != primary) {
-                    Log.w(TAG, "主模型($primary)排队/限流，切换 HY3 兜底: $primaryErr")
+                    Log.w(TAG, "主模型($primary)排队/限流，切同家兜底($fallbackModel): $primaryErr")
                     val (fbRes, fbErr) = callModel(batch, apiKey, baseUrl, fallbackModel)
-                    fbRes ?: run { Log.w(TAG, "HY3 兜底也失败: $fbErr"); emptyList() }
+                    fbRes ?: run { Log.w(TAG, "兜底($fallbackModel)也失败: $fbErr"); emptyList() }
                 } else {
                     Log.w(TAG, "翻译失败($primary): $primaryErr")
                     emptyList()

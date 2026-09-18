@@ -18,24 +18,115 @@ data class AsrSegment(val startMs: Long, val endMs: Long, val text: String)
  * - 硅基流动：国内直连、免信用卡、新用户送免费额度；其语音接口只回纯文本（无段落时间戳），
  *   且提供的识别模型是 FunAudioLLM/SenseVoiceSmall（不是 whisper-large-v3），故不发送 verbose_json 参数。
  * - Groq / OpenAI：走 verbose_json + segment 时间戳，解析出每句精确时间轴。
+ *
+ * 🔴🔴【v44 它同时是「翻译」和「长句发音」的总开关】阿亮的原话：
+ *   "你选哪个模型就填哪个模型的 API 吗？总不能是代码里地址写死的呢。"
+ *   他是对的。改之前只有**识别**跟着这个选，翻译和发音都把硅基流动地址写死在代码里 ⇒
+ *   切到 Groq 再把 Groq 的 Key 填进去，识别正常、**翻译和发音一起静默失败**
+ *   （401 不算"排队"，不进兜底分支，界面上什么都看不出来）。
+ *   ⇒ 现在 `chatBaseUrl` / `tts*` 都挂在这上面，**三处同源**。
+ *   ⚠️ 以后加新家：这几组字段必须一起填全，漏一个就是那种"一半好一半坏"的状态。
  */
 enum class AsrProvider(
     val label: String,
     val endpoint: String,
     val model: String,
+    /** 字幕翻译用的 chat/completions 基址（OpenAI 兼容）。🔴 别在别的文件里再写死地址 */
+    val chatBaseUrl: String,
     /** 是否发送 verbose_json / timestamp_granularities / language 参数 */
     val supportsVerboseJson: Boolean = true,
     /** 时间戳粒度：segment（句子级）或 word（词级）。TeleSpeech 只支持 segment */
     val granularity: String = "segment",
+    /** 语音合成端点。空串 = 这家不提供 TTS ⇒ 长句直接跳过"在线合成"那一道 */
+    val ttsEndpoint: String = "",
+    /** 语音合成模型名。具体值查过的官方文档见各条目注释 */
+    val ttsModel: String = "",
+    /** voice 字段写法：true = `模型名:音色`（硅基流动 CosyVoice 要这个前缀），false = 直接写音色名 */
+    val ttsVoicePrefixed: Boolean = false,
+    /** 合成结果格式，同时决定缓存文件后缀 */
+    val ttsFormat: String = "mp3",
+    /** 单次合成的输入上限（字符）；0 = 不限。Groq 官方硬上限就是 200 */
+    val ttsMaxChars: Int = 0,
+    /** 这个接口认不认 `speed` 参数。Groq 官方只列了 model/input/voice/response_format ⇒ 别多塞 */
+    val ttsSupportsSpeed: Boolean = true,
+    /** 长句可选音色：id → 显示标签，顺序 = 设置页下拉里的顺序。🔴 写错就是 4xx ⇒ 先核对官方文档 */
+    val ttsVoices: List<Pair<String, String>> = emptyList(),
 ) {
-    SILICONFLOW("硅基流动·星辰", "https://api.siliconflow.cn/v1/audio/transcriptions", "TeleAI/TeleSpeechASR", true, "segment"),
-    GROQ("Groq", "https://api.groq.com/openai/v1/audio/transcriptions", "whisper-large-v3", true, "word"),
-    OPENAI("OpenAI", "https://api.openai.com/v1/audio/transcriptions", "whisper-1", true, "word"),
+    SILICONFLOW(
+        label = "硅基流动·星辰",
+        endpoint = "https://api.siliconflow.cn/v1/audio/transcriptions",
+        model = "TeleAI/TeleSpeechASR",
+        chatBaseUrl = "https://api.siliconflow.cn/v1",
+        supportsVerboseJson = true,
+        granularity = "segment",
+        // FunAudioLLM/CosyVoice2-0.5B 在硅基流动官方免费模型名单里，8 个预置音色
+        ttsEndpoint = "https://api.siliconflow.cn/v1/audio/speech",
+        ttsModel = "FunAudioLLM/CosyVoice2-0.5B",
+        ttsVoicePrefixed = true,
+        ttsFormat = "mp3",
+        ttsVoices = listOf(
+            "anna" to "沉稳女声", "bella" to "热情女声", "claire" to "温柔女声",
+            "diana" to "活泼女声", "alex" to "沉稳男声", "benjamin" to "低沉男声",
+            "charles" to "磁性男声", "david" to "阳光男声",
+        ),
+    ),
+    GROQ(
+        label = "Groq",
+        endpoint = "https://api.groq.com/openai/v1/audio/transcriptions",
+        model = "whisper-large-v3",
+        chatBaseUrl = "https://api.groq.com/openai/v1",
+        supportsVerboseJson = true,
+        granularity = "word",
+        // canopylabs/orpheus-v1-english：英语 TTS，6 个音色。$22 / 百万字符
+        // 🔴 两个官方限制，别当没看见：① input **最多 200 字符** ② 只输出 **wav**
+        ttsEndpoint = "https://api.groq.com/openai/v1/audio/speech",
+        ttsModel = "canopylabs/orpheus-v1-english",
+        ttsFormat = "wav",
+        ttsMaxChars = 200,
+        ttsSupportsSpeed = false,
+        ttsVoices = listOf(
+            "autumn" to "Autumn（女）", "diana" to "Diana（女）", "hannah" to "Hannah（女）",
+            "austin" to "Austin（男）", "daniel" to "Daniel（男）", "troy" to "Troy（男）",
+        ),
+    ),
+    OPENAI(
+        label = "OpenAI",
+        endpoint = "https://api.openai.com/v1/audio/transcriptions",
+        model = "whisper-1",
+        chatBaseUrl = "https://api.openai.com/v1",
+        supportsVerboseJson = true,
+        granularity = "word",
+        // tts-1：低延迟版，支持 9 个音色（tts-1-hd 同套；gpt-4o-mini-tts 音色更多但要另配）
+        ttsEndpoint = "https://api.openai.com/v1/audio/speech",
+        ttsModel = "tts-1",
+        ttsFormat = "mp3",
+        ttsMaxChars = 4096,
+        ttsVoices = listOf(
+            "alloy" to "Alloy", "ash" to "Ash", "coral" to "Coral", "echo" to "Echo",
+            "fable" to "Fable", "nova" to "Nova", "onyx" to "Onyx", "sage" to "Sage",
+            "shimmer" to "Shimmer",
+        ),
+    ),
     ;
+
+    /** 这家能不能做长句语音合成 */
+    val hasTts: Boolean get() = ttsEndpoint.isNotBlank() && ttsModel.isNotBlank()
+
+    /** 这段文本在不在单次合成的长度上限内（超了就别发请求，省一次必然失败的网络往返） */
+    fun ttsFits(text: String): Boolean = hasTts && (ttsMaxChars <= 0 || text.length <= ttsMaxChars)
+
+    /** 默认音色 id（音色表第一个） */
+    val defaultTtsVoice: String get() = ttsVoices.firstOrNull()?.first ?: ""
+
+    /** 音色 id → 显示标签；认不出来就原样返回 */
+    fun voiceLabel(id: String): String = ttsVoices.firstOrNull { it.first == id }?.second ?: id
 
     companion object {
         fun fromName(name: String): AsrProvider =
             values().firstOrNull { it.name == name } ?: SILICONFLOW
+
+        /** 当前设置里选的那家（省得每个调用点都写 fromName(loadProvider())） */
+        fun current(ctx: android.content.Context): AsrProvider = fromName(AsrPrefs.loadProvider(ctx))
     }
 }
 

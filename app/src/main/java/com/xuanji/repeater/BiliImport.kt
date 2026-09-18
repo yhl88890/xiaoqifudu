@@ -101,7 +101,11 @@ object BiliImport {
             val enTexts = subLines.map { it.text }
             val key = AsrPrefs.loadKey(context)
             val zh = if (key.isNotBlank()) {
-                SubtitleTranslator.translateBatch(enTexts, key, AsrPrefs.loadTranslateModel(context))
+                // 【v44】翻译跟着「识别服务商」走（地址 + 模型都由它推出来）
+                val provider = AsrProvider.current(context)
+                SubtitleTranslator.translateBatch(
+                    enTexts, key, provider, AsrPrefs.loadTranslateModel(context, provider),
+                )
             } else emptyList()
             subLines.mapIndexed { i, line ->
                 val cn = if (i < zh.size && zh[i].isNotBlank()) zh[i] else (Translator.translate(line.text) ?: "")
