@@ -60,6 +60,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
@@ -166,16 +167,33 @@ fun SettingsPage(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 SettingsSwitch("深色模式", darkMode, onDarkModeChange)
-                // 【0917 精简】原来挂在这儿的 note 已搬进「软件介绍 → 悬浮窗」。
-                SettingsSwitch("悬浮窗", floatOn, onFloatChange)
+                // 【0919】说明从「软件介绍 → 悬浮窗」搬回来了（他嫌那波删得太干净）。
+                //    这句主要防一个误会：别以为它是"显示视频画面"的悬浮窗。
+                SettingsSwitch(
+                    "悬浮窗", floatOn, onFloatChange,
+                    note = "别的 App 上看歌词、台词",
+                )
             }
 
             // ---------------- 播放 ----------------
             SettingsGroup("播放") {
-                SettingsSwitch("启动时继续播放", resumeOn, onResumeChange)
-                // ⚠️【0916 待办】这一项其实不该在设置里：它是临时操作状态（开→拖模块→关），
-                //    不是偏好项。理想位置是播放页上直接给个入口。这轮先保留，避免改动面过大。
-                SettingsSwitch("播放页编辑模式", layoutEdit, onLayoutEditChange)
+                // 🔴【0919】这个开关**只管音频**，而且语义是"粗粒度"的：
+                //    开着 = 每次打开 App 都自动接着上次位置续播（**不看上次是播还是暂停**）；
+                //    关了 = 一律不自动播，等你手动点。
+                //    视频**不听它的**：视频永远是"上次在播就接着播、上次暂停就还是暂停"。
+                //   ⇒ 他拍板「不删开关，改成把这层关系写清」（删的话要给音频补一个
+                //      `wasPlaying` 字段，改动反而大）。括号里只提"不管视频"就够，别再啰嗦 ——
+                //      他原话："1 不用，因为这字儿太多了。应该要换行了吧。"
+                SettingsSwitch(
+                    "启动时继续播放", resumeOn, onResumeChange,
+                    note = "只管音频，不管视频",
+                )
+                // ⚠️【0916 待办，仍未做】这一项其实不该在设置里：它是临时操作状态（开→拖模块→关），
+                //    不是偏好项。理想位置是播放页上直接给个入口。0919 先用括号说明缓解，位置照旧。
+                SettingsSwitch(
+                    "播放页编辑模式", layoutEdit, onLayoutEditChange,
+                    note = "拖动换位、拉伸",
+                )
             }
 
             // ---------------- 发音 ----------------
@@ -865,7 +883,9 @@ fun SettingsPage(
                                     //    这里再提一遍会重复。
                                     "其他设置",
                                     "主题颜色和深色模式调整外观（主题色在深色下会自动换成配套的一套）；" +
-                                        "「启动时继续播放」控制重新打开 App 时要不要接着上次的位置续播。",
+                                        "「启动时继续播放」只管音频 —— 视频不看这个开关：" +
+                                        "开着，每次打开 App 都自动接着上次的位置续播；关了就等你手动点。" +
+                                        "视频那边永远是上次退出时在播就接着播、是暂停就还是暂停。",
                                 )
                                 Spacer(Modifier.height(14.dp))
                                 // 【0916】阿亮："什么功能需要什么权限也说一下"。
@@ -1007,8 +1027,12 @@ private fun SettingsGroup(
 
 /**
  * 一行「文字 + 开关」。
- * @param note 可选项下面的补充说明（12sp 灰字）。说明短的就直接写在这儿，
- *             长篇的（比如权限清单）放软件介绍里 —— 阿亮 0916 定的规矩。
+ * @param note 可选的补充说明 —— **括号灰字嵌在标签与开关之间的空隙里，不另占一行**（0919 阿亮定的）。
+ *             字号**跟标签一样大**（`bodyMedium`）：0917 他定过"一页一档字号"，
+ *             而且他原话"不放小也行，你直接就是括号灰字"⇒ 靠**括号 + 灰色**区分层级，不靠字号差。
+ *             说明短的就写这儿；长篇的（比如权限清单）仍放软件介绍里 —— 阿亮 0916 定的规矩。
+ *             ⚠️ 但他 0919 又纠正过一次："之前那一波做简化的时候，删得有点太简洁了" ⇒
+ *             说明别一味往软件介绍里搬，能塞进这行空隙的就塞回来。
  */
 @Composable
 private fun SettingsSwitch(
@@ -1017,26 +1041,38 @@ private fun SettingsSwitch(
     onCheckedChange: (Boolean) -> Unit,
     note: String? = null,
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = text,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
-            )
-            Switch(checked = checked, onCheckedChange = onCheckedChange)
-        }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
         if (!note.isNullOrBlank()) {
+            // 【0919 阿亮】说明不另占一行 ⇒ 塞进「标签」和「开关」中间的空隙，两边加全角括号。
+            // 🔴🔴 字号 `labelSmall`(11sp)，**比标签小**。这是实测逼出来的，别往上调：
+            //    他的 `font_scale` 是 1.1~1.3。同字号(14sp)时三条全被截成「…」；降到 12sp 还是截
+            //    （最窄那行是「启动时继续播放」，标签本身就吃掉 349px，只剩 ~425px 给说明）。
+            //    11sp 才全档位放得下 —— 且文案必须短（见下面的三条 note，都是压着宽度写的）。
+            // 🔴 判断"有没有被截断"**只能看截图**：`uiautomator dump` 的 `text` 返回的是**原文**，
+            //    渲染成「…」它照样给你完整字符串（本次就被它骗过一轮，差点当成排版没问题）。
+            // 🔴 想改这两处的字号/文案 ⇒ 必须重新跑 font_scale 1.3 的截图验收。
             Text(
-                text = note,
+                text = "（$note）",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp, end = 52.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).padding(start = 4.dp),
             )
+        } else {
+            // 没说明时也要有东西把开关顶到最右，否则 Switch 会贴着标签
+            Spacer(modifier = Modifier.weight(1f))
         }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
