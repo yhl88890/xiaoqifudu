@@ -12,8 +12,13 @@ android {
         applicationId = "com.xuanji.repeater"
         minSdk = 26
         targetSdk = 35
-        versionCode = 50
-        versionName = "1.2"
+        versionCode = 51
+        // 🔴 版本名**跟着 versionCode 走**（0919 阿亮要求）：
+        //    他手机上「应用信息 → 版本」显示的就是这一行。以前这里写死 "1.2"
+        //    ⇒ 装哪一版都显示 1.2，他在对话里说的 v49 / v50 根本对不上号。
+        //    现在第三段 = versionCode ⇒ 显示 "1.2.51"。
+        //    ⇒ 以后 bump versionCode 即可，**不用再单独改这一行**。
+        versionName = "1.2.$versionCode"
     }
 
     signingConfigs {
