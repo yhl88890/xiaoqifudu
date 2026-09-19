@@ -342,8 +342,10 @@ fun SettingsPage(
 
             // ---------------- 生词提醒 ----------------
             SettingsGroup("生词提醒") {
-                // 0917 阿亮要做「通知栏轮播生词」：隔一阵子换一个还没记住的词，瞄一眼就当复习。
+                // 0917 阿亮要做「通知栏轮播生词」：隔一阵子换一个词，瞄一眼就当复习。
                 // 实现细节全在 VocabReminder.kt（AlarmManager，不是前台服务 —— 理由见那个文件头）。
+                // 🔴 0919 改了两处口径（他报的）：池子从"只挑没掌握的"改成**全本**、
+                //    "今天做完了没"的判据从"复习过一张卡"改成"**练完一整轮**"。
                 var remindOn by remember { mutableStateOf(VocabReminder.isOn(context)) }
                 var interval by remember { mutableStateOf(VocabReminder.loadInterval(context)) }
 
@@ -843,9 +845,14 @@ fun SettingsPage(
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
                                     "在通知栏轮播生词",
-                                    "像每日任务：到点就提醒你复习，有没有词都会说一声；今天练过了就安静到第二天。" +
-                                        "点通知直接进复习页，不响也不震。多久换一个词可以自己调。\n" +
-                                        "有词的时候只挑还没掌握的（连对 3 次的就不再出现），轮着来，不会老是同一个词。\n" +
+                                    "像每日任务：到点就提醒你复习，有没有词都会说一声。" +
+                                        "哪天「正经练完一整轮」才安静到第二天 —— 只是进去翻两张不算，" +
+                                        "半路退出、没把这一轮做完，该提醒还是提醒。\n" +
+                                        "通知里给的是一张完整的卡：英文、音标、中文都有，把通知栏拉下来看得全。" +
+                                        "点通知直接进复习页，不响也不震，多久换一个词可以自己调。\n" +
+                                        "挑词的顺序跟复习页一样：最久没碰过的先上，还没掌握的排在前面；" +
+                                        "连对 3 次的词也会轮进来（跟复习页的「再练一轮」一个口径），" +
+                                        "所以不会出现「没词可弹」。\n" +
                                         "这个功能要通知权限，开启的时候系统会问一次，不给的话提醒发不出来。",
                                 )
                                 Spacer(Modifier.height(12.dp))
@@ -973,11 +980,12 @@ private fun openTtsSettings(ctx: Context) {
  *
  * 🔴 别再把 [VocabReminder.Result.DoneToday] 说成"生词本里没有要复习的词"
  * —— 0917 阿亮就是被那句话劝退的：他以为"没词=这功能没用"，
- * 而实际上"没词也照样提醒、复习过了才安静"才是现在的口径。
+ * 而实际上"没词也照样提醒、**练完一整轮**才安静"才是口径
+ * （0919 又从"复习过一张卡"收紧成"练完一整轮"，见 `VocabReminder.doneRoundToday`）。
  */
 private fun remindToastText(r: VocabReminder.Result): String = when (r) {
     VocabReminder.Result.Posted -> "已开启，通知栏现在就有一条"
-    VocabReminder.Result.DoneToday -> "已开启，今天已经复习过了，明天再提醒你"
+    VocabReminder.Result.DoneToday -> "已开启，今天已经练完一轮了，明天再提醒你"
     VocabReminder.Result.NoPermission -> "已开启，但系统没给通知权限，发不出来"
     VocabReminder.Result.Off -> "已关闭提醒"
 }

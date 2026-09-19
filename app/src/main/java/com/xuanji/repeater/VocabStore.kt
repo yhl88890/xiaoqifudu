@@ -204,12 +204,12 @@ object VocabStore {
                 lastReviewedAt = System.currentTimeMillis(),
             )
         }
-        scope.launch {
-            persist(context)
-            // 「今天已复习」这个判据是**读文件**算出来的（见 VocabReminder.reviewedToday），
-            // 所以必须等 persist 落盘之后再撤通知，否则刚好有闹钟挤在中间会读到旧文件。
-            VocabReminder.onReviewed(context)
-        }
+        // 🔴【0919 删】这里原来在 persist 之后调 `VocabReminder.onReviewed(context)`，即"答完任意一张卡
+        // 就撤掉通知、当天不再提醒"。阿亮把口径收紧了：**"正经复习完一轮才算"**
+        // ⇒ 答单张不是完成，"撤通知"搬到了 `ReviewPage` 里一轮真正走完那一刻
+        //   （`ReviewPrefs.markRoundDone` + `VocabReminder.onRoundDone`）。
+        // ⇒ 别再加回来，那等于让 0917 那个太松的判据复活。
+        scope.launch { persist(context) }
     }
 
     /** 把某个词的「已掌握」状态清掉，重新进复习队列（长按 / 设置里用） */
@@ -310,6 +310,27 @@ object VocabStore {
             emptyList()
         }
     }
+}
+
+/**
+ * 「这条词**上次被碰过**是什么时候」—— 挑词的统一尺子。
+ *
+ * 🔴🔴 **复习页（`ReviewPage.pickRound`）和通知栏轮播（`VocabReminder.readPool`）必须共用这一个实现。**
+ * 两处各写一份迟早会漂移，而阿亮 0919 要的正是"通知里挑词的顺序跟复习页统一"。
+ * 所以要改排序规则，**只改这一个函数**。
+ *
+ * 顺序：复习过就用上次复习时间；没复习过用入库时间（`addedAt`）；
+ * 老数据的 `addedAt` 可能是 0（字段是后加的），拿 `id` 兜底
+ * —— `VocabStore.add()` 里 `id = System.currentTimeMillis()`，所以 id 本身就是建条目那一刻的时间戳。
+ * 不兜这一下，那些词会算成"等了 50 年"，一股脑插到最前面。
+ *
+ * ⚠️ 复习页手里是 `VocabEntry`，通知栏手里是 `vocab.json` 的 `JSONObject`（它不能走 VocabStore，
+ * 见 `VocabReminder.readPool` 的注释）⇒ 所以这里收的是三个原始字段，不是 `VocabEntry`。
+ */
+internal fun lastTouchAt(lastReviewedAt: Long, addedAt: Long, id: Long): Long = when {
+    lastReviewedAt > 0L -> lastReviewedAt
+    addedAt > 0L -> addedAt
+    else -> id
 }
 
 private val WORD_REGEX = Regex("[A-Za-z]+(?:['’\\-][A-Za-z]+)*")

@@ -4,10 +4,10 @@ import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * 复习页设置（0916 新增）：自动发音 开/关 + 用哪个口音。
+ * 复习页设置（0916 新增）：自动发音 开/关 + 用哪个口音 + 每轮多少个 + 上次练完一轮的时间。
  *
  * 【为什么单独一个 prefs 文件】复习这块的偏好跟播放器、ASR、忽略列表都不是一回事，
- * 混进别人的 prefs 里以后找起来费劲。就一条开关 + 一个口音，独立文件最省事。
+ * 混进别人的 prefs 里以后找起来费劲。就这么几条，独立文件最省事。
  *
  * 【默认值为什么是"关 + 美音"】
  *  - 默认关：发音是要联网下载音频的（有道接口），有人可能在流量下用，
@@ -20,6 +20,23 @@ object ReviewPrefs {
     private const val KEY_AUTO_SPEAK = "auto_speak"
     private const val KEY_ACCENT = "accent"
     private const val KEY_BATCH = "batch_size"
+
+    /**
+     * 「上一次**走完一整轮**是什么时候」。
+     *
+     * 🔴【0919 新增】生词提醒的"今天做完了"判据 —— 见 [VocabReminder.doneRoundToday]。
+     * 老口径是读 `vocab.json` 里最大的 `lastReviewedAt`（= 答过任意一张卡就算），
+     * 阿亮报"我只是打开一下、没把该复习的复习完，这算一次吗"⇒ 太松。
+     * 他的口径：**"我得正经复习完一轮，比如说我定的是 10 个，复习完这 10 个这才算"**。
+     *
+     * 所以"完成"这个事实**不可能**再从 `vocab.json` 反推出来（词条上没这个信息），
+     * 必须由复习页在**一轮真正走完那一刻**（`ReviewPage.consumeAndAdvance` 里 `finished = true`）
+     * 主动写一笔。
+     *
+     * ⚠️ 为什么不在 `VocabStore.markReviewed` 里写：那个函数是"答完一张卡"，
+     *    一轮有 10~100 张 ⇒ 写在那儿等于把老口径换个地方实现一遍，白改。
+     */
+    private const val KEY_ROUND_DONE = "last_round_done_at"
 
     /** 口音取值，跟 [Pronounce.speak] 的 accent 参数一致 */
     const val ACCENT_US = "us"
@@ -69,4 +86,21 @@ object ReviewPrefs {
 
     fun saveBatchSize(ctx: Context, n: Int) =
         sp(ctx).edit().putInt(KEY_BATCH, n).apply()
+
+    /**
+     * 刚走完**一整轮**（一路做到结算页，错题也补完了）⇒ 记一笔。
+     *
+     * 🔴 **实际调用点只有一处**：`VocabReminder.onRoundDone`（它同时会撤掉通知栏那条），
+     * 而它又只被 `ReviewPage.consumeAndAdvance` 里 `finished = true` 那个分支调用。
+     * 别加到 `markReviewed`（答完单张）或"开始复习"上 —— 那正是 0917 那个太松的口径。
+     */
+    fun markRoundDone(ctx: Context) =
+        sp(ctx).edit().putLong(KEY_ROUND_DONE, System.currentTimeMillis()).apply()
+
+    /**
+     * 上次走完一整轮的**时间戳**（0 = 从来没走完过）。
+     * ⚠️ 返回原始时间戳而不是 Boolean："今天"这个边界由调用方拿自己的 [todayStart] 去判，
+     *    prefs 这一层只管存数（跟这个文件里其它 load/save 一个风格）。
+     */
+    fun loadRoundDoneAt(ctx: Context): Long = sp(ctx).getLong(KEY_ROUND_DONE, 0L)
 }

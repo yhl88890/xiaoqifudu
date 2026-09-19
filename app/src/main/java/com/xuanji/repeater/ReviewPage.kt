@@ -155,6 +155,17 @@ fun ReviewPage(onBack: () -> Unit) {
             wrongThisRound = emptyList()
         } else {
             finished = true
+            // 🔴🔴【0919】**「今天正经复习完一轮」的唯一判定点，就这一处。**
+            // 生词提醒（`VocabReminder`）靠这个标记决定当天还提不提醒。阿亮的口径：
+            // "**我得正经复习完一轮，比如说我定的是 10 个，复习完这 10 个这才算**"。
+            // ⇒ 开个头就退出、中途按返回、重进页面重新开一轮，都到不了这里 ⇒ 当天照常提醒。
+            //
+            // ⚠️ 必须由**这个动作**判定（走完最后一张卡），不能改成"从数据快照反推"：
+            //    `queue` 为空在别处也会出现（池子挑不出词时会)，那种"一轮没做"不算完成。
+            // ⚠️ 池子不足一轮（比如只剩 3 个词而他设了 10）也算完成 —— 能练的都练完了，
+            //    这时候还追着提醒就是骚扰了。
+            // 它内部会写 `ReviewPrefs` 的"上次走完一轮"时间 + 撤掉通知栏那条。
+            VocabReminder.onRoundDone(context)
         }
     }
 
@@ -420,15 +431,13 @@ private const val NEWCOMER_DIVISOR = 4
 /**
  * 这个词「上一次被碰」是什么时候：复习过就用复习时间，没复习过就用入库时间。
  *
- * ⚠️ 老数据的 `addedAt` 可能是 0（字段是后加的），那就用 `id` 兜底 ——
- * `VocabStore.add()` 里 `id = System.currentTimeMillis()`，所以 id 本身就是建条目那一刻的时间戳。
- * 不兜这一下的话，那些词会算成"等了 50 年"，一股脑插到最前面。
+ * 🔴🔴 **真正的实现在 `VocabStore.lastTouchAt(lastReviewedAt, addedAt, id)`** ——
+ * **通知栏轮播（`VocabReminder`）用的是同一个函数**（阿亮 0919：通知里挑词的顺序要跟复习页统一）。
+ * ⇒ **要改排序规则，改那一个函数**，别在这儿改（改这儿只有复习页会用，两边立刻漂移）。
+ * 这里只是把 `VocabEntry` 拆成三个字段递过去：通知栏手里只有 `vocab.json` 的 `JSONObject`，
+ * 拿不到 `VocabEntry`（原因见 `VocabReminder.readPool`）。
  */
-private fun lastTouchAt(e: VocabEntry): Long = when {
-    e.lastReviewedAt > 0L -> e.lastReviewedAt
-    e.addedAt > 0L -> e.addedAt
-    else -> e.id
-}
+private fun lastTouchAt(e: VocabEntry): Long = lastTouchAt(e.lastReviewedAt, e.addedAt, e.id)
 
 /** 开场：告诉他还剩多少个、点一下开始 */
 @Composable

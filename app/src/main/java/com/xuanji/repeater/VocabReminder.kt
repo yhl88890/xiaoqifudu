@@ -21,7 +21,10 @@ import java.io.File
  * 一开始写成"没词就不发"，他打开开关看到「已开启，但生词本里暂时没有要复习的词」，
  * 于是一条通知都没有 ⇒ 在他看来等于"这开关是坏的"。他要的是**每日任务**：
  *   - **有没有词都要提醒**（生词本空的也要提一句"先去存几个词"）；
- *   - **只有"今天已经复习过"才闭嘴**，安静到第二天。
+ *   - **只有"今天已经练完一整轮"才闭嘴**，安静到第二天。
+ *      🔴【0919 收紧】以前是"复习过任意一张卡"就闭嘴 —— 阿亮报："我只是打开了一下，
+ *      没把该复习的复习完，这也算一次？**我得正经复习完一轮，比如说我定的 10 个，
+ *      复习完这 10 个这才算**。" ⇒ 判据换成 [doneRoundToday]。
  * 所以现在 [showNext] 有三个分支，其中两个是"发"，一个是"不发"。别改回"没词就 return"。
  *
  * 【为什么用 AlarmManager 而不是 WorkManager】
@@ -40,8 +43,10 @@ import java.io.File
  *   顺带一个好处 —— 用户不划掉的话，那条通知一直是"当前那个词"，天然就是"轮播"。
  * - 用 `ELAPSED_REALTIME`（**不加 _WAKEUP**）：设备睡着时就不发，醒来补发。
  *   静音通知没必要把手机唤醒，那样费电又没意义。
- * - 「今天已复习」的判据是**读 `vocab.json` 里最大的 `lastReviewedAt`**，不落新 SP 键
- *   —— 这样从备份恢复数据后判据自动是对的。见 [reviewedToday]。
+ * - **挑词的池子是"全本"（含已掌握的）**，见 [readPool] —— 0919 改的。
+ *   以前排除已掌握 ⇒ 他词少，全练熟后池子永久为空 ⇒ 通知栏**永远只发一句中文引导**、
+ *   一个单词都弹不出来。他的原话："没有我也要弹啊……没有也要按照某个复习的顺序往外弹单词"。
+ * - **挑词顺序跟复习页同一把尺子**（`VocabStore.lastTouchAt`），0919 改的。见 [pickFrom]。
  */
 object VocabReminder {
 
@@ -63,7 +68,7 @@ object VocabReminder {
         /** 真发出去了 */
         Posted,
 
-        /** 开着，但今天已经复习过 ⇒ 今天不再提醒（明天照旧） */
+        /** 开着，但今天已经练完一整轮 ⇒ 今天不再提醒（明天照旧） */
         DoneToday,
 
         /** 开着，但系统没给通知权限，发不出去 */
@@ -130,7 +135,7 @@ object VocabReminder {
         schedule(ctx)
         return when {
             !hasNotifPermission(ctx) -> Result.NoPermission
-            reviewedToday(ctx) -> Result.DoneToday
+            doneRoundToday(ctx) -> Result.DoneToday
             showNext(ctx) -> Result.Posted
             else -> Result.NoPermission
         }
@@ -229,15 +234,21 @@ object VocabReminder {
     }
 
     /**
-     * 他刚答完一张卡 ⇒ 今天的"每日任务"就算做过了。
+     * 他刚**走完一整轮**（一路做到结算页、错题也补完了）⇒ 今天的"每日任务"完成。
      *
-     * 撤掉通知栏那条"还没复习"，**但不动闹钟**：明天 0 点之后 [reviewedToday] 自然变回 false，
-     * 轮播自己就活了，不需要重新排程。
-     * 调用点：`VocabStore.markReviewed`。
+     * 做两件事：
+     *  ① `ReviewPrefs.markRoundDone` —— 记下"上次走完一整轮的时间"，[doneRoundToday] 靠它判；
+     *  ② 撤掉通知栏那条提醒。
+     *
+     * **不动闹钟**：明天 0 点之后 [doneRoundToday] 自然变回 false，轮播自己就活了，不需要重新排程。
+     *
+     * 🔴 调用点只有一处：`ReviewPage.consumeAndAdvance` 里 `finished = true` 那个分支。
+     * ⚠️ **别挂到 `VocabStore.markReviewed` 上** —— 那是"答完一张卡"，
+     *    挂上去就等于 0917 那个太松的老口径复活（阿亮 0919 亲口否掉的）。
      */
-    fun onReviewed(ctx: Context) {
-        if (!isOn(ctx)) return
-        cancelNotification(ctx)
+    fun onRoundDone(ctx: Context) {
+        ReviewPrefs.markRoundDone(ctx)
+        if (isOn(ctx)) cancelNotification(ctx)
     }
 
     // ---------- 发通知 ----------
@@ -245,89 +256,142 @@ object VocabReminder {
     /**
      * 🔴 **有没有词都要发**（0917 下午阿亮改的口径）—— 这是这个函数唯一要记住的事。
      *
-     * 三个分支：
-     *  ① **今天已经复习过** ⇒ 不发，并且把上次那条"还没复习"撤掉
-     *     （他都练完了，通知栏还挂着"今天还没复习"就是误导）。安静到明天。
-     *  ② 有没掌握的词 ⇒ 轮播一个（[pickFrom]）。
-     *  ③ **生词本空的 / 全练熟了** ⇒ **也发**，文案改成引导他去存词或再练一轮。
+     * 三种情况：
+     *  ① **今天已经练完一整轮** ⇒ 不发，并且把上次那条撤掉
+     *     （他都练完了，通知栏还挂着提醒就是误导）。安静到明天。
+     *  ② 生词本里有词 ⇒ 轮播一个（[pickFrom]）。
+     *  ③ **生词本一条都没有** ⇒ **也发**，文案改成引导他去存词。
      *
      * ⚠️ 以前 ③ 是 `return false` 直接静默，他打开开关一条都收不到 ⇒ 认定功能坏了。
+     *
+     * 🔴🔴【0919 改了两处口径，都是阿亮报的】
+     *  1. **① 的判据**从"今天复习过任意一张卡"改成"今天**走完一整轮**" —— 见 [doneRoundToday]。
+     *     老口径下他只要进复习页答一张就当天闭嘴，可他又没把该复习的复习完。
+     *  2. **② 的池子**从"只挑没掌握的"改成"全本" —— 见 [readPool]。
+     *     老口径下词全练熟后池子永久为空 ⇒ 只弹一句中文，一个单词都没有。
      *
      * @return true = 真进通知栏了；false = 今天已完成 / 没权限 / 被系统挡了
      */
     fun showNext(ctx: Context): Boolean {
-        val snap = snapshot(ctx)
-
-        // ① 每日任务完成
-        if (snap.lastReviewedAt >= todayStart()) {
+        // ① 今天的每日任务已完成（= 走完了一整轮）
+        if (doneRoundToday(ctx)) {
             cancelNotification(ctx)
             return false
         }
 
         // ② 有词：轮播
-        pickFrom(ctx, snap.pool)?.let { return notify(ctx, it.first, it.second) }
+        pickFrom(ctx, readPool(ctx))?.let { w -> return notify(ctx, w.text, w.cn, w.detail()) }
 
-        // ③ 没词：也要提醒
-        return if (snap.total > 0) {
-            notify(
-                ctx,
-                "今天还没复习",
-                "生词本里的词都练熟了。想再练就点进来，复习页有「再练一轮」。",
-            )
-        } else {
-            notify(
-                ctx,
-                "今天还没复习",
-                "生词本还是空的 —— 先去听几段，把不认识的词收进来。",
-            )
+        // ③ 一条词都没有：也要提醒。
+        // ⚠️ 池子现在是**全本**，所以"池子空"基本等价于"生词本 0 条"
+        //    （唯一例外是所有条目的 text 都为空，那种数据产生不出来 ⇒ readPool 里那句 continue 是防御）。
+        return notify(ctx, "生词本还是空的", "先去听几段，把不认识的词收进来。")
+    }
+
+    /**
+     * 通知栏里要展示的一条词。
+     *
+     * 为什么字段这么全（0919）：阿亮抱怨"**我到现在没看见过一个完整的单词展示**" ——
+     * 因为老版通知 **title = 词、body = 中文**，而"展开看全文"（`BigTextStyle`）**只作用于 body**
+     * ⇒ 把通知栏拉下来看详情，看到的**还是纯中文**，英文只有折叠态那一行标题（长了就省略号）。
+     * ⇒ 现在 body 里也带上词和音标（[detail]）。
+     */
+    private class Word(
+        val text: String,
+        /** 中文：词性释义优先，退回整句翻译 */
+        val cn: String,
+        /** 音标，只有单词条目有；空串 = 没有 */
+        val ipa: String,
+        /** true = 还没掌握（连对次数 < [VocabEntry.MASTERED_AT]） */
+        val pending: Boolean,
+        /** 上次被碰过的时间，排序用的尺子 —— 见 `VocabStore.lastTouchAt` */
+        val touch: Long,
+    ) {
+        /**
+         * 展开通知时的全文：**词 + 音标**，换行，中文。
+         * 折叠态显示的仍是 `title`(=词) + `contentText`(=中文)，跟以前一样；
+         * 这一行只在拉下来时出现，所以跟标题重复一次是故意的（标题会被省略号吃掉）。
+         */
+        fun detail(): String {
+            val head = if (ipa.isEmpty()) text else "$text  /$ipa/"
+            return if (cn.isEmpty()) head else "$head\n$cn"
         }
     }
 
-    /** 生词本的一份快照：总条数、可提醒的词池、最近一次复习时间。 */
-    private class Snapshot(
-        val total: Int,
-        val pool: List<Pair<String, String>>,
-        val lastReviewedAt: Long,
-    )
-
     /**
+     * 把 `vocab.json` 读成一串 [Word]，**全部条目一条不落**。
+     *
+     * 🔴🔴【0919 改口径】以前这里把"已掌握"（连对满 `MASTERED_AT` 次）的词**排除**掉。
+     * 阿亮词少，全练熟之后池子永久为空 ⇒ 通知栏**永远只发一句中文引导**、一个单词都弹不出来。
+     * 他的原话：「**没有我也要弹啊**……没有也要按照某个复习的顺序往外弹单词」。
+     * ⇒ 池子改成**全本**：没掌握的排前面，轮完了接着上已掌握的。
+     * 这跟复习页「再练一轮」（`includeMastered = true`）是同一个口径 —— 他要的"跟复习逻辑统一"。
+     *
      * 🔴 **直接读 `vocab.json`**，不走 `VocabStore`：
      * 广播接收器可能在进程刚起来、VocabStore 还没异步装填完的时候被调用，
      * 那时 `entries.value` 是空的，会误报"生词本是空的"。
      * 文件读取虽然笨，但在这种"后台被叫醒"的场景下反而最可靠。
      */
-    private fun snapshot(ctx: Context): Snapshot {
+    private fun readPool(ctx: Context): List<Word> {
         val f = File(ctx.filesDir, "vocab.json")
-        if (!f.exists()) return Snapshot(0, emptyList(), 0L)
+        if (!f.exists()) return emptyList()
 
-        var total = 0
-        var last = 0L
-        val pool = ArrayList<Pair<String, String>>()
+        val pool = ArrayList<Word>()
         runCatching {
             val arr = JSONObject(f.readText()).optJSONArray("entries") ?: return@runCatching
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
-                total++
-                last = maxOf(last, o.optLong("lastReviewedAt", 0L))
-
-                // 已掌握的不提醒（跟复习队列一个口径）
-                if (o.optInt("correctStreak", 0) >= VocabEntry.MASTERED_AT) continue
                 val text = o.optString("text").trim()
                 if (text.isEmpty()) continue
-                // ⚠️ 必须先 isNull 再 optString：JSON 里的 null 用 optString 读出来是**字面量 "null"**，
-                // 不是空串 ⇒ 不挡就会往通知里写一个 "null"。（VocabStore 里同样是这么写的）
+
+                // ⚠️ 必须先 `isNull` 再 `optString`：JSON 里的 null 用 optString 读出来是
+                // **字面量 "null"**，不是空串 ⇒ 不挡就会往通知里写一个 "null"。
+                // （`VocabStore.readFromFile` 里同样是这么写的）
+                val s = { k: String -> if (o.isNull(k)) "" else o.optString(k).trim() }
+
+                // 中文：词性释义优先（更全），没有就用整句翻译
                 val cn = listOf("definition", "translation")
-                    .map { if (o.isNull(it)) "" else o.optString(it).trim() }
+                    .map(s)
                     .firstOrNull { it.isNotEmpty() }
                     ?: "（还没查到释义，点开看看）"
-                pool.add(text to cn)
+
+                // 音标：美音优先（跟复习页默认口音一致）；`phonetic` 是升级前的老字段，兜一下
+                val ipa = s("usphone").ifEmpty { s("ukphone") }.ifEmpty { s("phonetic") }
+
+                pool.add(
+                    Word(
+                        text = text,
+                        cn = cn,
+                        ipa = ipa,
+                        pending = o.optInt("correctStreak", 0) < VocabEntry.MASTERED_AT,
+                        // 🔴 用跟复习页**同一个函数**算"上次碰过的时间"，别在这儿另写一套
+                        touch = lastTouchAt(
+                            lastReviewedAt = o.optLong("lastReviewedAt", 0L),
+                            addedAt = o.optLong("addedAt", 0L),
+                            id = o.optLong("id", 0L),
+                        ),
+                    )
+                )
             }
         }
-        return Snapshot(total, pool, last)
+        return pool
     }
 
-    /** 今天已经复习过了没有？判据 = 有没有任何一条的 `lastReviewedAt` 落在今天。 */
-    private fun reviewedToday(ctx: Context): Boolean = snapshot(ctx).lastReviewedAt >= todayStart()
+    /**
+     * 今天有没有**正经练完一整轮**？
+     *
+     * 🔴🔴【0919 换掉的判据】老版本是"读 `vocab.json` 里最大的 `lastReviewedAt` 落在今天"
+     * —— 也就是**答过任意一张卡就算**。阿亮的原话把问题说得很准：
+     * 「**这个复习过一次要怎么界定？就是我只是打开了一下，但我没把该复习的全复习完，
+     * 这个是不是也算一次？那我想要的就是，我得正经复习完一轮，比如说我定的是 10 个，
+     * 那我复习完这 10 个，这才算**。那就不通知了，如果没有，那就还通知。」
+     *
+     * ⇒ 判据换成 `ReviewPrefs` 里由复习页在**一轮走完那一刻**写下的时间戳
+     *   （`ReviewPage.consumeAndAdvance` → [onRoundDone]）。
+     * ⚠️ 这个事实**推不出来**：词条上没有"这一轮做完了没"这种信息，只能由动作本身记一笔。
+     */
+    private fun doneRoundToday(ctx: Context): Boolean =
+        ReviewPrefs.loadRoundDoneAt(ctx) >= todayStart()
 
     /** 今天 0 点（本地时区）。 */
     private fun todayStart(): Long {
@@ -339,13 +403,30 @@ object VocabReminder {
         return c.timeInMillis
     }
 
-    /** 轮着取下一个未掌握的词。池子空就返回 null。 */
-    private fun pickFrom(ctx: Context, pool: List<Pair<String, String>>): Pair<String, String>? {
+    /**
+     * 取下一个词。池子空就返回 null。
+     *
+     * 🔴🔴【0919 改顺序】以前就是一句 `pool[idx % pool.size]` —— 按 **`vocab.json` 的原始顺序**
+     * 转圈（而那个顺序是"最新入库在最前"），跟复习页**毫无关系**。阿亮的原话：
+     * 「**这个展示逻辑应该跟那个复习逻辑相对统一吧**。」
+     *
+     * 现在两件事对齐复习页：
+     *  ① **没掌握的排前面**，轮完了才轮到已掌握的（≈ 复习页"先练不会的"）；
+     *  ② 各自内部按 **`lastTouchAt` 升序** = **最久没碰过的先上**
+     *     （就是复习页 `pickRound` 里 `sortedByDescending { waited }` 那把尺子，
+     *      改动请改 `lastTouchAt` 那一个函数，别在这儿另写）。
+     *
+     * ⚠️ 每轮 tick 都会重新排一次（他复习完顺序就变了），而 [KEY_IDX] 只是个游标
+     *    ⇒ 排完之后游标指的可能是另一条词。无所谓，反而更活：**顺序永远跟着最新的复习情况走**。
+     *    但**轮转不能省** —— 否则"最久没碰"那条会被一直重复推，直到他真去复习它。
+     */
+    private fun pickFrom(ctx: Context, pool: List<Word>): Word? {
         if (pool.isEmpty()) return null
-        // 轮播：每次取下一个，转一圈再来。比"老是同一个词"有用得多。
+        val ordered = pool.filter { it.pending }.sortedBy { it.touch } +
+            pool.filterNot { it.pending }.sortedBy { it.touch }
         val idx = sp(ctx).getInt(KEY_IDX, 0)
-        val pick = pool[idx % pool.size]
-        sp(ctx).edit().putInt(KEY_IDX, (idx + 1) % pool.size).apply()
+        val pick = ordered[idx % ordered.size]
+        sp(ctx).edit().putInt(KEY_IDX, (idx + 1) % ordered.size).apply()
         return pick
     }
 
@@ -353,8 +434,14 @@ object VocabReminder {
         ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
 
-    /** @return 真进通知栏了没有。没权限时**不要**假装成功（设置页的提示要准）。 */
-    private fun notify(ctx: Context, title: String, body: String): Boolean {
+    /**
+     * @param body 折叠态显示的那一行
+     * @param bigText 拉下通知栏后显示的全文。0919 新增 —— 默认跟 [body] 一样，
+     *   但**词卡那条要单独给**：title 是英文词、body 是中文，而 bigText 才是展开后的内容，
+     *   以前三处都用 body ⇒ 展开看到的是纯中文，英文只有标题那一行（长了就被省略号吃掉）。
+     * @return 真进通知栏了没有。没权限时**不要**假装成功（设置页的提示要准）。
+     */
+    private fun notify(ctx: Context, title: String, body: String, bigText: String = body): Boolean {
         // 通知权限（Android 13+）。没授权就别白忙，也不要崩。
         if (!hasNotifPermission(ctx)) return false
 
@@ -380,7 +467,7 @@ object VocabReminder {
         val n = NotificationCompat.Builder(ctx, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(content)
             .setAutoCancel(true)
