@@ -301,8 +301,8 @@ object VocabReminder {
             return false
         }
 
-        // ② 有词：轮播。title 用 head()（词 + 音标），别退回 w.text —— 见 [Word.head]
-        pickFrom(ctx, readPool(ctx))?.let { w -> return notify(ctx, w.head(), w.cn, w.detail()) }
+        // ② 有词：轮播。三行摆法见 [Word] —— title 只放词、音标单独一行进正文
+        pickFrom(ctx, readPool(ctx))?.let { w -> return notify(ctx, w.title(), w.body(), w.detail()) }
 
         // ③ 一条词都没有：也要提醒。
         // ⚠️ 池子现在是**全本**，所以"池子空"基本等价于"生词本 0 条"
@@ -322,7 +322,18 @@ object VocabReminder {
      * 音标**一直都在**（系统记录里 `android.bigText` = `"harvest  /ˈhɑːrvɪst/…"`），
      * 但它只活在 `BigTextStyle` 的全文里 —— 而折叠态那两行（`title` + `text`）**结构上就没有音标的位置**，
      * 系统记录也写着那条通知**从没被展开过**（`airtimeExpandedMs=0`）。
-     * ⇒ 音标挪进 `title`，跟单词并排（见 [Word.head]）。**别再挪回 bigText**。
+     * ⇒ 音标必须进折叠态。**别再挪回 bigText**。
+     *
+     * 🔴🔴【0922 同一天的二次修正 —— 第一版修窄了】第一版是把音标**拼在 title 上**
+     * （`"词  /音标/"`）。`nervous  /ˈnɜːrvəs/` 好好的，但轮播到 `vocabulary` 就变成
+     * 实机截图上的 **`vocabulary  /vəˈk…`** —— **标题只有一行，长词 + 音标必然被省略号吃掉**。
+     * ⇒ 定稿成三行（实测 MIUI 正文区能给两行）：
+     *     ```
+     *     vocabulary                  ← title：**只放单词**
+     *     /vəˈkæbjəleri/              ← 正文第 1 行：音标独占一行，永远截不到
+     *     n. 词汇；词汇量；词表         ← 正文第 2 行：中文
+     *     ```
+     * ⚠️ **别再"图省事"把音标拼回 title** —— 短词看着没问题，长词一定露馅。
      */
     private class Word(
         val text: String,
@@ -336,21 +347,28 @@ object VocabReminder {
         val touch: Long,
     ) {
         /**
-         * 折叠态第一行（通知的 `title`）：**词 + 音标**，并排。
-         *
-         * 🔴🔴【0922】音标**必须在这儿**，不能只放 [detail]。
-         * 折叠卡就两行（title + contentText）：音标塞进 bigText 的话，
-         * 他不主动展开就永远看不见 —— 实测那条通知从没被展开过。
-         * 没有音标时（整句条目）就只显示原文，不硬凑一个空 `/ /`。
+         * 折叠态第一行（通知的 `title`）：**只放单词**。
+         * 🔴 别把音标拼进来 —— 标题只有一行，长词会被省略号吃掉（`vocabulary  /vəˈk…` 实测）。
          */
-        fun head(): String = if (ipa.isEmpty()) text else "$text  /$ipa/"
+        fun title(): String = text
+
+        /**
+         * 折叠态正文（通知的 `text`）：**音标独占一行**，再跟中文。
+         * 正文区实测能给两行，所以长词 + 长释义也摆得下。
+         * 没有音标时（整句条目）就只给中文，**别硬凑一个空 `/ /`**。
+         */
+        fun body(): String = when {
+            ipa.isEmpty() -> cn
+            cn.isEmpty() -> "/$ipa/"
+            else -> "/$ipa/\n$cn"
+        }
 
         /**
          * 展开通知时的全文：head（词 + 音标）换行接中文。
-         * 跟 title 有重复是**故意的** —— 标题那行长词会被省略号吃掉。
+         * 跟 title/正文有重复是**故意的** —— 标题那行长词会被省略号吃掉。
          */
         fun detail(): String {
-            val h = head()
+            val h = if (ipa.isEmpty()) text else "$text  /$ipa/"
             return if (cn.isEmpty()) h else "$h\n$cn"
         }
     }
@@ -472,8 +490,8 @@ object VocabReminder {
             PackageManager.PERMISSION_GRANTED
 
     /**
-     * @param title 折叠态第一行。词卡那条给的是 **"词 + 音标"**（[Word.head]），不是光秃秃的词。
-     * @param body 折叠态第二行（词卡 = 中文释义）
+     * @param title 折叠态第一行（词卡 = **只有单词**，别拼音标 —— 见 [Word.title]）
+     * @param body 折叠态正文，可两行（词卡 = **音标一行 + 中文一行**，见 [Word.body]）
      * @param bigText 拉下通知栏后显示的全文。0919 新增 —— 默认跟 [body] 一样，
      *   但**词卡那条要单独给**：展开后要看到 词 + 音标 + 中文 完整一套。
      * @return 真进通知栏了没有。没权限时**不要**假装成功（设置页的提示要准）。
