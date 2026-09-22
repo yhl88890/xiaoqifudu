@@ -221,12 +221,40 @@ object VocabReminder {
      * 用在"就该从此刻重新开始计时"的四个地方（**别在别处用它**，会一开 App 就把提醒顶后）：
      *   - [setOn] 刚打开开关；
      *   - [saveInterval] 用户刚改了间隔；
-     *   - ACTION_TICK 响完了，排下一发；
      *   - MY_PACKAGE_REPLACED 装完新版，等于更新后重新开始计时。
      *
      * ⚠️ 其余一切"闹钟可能丢了"的场合（App 启动、开机）走 [healIfNeeded]，那个是幂等的。
+     * ⚠️ **响完续下一发不走这里**，走 [scheduleAfterTick] —— 理由见那个函数（别把两件事混成一个）。
      */
     fun schedule(ctx: Context) = armAt(ctx, System.currentTimeMillis() + intervalMs(ctx))
+
+    /**
+     * 🔴🔴 **闹钟响过之后续下一发 —— 按"排程网格"往后推，不是"从现在起再等一个间隔"。**
+     *
+     * 【0922 真机实测发现的 bug】原来 TICK 里调的是 [schedule]（= `now + 间隔`）。
+     * 问题是**非精确闹钟会被系统压后**（实测：设 15 分钟，到期后 2 分半还没响，
+     * 系统自己写着最晚 `到期 + 11分15秒` 才投递 —— 见类头那段）。
+     * 而"从**实际响的那一刻**再等 15 分钟" ⇒ **每一次的迟到都会加到间隔上，一轮轮累积**：
+     * 名义 15 分钟，实际变成 18、21… 越拖越长，跟他设的档位对不上。
+     *
+     * 现在按**上一个到期时刻 + 一个间隔**续期：
+     *   - 迟到 3 分钟 ⇒ 下一发排在 `名义时刻 + 15 分`，**相邻两发的间距回到 15 分钟**；
+     *   - 系统的迟到只是"这一次晚到"，**不会把整条网格顶后**。
+     *   （跟 [healIfNeeded] 的幂等是同一个思路：**排的是时刻，不是"从现在起多久"**。）
+     *
+     * ⚠️ 迟到一个间隔以上（系统压得狠，进了 Doze 那种）⇒ 往后推**整数个间隔**，
+     *    别排一个已经过去的时刻（排过去会立刻补响一次，白响）。
+     */
+    fun scheduleAfterTick(ctx: Context) {
+        val now = System.currentTimeMillis()
+        val step = intervalMs(ctx)
+        val due = sp(ctx).getLong(KEY_DUE, 0L)
+        var next = if (due <= 0L) now + step else due + step
+        if (next <= now) {
+            next += ((now - next) / step + 1) * step
+        }
+        armAt(ctx, next)
+    }
 
     /**
      * 🔴🔴 **"确保轮播还活着" —— 唯一的自愈入口，别删、也别再写第二个。**
@@ -561,6 +589,8 @@ object VocabReminder {
  *
  * 🔴 【0922】闹钟是**一次性**的（`setAndAllowWhileIdle`，不是 `setInexactRepeating` 了），
  * 所以 ACTION_TICK 这一支**必须自己排下一发** —— 漏了它，轮播响一次就永久死掉。
+ * ⚠️ 续期要用 [VocabReminder.scheduleAfterTick]（按网格），**别用 `schedule()`** ——
+ *    后者是"从现在起再等一个间隔"，会把系统的迟到一轮轮累加进间隔里（0922 实测到的问题）。
  *
  * 🔴 **BOOT_COMPLETED 这一段不能删**：用 AlarmManager 排的闹钟**重启后会全部丢失**，
  * 不在这里重排的话，用户重启一次手机这个功能就悄悄死掉了，还很难查（他只会觉得"没提醒了"）。
@@ -577,7 +607,8 @@ class VocabReminderReceiver : BroadcastReceiver() {
                 if (VocabReminder.isOn(context)) {
                     // 🔴 先排下一发、再发通知：闹钟响完就没了，万一发通知那步抛异常，
                     //    也不至于把整条轮播弄死。
-                    VocabReminder.schedule(context)
+                    // ⚠️ 用 scheduleAfterTick（按网格续期），别换成 schedule() —— 见那个函数的注释。
+                    VocabReminder.scheduleAfterTick(context)
                     VocabReminder.showNext(context)
                 }
             }
