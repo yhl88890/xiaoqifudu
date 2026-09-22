@@ -795,8 +795,11 @@ class MainActivity : ComponentActivity() {
         // 【0915】把应用级 Context 挂到会话对象上：文件级顶层函数（如 videoJumpSentence）拿不到
         // LocalContext，但「上一句复读」要读音频模式的 RepeatPrefs 重播次数。只存 Application Context，不泄漏。
         PlaybackSession.attachContext(this)
-        // 0917 生词提醒自愈：开关开着但闹钟被清掉了（装新版/强行停止/ROM 清后台）⇒ 重排。
-        // 幂等、开销极小；细节和"为什么不能每次启动都重排"见 VocabReminder.healIfNeeded。
+        // 0917 生词提醒自愈：开关开着但闹钟被清掉了 ⇒ 重排。
+        // 🔴【0922】这一句现在是**真的救命**：MIUI 把"从最近任务划掉卡片"做成了 force-stop
+        //   （`stopped=true`）⇒ 系统闹钟被清空。而 AlarmManager **没有公开 API** 能问"我的闹钟还在不在"，
+        //   所以只能靠"每次启动都按同一个到期时刻幂等重排"来兜底。
+        //   幂等是关键：App 开一百次也不会把倒计时往后顶。细节见 VocabReminder.healIfNeeded。
         VocabReminder.healIfNeeded(this)
         startForegroundService(Intent(this, PlayerService::class.java))
         bindService(Intent(this, PlayerService::class.java), connection, Context.BIND_AUTO_CREATE)

@@ -41,8 +41,12 @@ import java.io.File
  * - 渠道 IMPORTANCE_LOW：**不响不震**。这是"瞄一眼"用的，不是催命符。
  * - 所有通知共用 [NOTIF_ID]：更新同一条，**不在通知栏堆一大排**。
  *   顺带一个好处 —— 用户不划掉的话，那条通知一直是"当前那个词"，天然就是"轮播"。
- * - 用 `ELAPSED_REALTIME`（**不加 _WAKEUP**）：设备睡着时就不发，醒来补发。
- *   静音通知没必要把手机唤醒，那样费电又没意义。
+ * - 用 `ELAPSED_REALTIME_WAKEUP` + `setAndAllowWhileIdle`（**0922 改的**）。
+ *   原来是 `ELAPSED_REALTIME`（不加 _WAKEUP）的重复闹钟 —— 静音通知不吵人，
+ *   可它有两个要命的短板：① 设备一睡着就压到醒来才补；② 进了 Doze 干脆不投递。
+ *   漏一次提醒的代价 ≫ 一次唤醒的耗电，所以换成"允许在 Doze 里发"。
+ *   ⚠️ `setAndAllowWhileIdle` 在 Doze 里**最快 9 分钟一次** —— 而我们最短档就是 15 分钟，
+ *      正好不打架，别把 [INTERVAL_CHOICES] 的最小值调到 9 以下。
  * - **挑词的池子是"全本"（含已掌握的）**，见 [readPool] —— 0919 改的。
  *   以前排除已掌握 ⇒ 他词少，全练熟后池子永久为空 ⇒ 通知栏**永远只发一句中文引导**、
  *   一个单词都弹不出来。他的原话："没有我也要弹啊……没有也要按照某个复习的顺序往外弹单词"。
@@ -83,25 +87,27 @@ object VocabReminder {
     private const val KEY_MIN = "interval_min"
     private const val KEY_IDX = "rotate_idx"
 
-    /** 「下次该响的墙钟毫秒」。**只当"闹钟是不是被清掉了"的探针用**，不参与真正排程。 */
+    /**
+     * 「下次该响的墙钟毫秒」—— **唯一真值**。
+     *
+     * 为什么用墙钟而不是 `elapsedRealtime`：墙钟能跨重启比较，而 `elapsedRealtime` 一重启就归零
+     * ⇒ 重启后那个旧值永远"在未来"。排程前再用 [bootMark] 换算回 elapsed 给 AlarmManager。
+     */
     private const val KEY_DUE = "due_at"
 
     /**
-     * 「本次开机的墙钟起点」= `now - elapsedRealtime`。
+     * ⚠️【0922 删】原来这里存着「本次开机的墙钟起点」`KEY_BOOT`，用来识别"是不是真重启了"
+     * （因为 `BOOT_COMPLETED` 会被系统反复补发，无条件重排会把倒计时一直顶后）。
      *
-     * 🔴 这个键是**判断 BOOT_COMPLETED 是不是真重启**的唯一依据，别删。
-     * 实测（模拟器 Android 15）：`BOOT_COMPLETED` 会被系统**反复补发** ——
-     * 装完 APK 补发、甚至**每次 App 进程启动都补发**（连开 3 次，3 次都收到）。
-     * 所以"收到 BOOT_COMPLETED 就重排"是错的：倒计时会每次开 App 都被顶后，等于永远不提醒。
-     * 而真·重启会让 `now - elapsedRealtime` 跳成新的开机时刻 ⇒ 用它就能区分开。
+     * 现在不需要了：重排改成了 [healIfNeeded] 的**幂等**语义 ——
+     * 重复调用只会把系统闹钟重排到**同一个到期时刻**，不会把倒计时往后顶，
+     * 所以"补发的 BOOT_COMPLETED"和"真的重启"都可以放心处理，不用再区分。
+     * ⇒ **别把这个键加回来**，那是老设计的补丁。
      */
-    private const val KEY_BOOT = "boot_wall"
 
     /**
-     * 自愈容差。不精确闹钟被系统批处理往后拖几分钟是常态，不能一超时就当它死了。
-     * 60 秒只用来吸掉"刚好在边界上"的抖动，真正的失效是"过期好几分钟/几天"。
-     * 顺带也当"开机起点变了没有"的容差 —— 用户手动改系统时间超过 1 分钟时会被当成重启，
-     * 那只导致多排一次闹钟，无害。
+     * "该响却没响"的宽限。到点后系统压几分钟是常态，别一超时就当闹钟死了。
+     * 60 秒只用来吸掉"刚好在边界上"的抖动；真失效是"过期好几分钟甚至几天"。
      */
     private const val HEAL_SLACK = 60_000L
 
@@ -160,65 +166,81 @@ object VocabReminder {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
-    /** 「本次开机的墙钟起点」。重启后才变，用来识别"真的重启了"。 */
+    /** 「本次开机的墙钟起点」= `now - elapsedRealtime`，把墙钟到期时刻换算成 elapsed 用。 */
     private fun bootMark(): Long =
         System.currentTimeMillis() - SystemClock.elapsedRealtime()
 
+    private fun intervalMs(ctx: Context): Long = loadInterval(ctx) * 60_000L
+
     /**
-     * 无条件重排（把倒计时**推到"现在 + 一个间隔"**）。
-     * 只在"确定闹钟没了"或"用户刚改设置"的时候调 —— 别在每次启动时调，否则永远不提醒。
+     * 墙钟到期时刻 → AlarmManager 要的 elapsed 基准。
+     * 已经是过去时刻（漏掉了）就抬到"马上"，让补发别拖。
      */
-    fun schedule(ctx: Context) {
+    private fun elapsedFor(dueWall: Long): Long {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val dueElapsed = dueWall - bootMark()
+        return if (dueElapsed <= nowElapsed + 500L) nowElapsed + 500L else dueElapsed
+    }
+
+    /**
+     * 按指定的**墙钟到期时刻**排一个闹钟，并把它记进 [KEY_DUE]。
+     *
+     * 🔴🔴 幂等：同一个到期时刻调一百次，系统里也只是同一个闹钟。
+     * 这是整个自愈能成立的前提 —— 见 [healIfNeeded]。
+     */
+    private fun armAt(ctx: Context, dueWall: Long) {
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
-        val ms = loadInterval(ctx) * 60_000L
-        am.cancel(tickIntent(ctx)) // 先取消旧的，避免改间隔后两条并存
+        sp(ctx).edit().putLong(KEY_DUE, dueWall).apply()
         runCatching {
-            am.setInexactRepeating(
-                AlarmManager.ELAPSED_REALTIME,
-                SystemClock.elapsedRealtime() + ms,
-                ms,
+            am.setAndAllowWhileIdle(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                elapsedFor(dueWall),
                 tickIntent(ctx),
             )
-        }.onSuccess {
-            // 记"该响时间"用**墙钟**而不是 elapsedRealtime：墙上时钟能跨重启比较，
-            // 而 elapsedRealtime 一重启就归零 ⇒ 重启后那个旧值永远"在未来"，自愈就失灵了。
-            sp(ctx).edit()
-                .putLong(KEY_DUE, System.currentTimeMillis() + ms)
-                .putLong(KEY_BOOT, bootMark())
-                .apply()
         }
     }
 
-    /** 闹钟响过一次：把"该响时间"往后推一格，让 [healIfNeeded] 知道轮播还活着。 */
-    fun markFired(ctx: Context) {
-        val ms = loadInterval(ctx) * 60_000L
-        sp(ctx).edit().putLong(KEY_DUE, System.currentTimeMillis() + ms).apply()
-    }
+    /**
+     * 无条件重排：把倒计时**推到"现在 + 一个间隔"**。
+     * 只在"用户刚改设置"、"装完新版 APK"这种"就该重新开始计时"的时候用。
+     */
+    fun schedule(ctx: Context) = armAt(ctx, System.currentTimeMillis() + intervalMs(ctx))
 
     /**
-     * 🔴 **"确保闹钟是活着的" —— 唯一的自愈入口，别删、也别再写第二个。**
+     * 🔴🔴 **"确保轮播还活着" —— 唯一的自愈入口，别删、也别再写第二个。**
      *
-     * 只在"确实需要重排"时才动手，判据有三个（任一命中就重排）：
-     *  1. **重启过**（开机墙钟起点变了）⇒ 闹钟肯定没了；
-     *  2. **过期没响**（该响时间早就过了）⇒ 被系统/ROM 清掉了，或装新版包清掉了；
-     *  3. 从没排过（due 不存在）。
+     * 【0922 重写：原来那版有个致命漏洞】
+     * 旧实现只在"重启过 / `due` 过期 / 从没排过"时才重排。问题是 `due` **只是我们自己记的账**，
+     * 而 Android **没有任何公开 API 能问系统"我的闹钟还在不在"**。
+     * 于是只要系统把闹钟清了、而 `due` 还没到（我们以为"闹钟好好地等着"），
+     * 它就判"不用管" ⇒ **闹钟永远排不回来，一条提醒都没有**。
      *
-     * ⚠️ **绝对不要改成"不判断就直接重排"**。踩过的坑：
-     *   - App 启动时无条件重排 ⇒ 他频繁开 App 就永远等不到提醒；
-     *   - 收到 BOOT_COMPLETED 就重排 ⇒ 同上，因为那个广播**每次进程启动都会被补发**（实测）。
-     * 正常情况下每次 [markFired] 都会刷新 due，所以这里不会命中、也就不会顶后倒计时。
+     * 真机实测（0922，Redmi + MIUI，`23054RA19C`）：
+     *   - 把 App 卡片从最近任务里**划掉** ⇒ MIUI 直接做成 force-stop
+     *     （`dumpsys package` 里 `stopped=true`）⇒ **系统闹钟被清空**；
+     *   - 此时再打开 App，旧 `healIfNeeded` **不会**把闹钟排回来（因为 `due` 还在未来）；
+     *   - 而他一天要划掉/重开好多次 ⇒ 提醒就这么"时有时无"，最后彻底没有。
      *
-     * 调用点：MainActivity.onCreate、以及接收器里的 BOOT_COMPLETED。
+     * 【现在为什么可以放心"每次都排"】
+     * 因为 [armAt] 是**幂等**的：它排的是**固定的到期时刻**，不是"从现在起再等一个间隔"。
+     * ⇒ App 开一百次，倒计时也纹丝不动；闹钟真丢了，开一次 App 立刻就补回来。
+     * ⚠️ **别再改回"从当前时刻往后推一个间隔"**，那会一开 App 就把提醒顶后、等于永远不提醒。
+     *
+     * 调用点：MainActivity.onCreate、接收器里的 ACTION_TICK（响完排下一发）和 BOOT_COMPLETED。
      */
     fun healIfNeeded(ctx: Context) {
         if (!isOn(ctx)) return
+        val now = System.currentTimeMillis()
         val due = sp(ctx).getLong(KEY_DUE, 0L)
-        val oldBoot = sp(ctx).getLong(KEY_BOOT, 0L)
-        val rebooted = oldBoot <= 0L ||
-            kotlin.math.abs(bootMark() - oldBoot) > HEAL_SLACK
-        if (rebooted || due <= 0L || System.currentTimeMillis() > due + HEAL_SLACK) {
-            schedule(ctx)
+        val target = when {
+            // 从没排过 ⇒ 从现在起算一个完整间隔
+            due <= 0L -> now + intervalMs(ctx)
+            // 早该响了却没响（闹钟被清 / 被系统压了）⇒ 立刻补一发，别让他等到下一轮
+            due <= now - HEAL_SLACK -> now + 500L
+            // 正常情况：原样重排到同一个到期时刻（幂等，不倒计时顶后）
+            else -> due
         }
+        armAt(ctx, target)
     }
 
     /** 关掉开关 / 生词本清空时调用：取消闹钟 + 撤掉通知栏那条 */
@@ -279,8 +301,8 @@ object VocabReminder {
             return false
         }
 
-        // ② 有词：轮播
-        pickFrom(ctx, readPool(ctx))?.let { w -> return notify(ctx, w.text, w.cn, w.detail()) }
+        // ② 有词：轮播。title 用 head()（词 + 音标），别退回 w.text —— 见 [Word.head]
+        pickFrom(ctx, readPool(ctx))?.let { w -> return notify(ctx, w.head(), w.cn, w.detail()) }
 
         // ③ 一条词都没有：也要提醒。
         // ⚠️ 池子现在是**全本**，所以"池子空"基本等价于"生词本 0 条"
@@ -295,6 +317,12 @@ object VocabReminder {
      * 因为老版通知 **title = 词、body = 中文**，而"展开看全文"（`BigTextStyle`）**只作用于 body**
      * ⇒ 把通知栏拉下来看详情，看到的**还是纯中文**，英文只有折叠态那一行标题（长了就省略号）。
      * ⇒ 现在 body 里也带上词和音标（[detail]）。
+     *
+     * 🔴🔴【0922 又补了一刀，阿亮报的】他说卡片上"只有单词跟中文释义，**没有音标**"。
+     * 音标**一直都在**（系统记录里 `android.bigText` = `"harvest  /ˈhɑːrvɪst/…"`），
+     * 但它只活在 `BigTextStyle` 的全文里 —— 而折叠态那两行（`title` + `text`）**结构上就没有音标的位置**，
+     * 系统记录也写着那条通知**从没被展开过**（`airtimeExpandedMs=0`）。
+     * ⇒ 音标挪进 `title`，跟单词并排（见 [Word.head]）。**别再挪回 bigText**。
      */
     private class Word(
         val text: String,
@@ -308,13 +336,22 @@ object VocabReminder {
         val touch: Long,
     ) {
         /**
-         * 展开通知时的全文：**词 + 音标**，换行，中文。
-         * 折叠态显示的仍是 `title`(=词) + `contentText`(=中文)，跟以前一样；
-         * 这一行只在拉下来时出现，所以跟标题重复一次是故意的（标题会被省略号吃掉）。
+         * 折叠态第一行（通知的 `title`）：**词 + 音标**，并排。
+         *
+         * 🔴🔴【0922】音标**必须在这儿**，不能只放 [detail]。
+         * 折叠卡就两行（title + contentText）：音标塞进 bigText 的话，
+         * 他不主动展开就永远看不见 —— 实测那条通知从没被展开过。
+         * 没有音标时（整句条目）就只显示原文，不硬凑一个空 `/ /`。
+         */
+        fun head(): String = if (ipa.isEmpty()) text else "$text  /$ipa/"
+
+        /**
+         * 展开通知时的全文：head（词 + 音标）换行接中文。
+         * 跟 title 有重复是**故意的** —— 标题那行长词会被省略号吃掉。
          */
         fun detail(): String {
-            val head = if (ipa.isEmpty()) text else "$text  /$ipa/"
-            return if (cn.isEmpty()) head else "$head\n$cn"
+            val h = head()
+            return if (cn.isEmpty()) h else "$h\n$cn"
         }
     }
 
@@ -435,10 +472,10 @@ object VocabReminder {
             PackageManager.PERMISSION_GRANTED
 
     /**
-     * @param body 折叠态显示的那一行
+     * @param title 折叠态第一行。词卡那条给的是 **"词 + 音标"**（[Word.head]），不是光秃秃的词。
+     * @param body 折叠态第二行（词卡 = 中文释义）
      * @param bigText 拉下通知栏后显示的全文。0919 新增 —— 默认跟 [body] 一样，
-     *   但**词卡那条要单独给**：title 是英文词、body 是中文，而 bigText 才是展开后的内容，
-     *   以前三处都用 body ⇒ 展开看到的是纯中文，英文只有标题那一行（长了就被省略号吃掉）。
+     *   但**词卡那条要单独给**：展开后要看到 词 + 音标 + 中文 完整一套。
      * @return 真进通知栏了没有。没权限时**不要**假装成功（设置页的提示要准）。
      */
     private fun notify(ctx: Context, title: String, body: String, bigText: String = body): Boolean {
@@ -482,23 +519,29 @@ object VocabReminder {
 /**
  * 闹钟到点 / 开机 / 装完新版 的接收器。
  *
+ * 🔴 【0922】闹钟是**一次性**的（`setAndAllowWhileIdle`，不是 `setInexactRepeating` 了），
+ * 所以 ACTION_TICK 这一支**必须自己排下一发** —— 漏了它，轮播响一次就永久死掉。
+ *
  * 🔴 **BOOT_COMPLETED 这一段不能删**：用 AlarmManager 排的闹钟**重启后会全部丢失**，
  * 不在这里重排的话，用户重启一次手机这个功能就悄悄死掉了，还很难查（他只会觉得"没提醒了"）。
+ * ⚠️ 现在走 [VocabReminder.healIfNeeded] 就行，它是幂等的；
+ *    这个广播会被系统反复补发（实测连开 3 次 App 就收到 3 次），碰上幂等的实现已经无害。
  *
- * MY_PACKAGE_REPLACED 同理 —— 装完新版 APK 后闹钟可能没了，而阿亮换包很勤。
+ * MY_PACKAGE_REPLACED：装完新版 APK 后闹钟可能没了，而阿亮换包很勤。
+ * 这里用 [VocabReminder.schedule] 而不是 heal —— 刚更新完，重新计一个完整间隔是合理的。
  */
 class VocabReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
             VocabReminder.ACTION_TICK -> {
                 if (VocabReminder.isOn(context)) {
+                    // 🔴 先排下一发、再发通知：闹钟响完就没了，万一发通知那步抛异常，
+                    //    也不至于把整条轮播弄死。
+                    VocabReminder.schedule(context)
                     VocabReminder.showNext(context)
-                    // 告诉自愈逻辑"轮播还活着"，这样它就不会误判成过期而重排
-                    VocabReminder.markFired(context)
                 }
             }
-            // 开机。⚠️ 必须走 healIfNeeded 而**不是** schedule：这个广播会被系统反复补发
-            // （实测连开 3 次 App 就收到 3 次），无条件重排等于把倒计时一直往后顶。
+            // 开机。幂等，重复收到也没事。
             Intent.ACTION_BOOT_COMPLETED -> {
                 VocabReminder.healIfNeeded(context)
             }
