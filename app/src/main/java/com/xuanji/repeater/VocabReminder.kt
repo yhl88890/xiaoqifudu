@@ -29,8 +29,14 @@ import java.io.File
  *
  * 【为什么用 AlarmManager 而不是 WorkManager】
  * WorkManager 要加一个依赖，而这里的需求就是"隔一阵子换一条通知"，用系统闹钟完全够。
- * 代价是要自己处理"闹钟丢了"的三种情况：开机、装新版 APK、被系统清掉
- * —— 分别见 [VocabReminderReceiver] 和 [healIfNeeded]。
+ * 代价是**闹钟会被系统清掉**，得自己兜 —— 见 [VocabReminderReceiver] 和 [healIfNeeded]。
+ *
+ * 🔴🔴【0922 真机实锤的头号杀手】**在最近任务里划掉 App 卡片 = `am force-stop`**：
+ * 进程死 + **闹钟全被清空** + 包被标记 `stopped=true`（`dumpsys package <pkg>` 里能看见），
+ * 而 `stopped=true` 会把**广播一起封掉**（`BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` 都不投递），
+ * ⇒ 没有任何东西能自己醒来，**只能等用户手动打开一次 App**。
+ * 阿亮一天划好几次卡片，这就是"提醒时有时无 → 最后好几天一条都不弹"的真因。
+ * ⇒ 所以 `MainActivity.onCreate` 每次都调 [healIfNeeded]，而它**必须是幂等的**（见该函数）。
  *
  * 【为什么不用前台服务】
  * Android 14 起前台服务**必须声明类型**（mediaPlayback / dataSync / …），
@@ -47,6 +53,11 @@ import java.io.File
  *   漏一次提醒的代价 ≫ 一次唤醒的耗电，所以换成"允许在 Doze 里发"。
  *   ⚠️ `setAndAllowWhileIdle` 在 Doze 里**最快 9 分钟一次** —— 而我们最短档就是 15 分钟，
  *      正好不打架，别把 [INTERVAL_CHOICES] 的最小值调到 9 以下。
+ * - 🔴 **非精确闹钟的投递窗口 ≈ 0.75 × 间隔**（AOSP 的 `WINDOW_HEURISTIC`，真机实测：
+ *   15 分钟档 `window=+11m15s`、60 分钟档 `window=+45m0s`）⇒ **实际提醒落在 [间隔, 1.75×间隔]**。
+ *   这是**系统行为、v52 时代就有**，不是 bug；看到"过期好几分钟还没响"先别慌，只要还在窗口里就是正常。
+ *   要准到分钟只有 `setExactAndAllowWhileIdle` + `SCHEDULE_EXACT_ALARM`（Android 14+ 默认拒绝，
+ *   得用户去「特殊权限 → 闹钟和提醒」手动开）⇒ **要不要加是产品决策，别自己拍板**。
  * - **挑词的池子是"全本"（含已掌握的）**，见 [readPool] —— 0919 改的。
  *   以前排除已掌握 ⇒ 他词少，全练熟后池子永久为空 ⇒ 通知栏**永远只发一句中文引导**、
  *   一个单词都弹不出来。他的原话："没有我也要弹啊……没有也要按照某个复习的顺序往外弹单词"。
@@ -113,8 +124,12 @@ object VocabReminder {
 
     /**
      * 间隔档位（分钟）。
-     * 最短就是 15 —— 再密就成骚扰了，而且系统对重复闹钟本来也会做批处理。
+     * 最短就是 15 —— 再密就成骚扰了，而且系统对闹钟本来也会做批处理。
      * 120 = 两小时，适合"我白天在忙，隔一阵提醒我看一眼"。
+     *
+     * ⚠️ 别忘了**投递窗口 ≈ 0.75 × 间隔**（见类头那段）：15 分钟档实测 `window=+11m15s`。
+     * ⇒ 实际提醒落在 **[间隔, 1.75×间隔]**。嫌不准只有换 `setExactAndAllowWhileIdle`，
+     * 那要多要一个 `SCHEDULE_EXACT_ALARM` 特殊权限 —— **动之前先问阿亮**。
      */
     val INTERVAL_CHOICES = listOf(15, 30, 60, 120)
 
@@ -202,7 +217,14 @@ object VocabReminder {
 
     /**
      * 无条件重排：把倒计时**推到"现在 + 一个间隔"**。
-     * 只在"用户刚改设置"、"装完新版 APK"这种"就该重新开始计时"的时候用。
+     *
+     * 用在"就该从此刻重新开始计时"的四个地方（**别在别处用它**，会一开 App 就把提醒顶后）：
+     *   - [setOn] 刚打开开关；
+     *   - [saveInterval] 用户刚改了间隔；
+     *   - ACTION_TICK 响完了，排下一发；
+     *   - MY_PACKAGE_REPLACED 装完新版，等于更新后重新开始计时。
+     *
+     * ⚠️ 其余一切"闹钟可能丢了"的场合（App 启动、开机）走 [healIfNeeded]，那个是幂等的。
      */
     fun schedule(ctx: Context) = armAt(ctx, System.currentTimeMillis() + intervalMs(ctx))
 
