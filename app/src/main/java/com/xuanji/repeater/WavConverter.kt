@@ -18,7 +18,7 @@ object WavConverter {
     private const val TAG = "WavConverter"
     private const val OUT_SAMPLE_RATE = 16000
     private const val OUT_CHANNELS = 1
-    private const val MAX_CHUNK_BYTES = 24L * 1024 * 1024 // 对齐 SpeechRecognizer 的 24MB 上传上限
+    private const val MAX_CHUNK_BYTES = 24L * 1024 * 1024 // 兜底值；实际按服务商走，见 splitWavIfNeeded 的 maxBytes 参数
 
     /**
      * 解码 m4a(AAC) -> 16kHz 单声道 WAV。解码与重采样均流式进行，内存不随音频时长增长。
@@ -142,12 +142,17 @@ object WavConverter {
         return out
     }
 
-    /** 超过硅基流动 24MB 上限就按样本边界切 WAV，每段带合法 WAV 头（超大文件兜底）。 */
-    fun splitWavIfNeeded(wav: File, outDir: File): List<File> {
-        if (wav.length() <= MAX_CHUNK_BYTES) return listOf(wav)
+    /**
+     * 超过单次上传上限就按样本边界切 WAV，每段带合法 WAV 头（超大文件兜底）。
+     *
+     * 🔴【0929】[maxBytes] 必须由调用方按服务商传（[SpeechRecognizer.maxUploadBytes]）：
+     *   切出来的每片都要能过 `transcribe()` 的上传闸门，两边不同步就是自相矛盾。
+     */
+    fun splitWavIfNeeded(wav: File, outDir: File, maxBytes: Long = MAX_CHUNK_BYTES): List<File> {
+        if (wav.length() <= maxBytes) return listOf(wav)
         outDir.mkdirs()
         val perSample = 2
-        val maxDataBytes = (MAX_CHUNK_BYTES - 44).toInt()
+        val maxDataBytes = (maxBytes - 44).toInt()
         val chunks = mutableListOf<File>()
         RandomAccessFile(wav, "r").use { raf ->
             raf.seek(44)

@@ -147,12 +147,49 @@ sealed interface AsrOutcome {
  */
 object SpeechRecognizer {
 
-    /** 上传体积上限（字节）。各家 Whisper 限制 25MB，留余量。超过则放弃，避免长时上传/超时 */
+    /**
+     * 上传体积上限（字节）的**兜底值**。真正该用多少看服务商（见 [maxUploadBytes]）。
+     *
+     * 【0929 改写】原来写死 24MB，注释是"各家 Whisper 限制 25MB"—— 那是**照着 OpenAI/Groq 的
+     * Whisper 抄的**。可真正在跑的是硅基流动的 TeleAI/TeleSpeechASR，它**不是 Whisper**，
+     * 带宽余量比这大得多（官方文档没写死上限，社区实测口径 50MB / 1 小时）。
+     * 结果就是：明明能一口吞 20 分钟，我们自己在 10 分钟处切一刀 ⇒ 长视频白白多花一倍时间。
+     *
+     * 🔴 别再把这一家放宽后的值当通用值用：真·Whisper 那两家（Groq/OpenAI）25MB 是硬限制，
+     *    超了直接 4xx。所以上限必须**跟着 provider 走**，不能全局改一个数。
+     */
     private const val MAX_UPLOAD_BYTES = 24L * 1024 * 1024
+
+    /** 硅基流动的目标上传上限：45MB（实用口径 50MB，留 5MB 余量）。≈23 分钟 16kHz 单声道 WAV */
+    const val UPLOAD_BYTES_SILICONFLOW = 45L * 1024 * 1024
+
+    /**
+     * 这家服务商**单次上传**能塞多大（字节）。
+     *
+     * 🔴 这是「上传上限」的**唯一真值**：`transcribe()` 的闸门、`VideoAudioExtractor` 的抽音轨
+     *    上限、`WavConverter.splitWavIfNeeded` 的切片大小都必须问这里，别再各自写死常量
+     *    （那三个数一旦不同步，就会出现"切出来的段自己过不了闸"这种自相矛盾）。
+     */
+    fun maxUploadBytes(provider: AsrProvider): Long = when (provider) {
+        // 电信星辰：非 Whisper，官方未写死上限，实测可用到 50MB 档
+        AsrProvider.SILICONFLOW -> UPLOAD_BYTES_SILICONFLOW
+        // 以下两家是真 Whisper：25MB 是接口硬限制，保持原有的保守值
+        AsrProvider.GROQ, AsrProvider.OPENAI -> MAX_UPLOAD_BYTES
+    }
+
+    /**
+     * 单次上传的**读取超时**（毫秒）。文件放宽之后识别耗时也跟着涨，超时得同步放宽，
+     * 否则大文件必撞 240s 读超时 ⇒ 表现成"识别失败/超时"，白传一趟。
+     * 口径：20 分钟音频实测约 113s ⇒ 23 分钟约 130s；给到 420s（7 分钟）留足波动余量。
+     */
+    private fun uploadTimeoutMs(provider: AsrProvider): Long = when (provider) {
+        AsrProvider.SILICONFLOW -> 420_000L
+        AsrProvider.GROQ, AsrProvider.OPENAI -> 240_000L
+    }
 
     /**
      * 识别音频。成功返回 AsrOutcome（Timed/Plain），失败返回 null。
-     * 在 IO 线程执行，带 90s 总超时。
+     * 在 IO 线程执行，超时按服务商给（见 [uploadTimeoutMs]）。
      */
     suspend fun transcribe(
         audioPath: String,
@@ -162,10 +199,10 @@ object SpeechRecognizer {
         val audioFile = File(audioPath)
         if (!audioFile.exists() || audioFile.length() == 0L) return@withContext null
         // 文件过大直接放弃（避免上传失败/超时），回退静音断句
-        if (audioFile.length() > MAX_UPLOAD_BYTES) return@withContext null
+        if (audioFile.length() > maxUploadBytes(provider)) return@withContext null
 
-        // 长音频整曲识别耗时可达 2-3 分钟（实测 20 分钟音频约 113s），超时放宽到 240s
-        withTimeoutOrNull(240_000) {
+        // 长音频整曲识别耗时可达 2-3 分钟（实测 20 分钟音频约 113s），超时按服务商放宽
+        withTimeoutOrNull(uploadTimeoutMs(provider)) {
             try {
                 postTranscription(audioFile, provider, apiKey)
             } catch (e: Exception) {

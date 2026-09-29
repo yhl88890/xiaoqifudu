@@ -76,8 +76,11 @@ object BiliImport {
             onProgress("转换音频…")
             val wav = WavConverter.convertToWav(audioTmp, dir) { onProgress("转换音频 ${(it * 100).toInt()}%") }
             audioTmp.delete()
-            val chunks = WavConverter.splitWavIfNeeded(wav, File(dir, "chunks"))
+            // 先定服务商：切片大小要按它给（切出来的每片必须能过 transcribe 的上传闸门）
             val provider = AsrProvider.fromName(AsrPrefs.loadProvider(context))
+            val chunks = WavConverter.splitWavIfNeeded(
+                wav, File(dir, "chunks"), SpeechRecognizer.maxUploadBytes(provider),
+            )
             val merged = mutableListOf<AsrSegment>()
             var offsetMs = 0L
             for (c in chunks) {

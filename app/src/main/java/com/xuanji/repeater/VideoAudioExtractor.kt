@@ -28,8 +28,13 @@ import java.io.RandomAccessFile
 object VideoAudioExtractor {
 
     private const val OUT_RATE = 16000
-    /** 16kHz/16bit/单声道 = 32KB/s；SpeechRecognizer 上传上限 24MB，这里留余量按 23MB 判（≈12 分钟） */
-    private const val MAX_BYTES = 23 * 1024 * 1024
+    /**
+     * 抽音轨的**兜底**上限（只在调用方没传 maxBytes 时生效）。
+     * 🔴 正常路径一律由调用方按服务商传（`SpeechRecognizer.maxUploadBytes(provider)`）——
+     * 上传闸门和抽音轨上限必须同源，否则会抽出自己过不了闸的音频，白抽一遍还报错。
+     * 这里保留 23MB 是给"没有 provider 上下文"的调用兜底，别当通用值。
+     */
+    private const val MAX_BYTES = 23L * 1024 * 1024
 
     /**
      * 探测时长（微秒）；读不到返回 -1。用于决定整段识别还是分片识别。
@@ -74,6 +79,9 @@ object VideoAudioExtractor {
     /**
      * @param startUs 起始时间（微秒），<0 表示从头
      * @param endUs 结束时间（微秒），<0 表示到尾
+     * @param maxBytes 抽出的 WAV 上限（字节）。🔴【0929】必须由调用方按服务商传进来
+     *   （[SpeechRecognizer.maxUploadBytes]），别再各自写死：上传闸门和抽音轨上限一旦不同步，
+     *   就会抽出一段自己过不了闸的音频，白抽一遍还报错。
      * @return null=成功，非空=失败原因
      */
     fun extractToWav(
@@ -83,6 +91,7 @@ object VideoAudioExtractor {
         startUs: Long = -1L,
         endUs: Long = -1L,
         onProgress: (Int) -> Unit = {},
+        maxBytes: Long = MAX_BYTES,
     ): String? {
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
@@ -208,7 +217,7 @@ object VideoAudioExtractor {
                             if (pct != lastPct) { lastPct = pct; onProgress(pct) }
                         }
                         if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
-                        if (totalOut * 2 > MAX_BYTES) tooLong = true
+                        if (totalOut * 2 > maxBytes) tooLong = true
                     }
                     outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> { if (inputDone) Thread.sleep(5) }
                 }

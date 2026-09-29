@@ -487,6 +487,10 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
             ?.let {
                 sentences = it.sentences
                 srtName = "生成字幕"
+                // 🔴【0929】这份字幕是残缺的（上次识别中途断了/有段被跳过）⇒ 打开时就明说，
+                //   否则界面只显示"生成字幕"，用户会一直以为字幕是全的，用到一半才发现少了。
+                //   提示带动作：重新点「生成字幕」会整段重跑并覆盖，就能补全。
+                if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
             }
     }
     saveVideoPrefs(context)
@@ -524,23 +528,56 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
             ?.let {
                 sentences = it.sentences
                 srtName = "生成字幕"
+                // 残缺标记同样要提示（与 openVideoFromLibrary 一致）
+                if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
             }
     }
     saveVideoPrefs(context)
 }
 
 // ===== 视频「生成字幕」：抽音轨 → 云端 ASR → 填字幕行 =====
-// 短视频（≤11 分钟）整段识别，快且准；长视频自动分片：逐段抽取+识别，时间戳加段偏移后拼接。
+// 短视频整段识别，快且准；长视频自动分片：逐段抽取+识别，时间戳加段偏移后拼接。
 // 全程 catch(Throwable)：OOM 等是 Error 不是 Exception，只 catch Exception 会漏掉导致闪退。
-private const val WHOLE_LIMIT_MS = 11 * 60 * 1000L   // ≤11 分钟走整段（≈21MB，未超 24MB 上传上限）
-private const val SEGMENT_MS = 10 * 60 * 1000L       // 分片每段 10 分钟（≈19MB，留足余量）
+//
+// 🔴🔴【0929 改写】这两个常量原来是写死的（11 分钟 / 10 分钟），换算口径是「16kHz 单声道 ≈32KB/s
+//   ⇒ 10 分钟 ≈19MB，卡在 24MB 上传上限内」。可那个 24MB 是照 OpenAI/Groq 的 Whisper 抄的，
+//   我们实际在跑的硅基流动上限宽得多（45MB）⇒ **白白把段切小了一半**，长视频多花一倍时间。
+//   ⇒ 现在改成**由服务商的实际上传上限反推**：段长 = 上限 ÷ 码率，留 10% 余量。
+//   ⚠️ 别再把段长写成常量：上限是跟着 provider 走的，写死就会在换成 Groq 时切出超限的段。
 private const val MIN_SEG_MS = 1000L                 // 末段零头短于 1 秒就别为它单独跑一次网络识别
+
+/**
+ * 按服务商算「一段最长多少毫秒」。
+ *
+ * 口径：抽出的 WAV 恒定 16kHz / 16bit / 单声道 ⇒ 32_000 B/s。
+ * 留 10% 余量是给 WAV 头 + seek 落到最近同步帧时可能多解出的一点数据（见 [VideoAudioExtractor] 的注释：
+ * 音频帧极小，起点误差 <100ms），余量太少会出现「切出来的段自己超了上限」。
+ */
+private fun segmentMsFor(provider: AsrProvider): Long {
+    val usableBytes = (SpeechRecognizer.maxUploadBytes(provider) * 9) / 10   // 留 10% 余量
+    val ms = usableBytes / 32L                                               // 32KB/s ⇒ 每毫秒 32 字节
+    return ms.coerceAtLeast(60_000L)                                         // 兜底：至少 1 分钟
+}
+
+/** 整段识别的时长阈值 = 一段的长度（短视频只要能塞进一段，就整段走，少一次拼接） */
+private fun wholeLimitMsFor(provider: AsrProvider): Long = segmentMsFor(provider)
 
 /** 视频 ASR 总结果：识别句 + 提示 + 音轨波形真实静音点(全局 ms)，后者供长句切分当切点 */
 private data class VideoAsrResult(
     val sentences: List<Sentence>,
     val note: String,
     val silencePoints: List<Long>,
+    /**
+     * 这份结果是不是**残缺**的（【0929 新增】）。
+     *
+     * 起因：分片识别中途失败时，[recognizeBySegments] 会把**已成功的那些段**返回（不是空），
+     * 而调用方原来只判 `isNotEmpty()` 就存库 ⇒ 半份字幕被当成完整的存下来。
+     * 当次还能在 asrMsg 看到"3/5 段成功"，**下次打开视频那句提示早没了**，
+     * 只剩"生成字幕"四个字 ⇒ 用户会一直以为字幕是全的。
+     *
+     * ⇒ 现在把这个事实**随结果一起传上去**，由调用方决定怎么提示、存不存。
+     */
+    val incomplete: Boolean = false,
 )
 
 private fun videoGenerateLyrics(context: Context) {
@@ -557,7 +594,8 @@ private fun videoGenerateLyrics(context: Context) {
             val durUs = withContext(Dispatchers.IO) { VideoAudioExtractor.probeDurationUs(context, videoUri!!) }
             val durMs = if (durUs > 0) durUs / 1000 else -1L
             // 探测不到时长时按整段走（保持原行为），能探测且超阈值才分片
-            val res = if (durMs > WHOLE_LIMIT_MS) recognizeBySegments(context, provider, key, durMs)
+            val wholeLimit = wholeLimitMsFor(provider)
+            val res = if (durMs > wholeLimit) recognizeBySegments(context, provider, key, durMs)
             else recognizeWhole(context, provider, key)
             // 统一在最后合并短句：分片段边界产生的半截短句也能跨段合并
             val merged = if (res.sentences.isNotEmpty()) mergeShortAsrSentences(res.sentences) else emptyList()
@@ -575,10 +613,18 @@ private fun videoGenerateLyrics(context: Context) {
                 sentences = finalSentences
                 srtName = "生成字幕"
                 // 识别生成的视频字幕 → 归档字幕库（视频来源）
-                SubtitleLibrary.saveVideo(context, videoName, finalSentences, videoPath)
+                // 🔴 残缺标记随字幕一起存：下次打开视频靠它提示「字幕缺失」（见 openVideoFromLibrary 的回填）
+                SubtitleLibrary.saveVideo(
+                    context, videoName, finalSentences, videoPath, incomplete = res.incomplete,
+                )
+                // 🔴【0929】残缺的字幕必须**明说**：这次的字幕照常显示（用户马上能用），
+                //   但提示里要点出"字幕缺失"，别让他以为识别干净了。
+                //   原来只报"识别完成，共 N 句（3/5 段成功）"——后半句用户不会当回事，
+                //   而且下次打开视频连这句都没了。
                 asrMsg = buildString {
                     append("识别完成，共 ${finalSentences.size} 句")
                     if (res.note.isNotBlank()) append("（${res.note}）")
+                    if (res.incomplete) append(" ⚠️ 字幕缺失")
                 }
                 saveVideoPrefs(context)
             } else {
@@ -596,11 +642,16 @@ private fun postAsrProgress(p: Int) {
     android.os.Handler(android.os.Looper.getMainLooper()).post { asrProgress = p.coerceIn(0, 100) }
 }
 
-/** 整段识别（短视频路径，原逻辑不变） */
+/** 整段识别（短视频路径）。抽出上限跟着服务商走（见 [segmentMsFor]） */
 private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key: String): VideoAsrResult {
     val wav = java.io.File(context.cacheDir, "xuanji_video_asr.wav")
     val err = withContext(Dispatchers.IO) {
-        VideoAudioExtractor.extractToWav(context, videoUri!!, wav.absolutePath) { postAsrProgress(it) }
+        VideoAudioExtractor.extractToWav(
+            context, videoUri!!, wav.absolutePath,
+            // ⚠️ onProgress 必须显式命名：写成尾部 lambda 会被当成 maxBytes 之后的位置参数
+            onProgress = { postAsrProgress(it) },
+            maxBytes = SpeechRecognizer.maxUploadBytes(provider),
+        )
     }
     if (err != null) { runCatching { wav.delete() }; return VideoAsrResult(emptyList(), err, emptyList()) }
         postAsrProgress(100)
@@ -621,15 +672,19 @@ private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key:
 private suspend fun recognizeBySegments(
     context: Context, provider: AsrProvider, key: String, durMs: Long,
 ): VideoAsrResult {
-    val n = ((durMs + SEGMENT_MS - 1) / SEGMENT_MS).toInt().coerceAtLeast(1)
+    // 🔴 段长按服务商的上传上限反推（不是常量）：硅基流动 45MB ⇒ ≈21 分钟/段，Whisper 家 24MB ⇒ ≈11 分钟/段
+    val segmentMs = segmentMsFor(provider)
+    val maxBytes = SpeechRecognizer.maxUploadBytes(provider)
+    val n = ((durMs + segmentMs - 1) / segmentMs).toInt().coerceAtLeast(1)
     val all = mutableListOf<Sentence>()
     val allSilence = mutableListOf<Long>()   // 各段音轨波形静音点（加段偏移后拼成全局）
     var tried = 0
     var okSeg = 0
+    var skipped = false   // 有没有段被跳过（零星失败）：有 ⇒ 字幕中间缺了内容
     var consecFail = 0   // 连续失败段数：用来判断是「零星失败」还是「系统性失败」
     for (i in 0 until n) {
-        val startMs = i * SEGMENT_MS
-        val endMs = minOf(startMs + SEGMENT_MS, durMs)
+        val startMs = i * segmentMs
+        val endMs = minOf(startMs + segmentMs, durMs)
         // 末段可能只剩零头（如 20min+1ms 会切出 1ms 的第 3 段），为它跑一次网络识别纯属浪费
         if (endMs - startMs < MIN_SEG_MS) continue
         tried++
@@ -637,9 +692,11 @@ private suspend fun recognizeBySegments(
         val wav = java.io.File(context.cacheDir, "xuanji_video_seg$i.wav")
         asrMsg = "第 ${i + 1}/$n 段：抽音轨中…"
         val err = withContext(Dispatchers.IO) {
-            VideoAudioExtractor.extractToWav(context, videoUri!!, wav.absolutePath, startMs * 1000, endMs * 1000) { p ->
-                postAsrProgress(((i * 100) + p) / n)   // 段内进度折算成全局百分比
-            }
+            VideoAudioExtractor.extractToWav(
+                context, videoUri!!, wav.absolutePath, startMs * 1000, endMs * 1000,
+                onProgress = { p -> postAsrProgress(((i * 100) + p) / n) },  // 段内进度折算成全局百分比
+                maxBytes = maxBytes,
+            )
         }
         if (err != null) { runCatching { wav.delete() }; continue }
         asrMsg = "第 ${i + 1}/$n 段：识别中…"
@@ -671,12 +728,15 @@ private suspend fun recognizeBySegments(
             consecFail++
             val hardFail = outcome == null          // 网络/Key/超时，不是内容问题
             if ((hardFail && okSeg == 0) || consecFail >= 2) {
+                // 🔴 返回的是**已成功的部分** ⇒ 必须标 incomplete，否则半份字幕会被当成完整的存库
                 return VideoAsrResult(all, if (hardFail)
                     "第 ${i + 1}/$n 段起识别失败，已中止（检查网络与 Key）"
                 else
-                    "识别服务未返回时间戳，已中止（建议改用「导入字幕」导入 .srt）", allSilence)
+                    "识别服务未返回时间戳，已中止（建议改用「导入字幕」导入 .srt）", allSilence,
+                    incomplete = all.isNotEmpty())
             }
             // 前面成功过、且这次只失败了一段 → 当成零星失败，跳过继续跑后面的段
+            skipped = true   // 但这段的字幕确实缺了，最后要标记残缺
         }
         postAsrProgress(((i + 1) * 100) / n)
     }
@@ -684,6 +744,8 @@ private suspend fun recognizeBySegments(
         all,
         if (okSeg > 0) "$okSeg/$tried 段成功" else "识别失败：检查网络与 Key",
         allSilence,
+        // 有段被跳过（零星失败）⇒ 字幕中间是缺的；全段成功才是完整的
+        incomplete = all.isNotEmpty() && skipped,
     )
 }
 
