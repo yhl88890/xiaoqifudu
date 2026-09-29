@@ -6,6 +6,7 @@ import android.os.Environment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.abs
 import kotlin.math.min
 
 /**
@@ -69,11 +70,12 @@ object BiliImport {
         val mp4File = File(dir, "$safe.mp4")
         val audioFallback = File(dir, "$safe.m4a")
 
-        // 4) 字幕来源：B站 CC 或 ASR
+        // 4) 字幕来源：B站 字幕轨直接用；没轨才跑 ASR
+        //    【v62】ASR 分支新增「借 B站 轨的时间边界重切」——见下面 recutByBiliRuler 的说明。
         val subLines: List<SubLine> = if (ccLines != null) {
             ccLines
         } else {
-            onProgress("无 B站字幕，下载音频做语音识别…")
+            onProgress("无自带字幕，下载音频做语音识别…")
             val key = AsrPrefs.loadKey(context)
             if (key.isBlank()) throw RuntimeException("未配置识别 Key：去设置页填写 ASR Key 才能自动识别无字幕视频。")
             val audioTmp = File(dir, "$safe._audio.m4a")
@@ -100,13 +102,13 @@ object BiliImport {
                 offsetMs += wavChunkMs(c)
             }
             if (merged.isEmpty()) throw RuntimeException("识别未返回时间戳，无法生成字幕（可换有 B站字幕的视频，或稍后重试）。")
-            onProgress("识别完成 ${merged.size} 句")
-            merged.map { SubLine(it.text, it.startMs / 1000.0, it.endMs / 1000.0) }
+            recutByBiliRuler(context, inputUrl, merged, onProgress)
         }
 
-        // 5) 中文翻译
-        val finalLines = if (translate) {
-            val enTexts = subLines.map { it.text }
+        // 5) 中文翻译（B站 轨已给中文的段**保留**，只补缺的 —— 阿亮 0929 定：B站 中文优先）
+        val needTranslate = translate && subLines.any { it.cn.isBlank() }
+        val finalLines = if (needTranslate) {
+            val enTexts = subLines.map { if (it.cn.isBlank()) it.text else "" }   // 已有中文的段不重复翻
             val key = AsrPrefs.loadKey(context)
             val zh = if (key.isNotBlank()) {
                 // 【v44】翻译跟着「识别服务商」走（地址 + 模型都由它推出来）
@@ -116,8 +118,11 @@ object BiliImport {
                 )
             } else emptyList()
             subLines.mapIndexed { i, line ->
-                val cn = if (i < zh.size && zh[i].isNotBlank()) zh[i] else (Translator.translate(line.text) ?: "")
-                line.copy(cn = cn)
+                if (line.cn.isNotBlank()) line          // B站 给的，原样保留
+                else line.copy(
+                    cn = if (i < zh.size && zh[i].isNotBlank()) zh[i]
+                    else (Translator.translate(line.text) ?: ""),
+                )
             }
         } else subLines
 
@@ -168,6 +173,66 @@ object BiliImport {
     }
 
     // ---------- 工具 ----------
+
+    /**
+     * 借 B站 字幕轨的**时间边界**重切 ASR 长句（v62，方案①）。
+     *
+     * ## 为什么
+     *
+     * 走到这个分支说明 B站 没给出可用的**正文轨**（没轨 / 只有中文轨但我们要英文原文）。但
+     * `ai-zh` 这种 AI 听译轨的**时间轴本身极细**（实测 365 条 / 927 秒 = 平均 2.54s/条），
+     * 这些是 B站 ASR **真听出来的语音停顿点**，比我们自己按标点猜准得多。
+     *
+     * 拿它当尺子切我们 ASR 出来的英文长句 ⇒ 既保住英文原文，又拿到细断句。
+     *
+     * ## 行为
+     *
+     * 1. 试着取 B站 轨（含只有中文轨的情况，只要 `from` 时间）；取不到就**静默跳过**——退化成原来的长句，不报错。
+     * 2. 用 [TimelineRecut] 按尺子切。
+     * 3. 顺带把中文轨的文本按时间**对号入座**填进每段的 `cn`，这样后面就不用再花钱翻译。
+     */
+    private suspend fun recutByBiliRuler(
+        context: Context,
+        inputUrl: String,
+        merged: List<AsrSegment>,
+        onProgress: (String) -> Unit,
+    ): List<SubLine> {
+        val raw = merged.map { SubLine(it.text, it.startMs / 1000.0, it.endMs / 1000.0) }
+        // 尺子和中文对照都从同一批轨里来；失败不影响主流程（只是断句保持原样）
+        // 🔴【v63】用带诊断的版本：原来一律静默 return raw，SESSDATA 过期了用户也看不出来。
+        val fetched = BiliClient.fetchAllTracksDetailed(context, inputUrl)
+        val tracks = fetched.tracks
+        if (tracks.isEmpty()) {
+            // 有原因就照实说（SESSDATA 失效 / 该视频没轨），没有就只说识别完成
+            if (fetched.note.isNotBlank()) onProgress("识别完成 ${raw.size} 句（未细切：${fetched.note}）")
+            else onProgress("识别完成 ${raw.size} 句")
+            return raw
+        }
+
+        val ruler = tracks.flatMap { it.lines }.map { (it.start * 1000).toLong() }
+        if (ruler.isEmpty()) return raw
+
+        val sentences = raw.map { Sentence((it.start * 1000).toLong(), (it.end * 1000).toLong(), it.text) }
+        val cut = TimelineRecut.recut(sentences, ruler)
+        if (cut.size == raw.size) {
+            onProgress("识别完成 ${raw.size} 句")
+            return raw
+        }
+        onProgress("按 B站 时间轴细切：${raw.size} → ${cut.size} 句")
+
+        // 中文对照：B站 轨里属于中文的那些行，按时间就近配对
+        val cnLines = tracks.filter { it.isChinese }.flatMap { it.lines }
+        return cut.map { s ->
+            val mid = (s.startMs + s.endMs) / 2000.0
+            val cn = if (cnLines.isEmpty()) "" else {
+                cnLines.minByOrNull { abs((it.start + it.end) / 2 - mid) }
+                    ?.takeIf { abs((it.start + it.end) / 2 - mid) <= 4.0 }
+                    ?.text ?: ""
+            }
+            SubLine(s.text, s.startMs / 1000.0, s.endMs / 1000.0, cn)
+        }.also { if (it.any { l -> l.cn.isNotBlank() }) onProgress("已带上 B站 中文对照") }
+    }
+
     private fun safeName(title: String): String {
         val base = title.trim().replace(Regex("[\\\\/:*?\"<>|\\n\\r]"), "_")
             .replace(Regex("\\s+"), " ").trim()

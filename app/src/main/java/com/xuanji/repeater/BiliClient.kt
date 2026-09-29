@@ -1,5 +1,6 @@
 package com.xuanji.repeater
 
+import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -311,6 +312,81 @@ object BiliClient {
             } else mainLines
             title to lines
         }
+
+    /**
+     * 取该视频**全部**字幕轨（v62 新增，供"借时间轴切细 ASR 长句"用）。
+     *
+     * 与 [fetchTimedSubtitle] 的区别：那个是"挑一条当正文"，这个是"全都要" ——
+     * 因为我们要的可能是**只有中文轨**的视频里的**时间分布**（`from`），而不是它的文本。
+     *
+     * 阿亮 0929 定调：**轨道写的是什么语言，就是什么语言**，我们不替它判断"该显示哪种"。
+     * 所以我们只如实标注 [Track.isChinese]，交给调用方按需取用。
+     */
+    suspend fun fetchAllTracks(context: Context, inputUrl: String): List<Track> =
+        fetchAllTracksDetailed(context, inputUrl).tracks
+
+    /**
+     * 带**诊断原因**的版本（v63 新增）。
+     *
+     * 🔴 为什么要这个：原来 [fetchAllTracks] 无论"没登录 / 真没轨 / 网络错 / cid 取不到"
+     *    一律 `return emptyList()`，调用方只能静默退回「不细切」。结果就是
+     *    **SESSDATA 一过期，用户什么都看不出来** —— 断句还是长、中文还是机翻，
+     *    却没有任何提示告诉他"你去重填一下 SESSDATA"。
+     *    这和 [fetchTimedSubtitle] 里 `need_login_subtitle` 那条明确异常是同一类问题，
+     *    只不过那条路早就修好了，这条忘了。
+     *
+     * 调用方拿到 [TrackFetch] 后可据 [TrackFetch.note] 给用户一句人话提示。
+     */
+    suspend fun fetchAllTracksDetailed(context: Context, inputUrl: String): TrackFetch =
+        withContext(Dispatchers.IO) {
+            val cookie = AsrPrefs.loadBiliSessdata(context).ifBlank { null }
+            runCatching { fetchAllTracksInternal(inputUrl, cookie) }
+                .getOrElse { e ->
+                    Log.w(TAG, "fetchAllTracks failed: ${e.message}")
+                    TrackFetch(emptyList(), "取 B站 字幕轨失败（${e.message ?: "网络异常"}）")
+                }
+        }
+
+    /** [fetchAllTracksDetailed] 的返回：轨道 + 一句人话诊断（为空轨时才有值）。 */
+    data class TrackFetch(val tracks: List<Track>, val note: String = "")
+
+    private suspend fun fetchAllTracksInternal(inputUrl: String, cookie: String?): TrackFetch {
+        val ck = cookie ?: getGuestCookie()
+        val bvid = extractBvid(inputUrl)
+        val (cid, _) = getCidAndTitle(bvid, ck)
+        val q = sign(mapOf("bvid" to bvid, "cid" to cid.toString()), ck)
+        val player = httpGetJson("https://api.bilibili.com/x/player/wbi/v2?$q", cookie = ck)
+        if (player.optInt("code") != 0)
+            return TrackFetch(emptyList(), "B站 接口返回错误码 ${player.optInt("code")}")
+        val pdata = player.optJSONObject("data") ?: return TrackFetch(emptyList(), "B站 未返回视频数据")
+        // 🔴 判据：need_login_subtitle=true + 没登录 ⇒ 看到的是**空轨列表**，
+        //    这不代表"这视频没字幕"，而是"没登录就不给看"。必须和"真没轨"分开说。
+        val needLogin = pdata.optBoolean("need_login_subtitle")
+        val subList = pdata.optJSONObject("subtitle")?.optJSONArray("list")
+            ?: pdata.optJSONObject("subtitle")?.optJSONArray("subtitles")
+        if (subList == null || subList.length() == 0) {
+            return if (needLogin)
+                TrackFetch(emptyList(), "B站 字幕需要登录才能看（SESSDATA 可能失效），去设置页重填")
+            else
+                TrackFetch(emptyList(), "该视频 B站 没有自带字幕轨")
+        }
+        val out = mutableListOf<Track>()
+        for (i in 0 until subList.length()) {
+            val o = subList.getJSONObject(i)
+            val lines = runCatching { parseSubBody(o, ck) }.getOrDefault(emptyList())
+            if (lines.isEmpty()) continue
+            out.add(Track(o.optString("lan"), o.optString("lan_doc"), enScore(o) == 0, lines))
+        }
+        return TrackFetch(out)
+    }
+
+    /** 一条字幕轨（v62）：`lan` 是通用语言码（`ai-zh`/`zh-CN`/`en-US`…），[isChinese] 只是如实标注。 */
+    data class Track(
+        val lan: String,
+        val lanDoc: String,
+        val isChinese: Boolean,
+        val lines: List<SubLine>,
+    )
 
     /** 播放地址（DASH 分离流）：返回视频流 + 音频流 URL。 */
     suspend fun fetchPlayUrl(inputUrl: String, cookie: String? = null): PlayInfo =

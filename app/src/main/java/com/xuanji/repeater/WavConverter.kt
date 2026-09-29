@@ -60,7 +60,14 @@ object WavConverter {
         decoder.configure(inFormat, null, null, 0)
         decoder.start()
 
-        var lastProgressTs = System.currentTimeMillis()
+        // 🔴【0929 修】原来这里叫 lastProgressTs，但**从来没被更新过**——只有声明和 checkStuck 里读它。
+        // 于是只要转码超过 30 秒，不管解码多顺都会被判「卡住」抛异常。以前导入的 m4a 都短（<30s）
+        // 侥幸没暴露；0929 真机导入 B站 长视频（938s）必踩，日志里 AAC 解码器每秒稳定吐 1000+ 帧、
+        // 明明在正常前进，却被超时杀掉。
+        // 判据改成「距上次**解出的音频时间戳前进**多久」：解码只要还在往前走就算活着，
+        // 跟进度回调的节流（>2% 才报）解耦 —— 回调稀疏不代表卡住。
+        var lastAliveTs = System.currentTimeMillis()
+        var lastDecodedUs = -1L
         var lastReported = -1f
         fun report(p: Float) {
             val clamped = p.coerceIn(0f, 1f)
@@ -69,8 +76,15 @@ object WavConverter {
                 onProgress(clamped)
             }
         }
+        /** 解码时间戳推进即视为「还活着」，刷新超时计时。 */
+        fun markAlive(us: Long) {
+            if (us > lastDecodedUs) {
+                lastDecodedUs = us
+                lastAliveTs = System.currentTimeMillis()
+            }
+        }
         fun checkStuck() {
-            if (System.currentTimeMillis() - lastProgressTs > 30000L) {
+            if (System.currentTimeMillis() - lastAliveTs > 30000L) {
                 throw RuntimeException("转码卡住，已超时。该音频可能格式不兼容或解码器无响应，请换其他视频试试。")
             }
         }
@@ -120,6 +134,7 @@ object WavConverter {
                         }
                         pcmOut.write(outBytes)
                         if (info.presentationTimeUs > 0) decodedUs = info.presentationTimeUs
+                        markAlive(decodedUs)
                         val prog = if (durationUs > 0) (decodedUs.toFloat() / durationUs).coerceIn(0f, 0.99f) else 0.5f
                         report(prog * 0.6f)
                         if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) sawOutputEOS = true
