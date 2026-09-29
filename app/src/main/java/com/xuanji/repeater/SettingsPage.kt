@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -60,6 +61,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -542,21 +544,80 @@ fun SettingsPage(
 
             // ---------------- B站 ----------------
             // 【0918 阿亮："B站账号可选和字幕翻译上下位置换一下，就是可选的都放到下边儿"】
-            SettingsGroup("B站 账号（可选）") {
+            //
+            // 🔴【v75 阿亮："这个填cookie这个本来就莫名其妙"】改成**扫码登录**。
+            //   手动填只给了 SESSDATA 一个键 ⇒ 缺 buvid3 设备指纹、缺 bili_jct
+            //   ⇒ B站 风控当"陌生设备" ⇒ 频繁 412。扫码登录由 B站 **一次性下发全套凭据**。
+            //   ⚠️ 手动填的入口**保留**（叫「账户密码登录」那栏旁边），扫码坏了还能兜。
+            SettingsGroup("B站 账号") {
+                var nickname by remember { mutableStateOf<String?>(null) }
+                var checked by remember { mutableStateOf(false) }
+                var manualOpen by remember { mutableStateOf(false) }
+                var loginOpen by remember { mutableStateOf(false) }
                 var biliSess by remember { mutableStateOf(AsrPrefs.loadBiliSessdata(context)) }
-                OutlinedTextField(
-                    value = biliSess,
-                    onValueChange = {
-                        biliSess = it
-                        AsrPrefs.saveBiliSessdata(context, it)
-                    },
-                    label = { Text("B站 SESSDATA（登录态）") },
-                    placeholder = { Text("粘贴浏览器 cookie 里的 SESSDATA") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    // 【0917 铺开】撤销 v31 的 66% 收窄 —— 他说改短了看着别扭。
-                    modifier = Modifier.fillMaxWidth(),
-                )
+
+                // 进页面时问一次 B站"当前登的是谁"（顺带验证 cookie 有没有失效）
+                LaunchedEffect(Unit) {
+                    nickname = BiliLogin.checkLogin(context)
+                    checked = true
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (nickname != null) "已登录：$nickname" else "未登录",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        if (checked && nickname == null) {
+                            Text(
+                                "登录后能拿到更多视频的字幕轨",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    if (nickname != null) {
+                        OutlinedButton(onClick = {
+                            BiliLogin.logout(context)
+                            biliSess = ""
+                            nickname = null
+                        }) { Text("退出") }
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    OutlinedButton(onClick = { loginOpen = true }) {
+                        Text(if (nickname != null) "重新登录" else "登录 B站")
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = { manualOpen = !manualOpen }) {
+                    Text(if (manualOpen) "收起手动填写" else "登录不成功？手动填")
+                }
+                if (manualOpen) {
+                    OutlinedTextField(
+                        value = biliSess,
+                        onValueChange = {
+                            biliSess = it
+                            AsrPrefs.saveBiliSessdata(context, it)
+                        },
+                        label = { Text("B站 SESSDATA / 整条 cookie") },
+                        placeholder = { Text("粘 SESSDATA 值，或整条 cookie 都行") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                if (loginOpen) {
+                    BiliLoginDialog(
+                        onDismiss = { loginOpen = false },
+                        onSuccess = { nick ->
+                            nickname = nick
+                            biliSess = AsrPrefs.loadBiliSessdata(context)
+                            loginOpen = false
+                        },
+                    )
+                }
             }
 
             // ---------------- 数据 ----------------
@@ -800,9 +861,14 @@ fun SettingsPage(
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
-                                    "B站 SESSDATA（可选，不填也能用）",
-                                    "抓一部分 B站 视频的字幕需要登录状态才给。留空就走游客，大部分视频不受影响。" +
-                                        "这个东西得从浏览器 cookie 里翻出来，有点麻烦 —— 真需要的时候跟我说，我教你弄。",
+                                    "B站 账号（扫码登录）",
+                                    "抓一部分 B站 视频的字幕，得先登录才给看，所以这里可以登一次 B站。\n" +
+                                        "点「登录 B站」→ 弹出二维码 → 用手机 B站 App 扫一下、在手机上点确认，就完事了。" +
+                                        "登录一次长期有效，以后不用再管；登上了这里会显示你的昵称。\n" +
+                                        "不登也能用，只是那些「要登录才给字幕」的视频会退而用语音识别，" +
+                                        "断句和专有名词会比 B站 原字幕差一些。\n" +
+                                        "万一扫码不好使，点「登录不成功？手动填」，可以把浏览器 cookie 里的 SESSDATA " +
+                                        "粘进去（或者整条 cookie 一起粘也行）。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
@@ -1408,3 +1474,113 @@ private fun LinkRow(url: String, openLabel: String, copyLabel: String) {
         }
     }
 }
+
+/**
+ * B站 扫码登录弹窗（v75 新增）。
+ *
+ * 流程：打开 → 向 B站 要二维码 → 画出来 → 每 2 秒问一次扫没扫 → 成功存 cookie。
+ *
+ * 🔴 设计要点（都踩过坑）：
+ *  - 二维码**本机生成**（ZXing），不上传任何第三方二维码服务。
+ *  - 生命周期的活儿交给 `LaunchedEffect(sessionKey)`：**换一轮就重启轮询**，
+ *    不用手动管协程 —— 弹窗关了 effect 自动取消。
+ *  - B站 二维码约 3 分钟过期，过期后**给个「刷新二维码」**，别让用户重进页面。
+ */
+@Composable
+private fun BiliLoginDialog(
+    onDismiss: () -> Unit,
+    onSuccess: (String?) -> Unit,
+) {
+    val context = LocalContext.current
+    // 每次点「刷新」就 +1，用它当 LaunchedEffect 的 key 重启整条流程
+    var round by remember { mutableStateOf(0) }
+    var qr by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var status by remember { mutableStateOf("正在向 B站 申请二维码…") }
+    var expired by remember { mutableStateOf(false) }
+
+    LaunchedEffect(round) {
+        qr = null
+        expired = false
+        status = "正在向 B站 申请二维码…"
+        val session = try {
+            BiliLogin.createQrSession()
+        } catch (e: Exception) {
+            status = "申请二维码失败：${e.message ?: "网络异常"}"
+            expired = true
+            return@LaunchedEffect
+        }
+        qr = session.bitmap
+        status = "用 B站 App 扫一下二维码"
+        val result = BiliLogin.pollUntilDone(session.key) { st ->
+            status = when (st) {
+                BiliLogin.State.WAITING -> "用 B站 App 扫一下二维码"
+                BiliLogin.State.SCANNED -> "已扫码，请在手机上点「确认登录」"
+                BiliLogin.State.EXPIRED -> "二维码过期了"
+                BiliLogin.State.SUCCESS -> "登录成功"
+                BiliLogin.State.FAILED -> "登录失败"
+            }
+        }
+        when (result.state) {
+            BiliLogin.State.SUCCESS -> {
+                AsrPrefs.saveBiliSessdata(context, result.cookie ?: "")
+                onSuccess(result.nickname)
+            }
+            BiliLogin.State.EXPIRED, BiliLogin.State.FAILED -> {
+                expired = true
+                if (!qr.isNull()) status = "二维码过期了，点下面刷新一下"
+            }
+            else -> Unit
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            if (expired) TextButton(onClick = { round++ }) { Text("刷新二维码") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+        title = { Text("登录 B站") },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                val bmp = qr
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = "B站登录二维码",
+                        modifier = Modifier
+                            .size(220.dp)
+                            .clip(RoundedCornerShape(8.dp)),
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(220.dp)
+                            .background(
+                                MaterialTheme.colorScheme.surfaceVariant,
+                                RoundedCornerShape(8.dp),
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("二维码加载中…", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(status, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "用手机 B站 App 扫，扫完在手机上点确认。登录一次就够了，以后不用再管。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+/** 小工具：可空 Bitmap 的判空（避免 `qr != null` 的智能转换在闭包里失效）。 */
+private fun android.graphics.Bitmap?.isNull(): Boolean = this == null

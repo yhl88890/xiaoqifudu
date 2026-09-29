@@ -12,7 +12,7 @@ android {
         applicationId = "com.xuanji.repeater"
         minSdk = 26
         targetSdk = 35
-        versionCode = 74
+        versionCode = 76
         // 🔴 版本名**跟着 versionCode 走**（0919 阿亮要求）：
         //    他手机上「应用信息 → 版本」显示的就是这一行。以前这里写死 "1.2"
         //    ⇒ 装哪一版都显示 1.2，他在对话里说的 v49 / v50 根本对不上号。
@@ -69,5 +69,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // 【v75】B站 扫码登录：本地生成二维码（不上传第三方服务）
+    implementation("com.google.zxing:core:3.5.3")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
