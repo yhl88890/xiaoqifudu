@@ -939,10 +939,22 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                         slideX.animateTo(target, animationSpec = tween(250))
                                     }
                                 }
-                                fun onDragStopped() {
-                                    // 松手：净位移过半 → 停在"输入框打开"，否则收回功能键
+                                fun onDragStopped(velocity: Float) {
+                                    // 【0930 手感修复】阿亮反馈「滑动距离太长，老感觉滑好几次都滑不到，
+                                    // 要从头按到尾才能滑过来」——根因是翻页距离 = 一个整屏宽（inputW=screenW，
+                                    // 0915 定的同宽同高），再叠加「松手必须过半」的判定，手指基本得从最左拖到
+                                    // 屏幕中线才认。改成两条任一满足即翻页，外观/几何完全不动：
+                                    //   ① 位移过 1/4 屏（原 1/2 ⇒ 门槛砍半）
+                                    //   ② 轻扫：位移不够但往该方向甩得够快（>600px/s）⇒ "啪一下"就出来
+                                    // velocity>0 = 手指向右（内容右移 = 收起）；velocity<0 = 向左（唤出）。
                                     val pull = (slideX.value + dragTotal).coerceIn(0f, inputWPx)
-                                    biliInputRevealed = pull > inputWPx * 0.5f
+                                    val fastLeft = velocity < -600f
+                                    val fastRight = velocity > 600f
+                                    biliInputRevealed = when {
+                                        fastLeft -> true
+                                        fastRight -> false
+                                        else -> pull > inputWPx * 0.25f
+                                    }
                                     settle()
                                 }
                                 val draggableState = rememberDraggableState { delta ->
@@ -963,7 +975,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                             state = draggableState,
                                             orientation = Orientation.Horizontal,
                                             startDragImmediately = false,
-                                            onDragStopped = { onDragStopped() },
+                                            onDragStopped = { v -> onDragStopped(v) },
                                         ),
                                     onPrevTrack = { prevVideo() },
                                     onPrevSentence = { videoJumpSentence(-1) },
@@ -991,7 +1003,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                             state = draggableState,
                                             orientation = Orientation.Horizontal,
                                             startDragImmediately = false,
-                                            onDragStopped = { onDragStopped() },
+                                            onDragStopped = { v -> onDragStopped(v) },
                                         ),
                                     cardShape = RoundedCornerShape(20.dp),
                                     value = biliUrl,
