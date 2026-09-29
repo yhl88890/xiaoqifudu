@@ -38,7 +38,10 @@ object BiliImport {
     ): Result = withContext(Dispatchers.IO) {
         val cookie = AsrPrefs.loadBiliSessdata(context).ifBlank { null }
 
-        // 1) 标题 + B站 CC 字幕
+        // 1) 标题 + B站 自带字幕轨
+        // 🔴【0929】"CC 字幕"这个叫法不准确：B站 的轨不只有 UP 主上传的人工字幕，
+        //   还有 `ai-zh` 这种 B站 AI 听译生成的（ai_type=1）。现在**有任何轨就拿**，
+        //   不再要求必须是英文轨（原实现 pickLan("en") 把只有 ai-zh 的视频误判成"没字幕"）。
         onProgress("解析视频信息…")
         var title: String
         var ccLines: List<SubLine>? = null
@@ -47,10 +50,12 @@ object BiliImport {
             val (t, lines) = BiliClient.fetchTimedSubtitle(inputUrl, cookie)
             title = t
             ccLines = lines
-            onProgress("已取到 B站字幕（${lines.size} 句）")
+            onProgress("已取到 B站字幕轨（${lines.size} 句）")
         } catch (e: Exception) {
             ccError = e.message
             title = runCatching { BiliClient.fetchTitle(inputUrl, cookie) }.getOrDefault("B站视频")
+            // 让失败原因看得见（原先只在末尾 note 里体现，用户不知道为啥在跑识别）
+            onProgress("无自带字幕，改用语音识别")
         }
 
         // 2) 播放地址

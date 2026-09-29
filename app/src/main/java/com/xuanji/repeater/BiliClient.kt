@@ -188,16 +188,55 @@ object BiliClient {
         return data.optLong("cid") to data.optString("title")
     }
 
-    private fun pickLan(subList: JSONArray?, prefix: String): JSONObject? {
-        if (subList == null || subList.length() == 0) return null
-        val matched = mutableListOf<JSONObject>()
-        for (i in 0 until subList.length()) {
-            val s = subList.getJSONObject(i)
-            if (s.optString("lan").lowercase().startsWith(prefix)) matched.add(s)
+    /** 字幕轨的"像不像英文"打分：高 = 更像英文轨。 */
+    private fun enScore(s: JSONObject): Int {
+        val lan = s.optString("lan").lowercase()
+        val doc = s.optString("lan_doc").lowercase()
+        return when {
+            lan.startsWith("en") -> 3          // en / en-US
+            lan.contains("en") -> 2            // ai-en 之类
+            doc.contains("英文") || doc.contains("english") -> 2
+            lan.startsWith("zh") || lan.contains("zh") || lan.contains("ai-zh") -> 0
+            doc.contains("中文") -> 0
+            else -> 1                          // 认不出来，当中间态
         }
-        if (matched.isEmpty()) return null
-        val official = matched.filter { it.optInt("ai_type") == 0 }
-        return (official.ifEmpty { matched }).first()
+    }
+
+    /**
+     * 从字幕轨列表里挑出「主轨」和「辅助轨」。
+     *
+     * 🔴【0929 阿亮纠正】原实现是 `pickLan(subList, "en")` —— **只认 lan 以 en 开头的轨**，
+     *   找不到就抛"该视频没有英文字幕"⇒ 整个 CC 路径作废、转去跑 ASR。
+     *   实测踩到两个坑（BV1bDbG6ZE5U，31 分钟英语播客）：
+     *     1. `need_login_subtitle=true` 时游客**看不到任何轨** ⇒ 被当成"没字幕"；
+     *        登录后该视频只有 1 条轨 `lan='ai-zh'`（B站 AI 听译的中文，平均 2.5 秒/条）。
+     *     2. 就算登录了，`pickLan("en")` 也**永远匹配不到 `ai-zh`** ⇒ 照样没用上。
+     *
+     * 阿亮的要求（原话）：**"有中文就是中文字幕，有英文就是英文字幕，不用你来区分"** ——
+     *   不要把中文轨当"译文"去处理，**轨道写的是什么语言，就是什么语言**。
+     *   所以我们改成：**有哪些轨就用哪些轨**，只是排个优先级：
+     *     · 主轨（当正文文本）：优先英文轨（学英语要原文）；没有英文就用中文轨。
+     *     · 辅助轨（当对照）：优先中文轨（给英文配中文对照）。
+     *   返回 null 才表示"真的一条轨都没有"⇒ 调用方转 ASR 是对的。
+     */
+    private fun pickTracks(subList: JSONArray?): Pair<JSONObject?, JSONObject?> {
+        if (subList == null || subList.length() == 0) return null to null
+        val all = mutableListOf<JSONObject>()
+        for (i in 0 until subList.length()) all.add(subList.getJSONObject(i))
+        if (all.isEmpty()) return null to null
+
+        // 同分时优先 UP 主传的（ai_type==0），其次 AI 生成的
+        fun bestOf(candidates: List<JSONObject>): JSONObject? =
+            candidates.minByOrNull { it.optInt("ai_type", 1) }
+
+        val byScore = all.groupBy { enScore(it) }
+        val enTracks = (byScore[3] ?: emptyList()) + (byScore[2] ?: emptyList())
+        val zhTracks = byScore[0] ?: emptyList()
+
+        val main = bestOf(enTracks) ?: bestOf(zhTracks) ?: bestOf(all)
+        // 辅助轨：跟主轨不是同一条就行（主轨是中文时就没有辅助轨）
+        val aux = if (main != null && enScore(main) >= 2) bestOf(zhTracks) else null
+        return main to aux
     }
 
     /** 解析某条字幕轨道的 body，返回 (start, end, text) 列表。 */
@@ -251,22 +290,25 @@ object BiliClient {
             }
 
             if (needLogin && cookie.isNullOrEmpty())
-                throw RuntimeException("该视频字幕需 B站登录才能获取，请到设置里填 SESSDATA 登录，或改用其他视频。")
-            val enSub = pickLan(subList, "en")
-            if (enSub == null)
-                throw RuntimeException("该视频没有英文字幕（B站英文视频多为硬字幕，无独立字幕轨道）。将改用语音识别生成。")
-            val enLines = parseSubBody(enSub, ck)
-            if (enLines.isEmpty()) throw RuntimeException("字幕内容为空。")
+                throw RuntimeException("该视频的字幕要 B站 登录才给看（游客看不到轨道）。去设置页填 SESSDATA 登录，或改用其他视频。")
 
-            val zhSub = pickLan(subList, "zh")
-            val zhLines = if (zhSub != null) parseSubBody(zhSub, ck) else emptyList()
-            val lines = if (zhLines.isNotEmpty()) {
-                enLines.map { en ->
-                    val best = zhLines.minByOrNull { abs(it.start - en.start) }
-                        ?.takeIf { abs(it.start - en.start) <= 8.0 }
-                    SubLine(en.text, en.start, en.end, best?.text ?: "")
+            // 🔴【0929】改成"有几条用几条"：主轨当正文、辅助轨当对照。
+            //   原实现只认 en 开头 ⇒ 只有 ai-zh 中文轨的视频（很常见）被误判成"没字幕"。
+            val (mainSub, auxSub) = pickTracks(subList)
+            if (mainSub == null)
+                throw RuntimeException("该视频没有字幕轨（可能是硬字幕——字幕烧进画面了，任何工具都取不出来）。将改用语音识别生成。")
+            val mainLines = parseSubBody(mainSub, ck)
+            if (mainLines.isEmpty()) throw RuntimeException("字幕内容为空。")
+
+            // 辅助轨按时间就近对齐成对照（中文配英文、或反之）
+            val auxLines = if (auxSub != null) parseSubBody(auxSub, ck) else emptyList()
+            val lines = if (auxLines.isNotEmpty()) {
+                mainLines.map { m ->
+                    val best = auxLines.minByOrNull { abs(it.start - m.start) }
+                        ?.takeIf { abs(it.start - m.start) <= 8.0 }
+                    SubLine(m.text, m.start, m.end, best?.text ?: "")
                 }
-            } else enLines
+            } else mainLines
             title to lines
         }
 
