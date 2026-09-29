@@ -1,6 +1,8 @@
 package com.xuanji.repeater
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -27,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -715,14 +718,21 @@ fun SettingsPage(
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
                                     "③ 上哪申请（三步）",
-                                    // 【0929 阿亮要求】把官网换成他的推广链接：别人从这个链接注册，
-                                    //   他能拿邀请奖励。⚠️ 这个链接是**他个人的**，改之前先问他；
-                                    //   哪天失效了他会来说，别自己改成官网。
-                                    "1. 手机浏览器打开 cloud.siliconflow.cn/i/BsGqKWbf（搜关键词「硅基流动」也能找到）。\n" +
+                                    // 【0929 阿亮要求】官网换成他的推广链接：别人从这个链接注册，他能拿邀请奖励。
+                                    //   ⚠️ 这链接是**他个人的**，改之前先问他；哪天失效了他会来说，别自己改回官网。
+                                    // 🔴 网址从正文里拿出来、单独做成下面那颗可点/可复制的按钮：
+                                    //   正文里塞一长串网址，用户得长按半天还选不准（纯 Text 没有链接样式）。
+                                    "1. 点下面的按钮打开注册页（搜关键词「硅基流动」也能找到）。\n" +
                                         "2. 手机号注册 → 按提示做实名认证（免费模型要实名之后才能用）。全程不用信用卡。\n" +
                                         "3. 登录后在左边找到「API 密钥」→ 新建一个 → 把那串 sk- 开头的复制下来，" +
                                         "粘到「设置 → 识别 · 自动生成字幕 → API Key」那个框里。\n" +
                                         "粘完就能用了。这个 Key 只存在你手机上，只会发给硅基流动做验证，不会传到别处。",
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                LinkRow(
+                                    url = "https://cloud.siliconflow.cn/i/BsGqKWbf",
+                                    openLabel = "打开注册页",
+                                    copyLabel = "复制网址",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
@@ -1351,5 +1361,50 @@ private fun IntroBlock(title: String, body: String) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+/**
+ * 一行「网址按钮」：左边打开浏览器，右边复制到剪贴板。
+ *
+ * 【0929 阿亮要求】原话："要让它那个可以点一下跳转或者能复制的，对不对？"
+ *   起因：软件介绍里那串 `cloud.siliconflow.cn/i/BsGqKWbf` 是**纯 Text**，
+ *   既点不动、也没法一键复制（用户得长按半天还选不准一长串网址）。
+ *
+ * 🔴 为什么不做成"整段文字可点"（`withLink` / `ClickableText`）：那需要正则识别网址、
+ *   而且老 Compose 的 `ClickableText` 已废弃、新 API 各版本不一致；
+ *   **两颗明确的按钮**更不容易出错，也不依赖文本解析。
+ * 🔴 复制用的是系统剪贴板（`ClipboardManager`），**不申请任何权限** —— 写剪贴板不需要权限。
+ */
+@Composable
+private fun LinkRow(url: String, openLabel: String, copyLabel: String) {
+    val ctx = LocalContext.current
+    val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TextButton(
+            onClick = {
+                // 打不开就给一条退路：文案里已经写了"搜关键词也能找到"
+                val ok = runCatching {
+                    ctx.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }.isSuccess
+                if (!ok) Toast.makeText(ctx, "没有可用的浏览器，请手动搜「硅基流动」", Toast.LENGTH_LONG).show()
+            },
+            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+        ) {
+            Text(openLabel, style = MaterialTheme.typography.labelSmall)
+        }
+        Spacer(Modifier.width(16.dp))
+        TextButton(
+            onClick = {
+                clipboard?.setPrimaryClip(ClipData.newPlainText("url", url))
+                Toast.makeText(ctx, "网址已复制", Toast.LENGTH_SHORT).show()
+            },
+            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+        ) {
+            Text(copyLabel, style = MaterialTheme.typography.labelSmall)
+        }
     }
 }
