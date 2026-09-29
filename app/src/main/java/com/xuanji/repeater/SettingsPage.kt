@@ -348,6 +348,11 @@ fun SettingsPage(
                 //    "今天做完了没"的判据从"复习过一张卡"改成"**练完一整轮**"。
                 var remindOn by remember { mutableStateOf(VocabReminder.isOn(context)) }
                 var interval by remember { mutableStateOf(VocabReminder.loadInterval(context)) }
+                // 【0923】「怎么让它一直响」的指引弹窗。两个入口都开：
+                //   ① **刚打开这个开关时自动弹**（他点名的："就是要打开通知的时候就弹这个"）
+                //   ② 开关下方的常驻一行 ⇒ 🔴 这条是**必须的**，不是可选项：
+                //      他手机上这个功能**早就是开着的**，只在"开→关"那一刻弹，他这辈子都见不到。
+                var showKeepAlive by remember { mutableStateOf(false) }
 
                 // Android 13+ 通知要**运行时**授权，没有的话 notify() 会被系统直接丢掉。
                 // 所以开关不能只写 SP：先要权限，拿到结果再决定开不开。
@@ -361,11 +366,14 @@ fun SettingsPage(
                         // ⇒ 他一看"没开成"，又去点一下，体验上就是"这开关要按两下才认"。
                         // 真机复现：Redmi `23054RA19C`，给完权限后 dump 出来 checked 仍是 false。
                         remindOn = true
-                        Toast.makeText(
-                            context,
-                            remindToastText(VocabReminder.setOn(context, true)),
-                            Toast.LENGTH_LONG,
-                        ).show()
+                        // 【0923】成功不再弹 Toast —— 改成弹「保活指引」弹窗（阿亮要的："就是要打开
+                        //   通知的时候就弹这个"）。只有**非正常结果**才额外补一句 Toast，
+                        //   免得"已开启 XX"的提示和弹窗叠在一起。
+                        val r = VocabReminder.setOn(context, true)
+                        if (r != VocabReminder.Result.Posted) {
+                            Toast.makeText(context, remindToastText(r), Toast.LENGTH_LONG).show()
+                        }
+                        showKeepAlive = true
                     } else {
                         remindOn = false
                         VocabReminder.setOn(context, false)
@@ -387,11 +395,11 @@ fun SettingsPage(
                             notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
                         } else {
                             remindOn = true
-                            Toast.makeText(
-                                context,
-                                remindToastText(VocabReminder.setOn(context, true)),
-                                Toast.LENGTH_LONG,
-                            ).show()
+                            val r = VocabReminder.setOn(context, true)
+                            if (r != VocabReminder.Result.Posted) {
+                                Toast.makeText(context, remindToastText(r), Toast.LENGTH_LONG).show()
+                            }
+                            showKeepAlive = true
                         }
                     },
                     // 🔴 「像每日任务」那句是 0917 阿亮定的口径，别删、也别写成"没词就不提醒"
@@ -414,6 +422,49 @@ fun SettingsPage(
                     )
                     // 【0917 精简】原来这里有一段「有词的时候轮播：只挑还没掌握的…」，
                     // 已搬进「软件介绍 → 在通知栏轮播生词」。
+
+                    // 🔴🔴【0923 新增】常驻的「保活」入口。
+                    //   起因：他亲测「把后台划掉提醒就没了」（实测是 `am force-stop` ⇒ 闹钟被
+                    //   **删除**，不是压住，所以改硬提醒也救不回来）。App 这边能做的只有
+                    //   「把系统设置怎么改讲清楚 + 一键跳过去」。
+                    //   ⚠️ 放在 `if (remindOn)` 里是他点头过的口径：没开提醒就不需要保活。
+                    //   ⚠️ 只跳 app 详情页 —— 真机实测（Redmi 23054RA19C / MIUI V816）：
+                    //      `INSTALLED_APP_DETAILS` ✓ 直达，而且**省电策略 + 自启动 就在同一页**，
+                    //      一次跳转够用；`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 在这台是
+                    //      "No activity found"，`com.miui.powerkeeper/*` 也没有设置界面 ⇒ 都别用。
+                    DataRow(title = "怎么让它一直提醒") { showKeepAlive = true }
+                }
+
+                if (showKeepAlive) {
+                    AlertDialog(
+                        onDismissRequest = { showKeepAlive = false },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showKeepAlive = false
+                                openAppBatterySettings(context)
+                            }) { Text("去设置") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showKeepAlive = false }) { Text("知道了") }
+                        },
+                        title = { Text("怎么让它一直提醒") },
+                        text = {
+                            // 🔴🔴【0923 阿亮当场否掉第一版】原话："那个弹窗的内容太多了，太复杂了，
+                            //   这种复杂的内容都放在软件介绍里。弹窗只告诉他你要打开什么什么什么
+                            //   这个功能才能实现。就行了。"
+                            //   ⇒ 弹窗**只列"要开哪几样"**，原因/原理/兜底全搬去「软件介绍」。
+                            //   第一版把"为什么会被停掉 + 四步 + 兜底"全塞进去，真机量下来正文
+                            //   占了 1870px，④ 和末尾那句直接被挤出屏幕 ⇒ 又长又看不全。
+                            Text(
+                                text = "需要打开这三样：\n" +
+                                    "① 通知 → 允许\n" +
+                                    "② 省电策略 → 无限制\n" +
+                                    "③ 自启动 → 允许\n" +
+                                    "点「去设置」直达，这三样都在那一页上。",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        },
+                    )
                 }
             }
 
@@ -864,10 +915,24 @@ fun SettingsPage(
                                         "挑词的顺序跟复习页一样：最久没碰过的先上，还没掌握的排在前面；" +
                                         "连对 3 次的词也会轮进来（跟复习页的「再练一轮」一个口径），" +
                                         "所以不会出现「没词可弹」。\n" +
-                                        "这个功能要通知权限，开启的时候系统会问一次，不给的话提醒发不出来。" +
-                                        // 【0922 加】把"闹钟被系统清掉后会自愈"这件事说清楚 ——
-                                        // 不然他只会觉得"怎么又没提醒了"，根本想不到"开一次 App 就补回来了"。
-                                        "（提醒偶尔被手机清掉也不用管：下次打开 App 会自动补回来。）",
+                                        "这个功能要通知权限，开启的时候系统会问一次，不给的话提醒发不出来。\n" +
+                                        // 【0923 加】阿亮亲测"把后台划掉提醒就没了"，他自己拍板：
+                                        //   这半句必须写进软件介绍（原话"你要在那个软件说明里把这个功能
+                                        //   给它说清楚"），而且他看过这一版文案说"就这么写都 OK"。
+                                        //   ⚠️ 口径是「**别把它划掉/强行停止**」，不是"后台必须活着" ——
+                                        //   普通的省内存回收不影响（闹钟还在，系统会自己把 App 拉起来）。
+                                        "提醒靠的是手机自己的闹钟。但手机为了省电，会把你从「最近任务」" +
+                                        "划掉的 App 彻底停掉，连闹钟一起清掉 —— 那段时间就不提醒了" +
+                                        "（这不是这个软件的问题，别的本地提醒软件也一样）。\n" +
+                                        "想让它稳，必做的就是三件：通知允许、省电策略改成「无限制」、" +
+                                        "自启动允许；设置页「生词提醒」那栏里有一颗「怎么让它一直提醒」，" +
+                                        "点进去直达，这三样都在那一页上。\n" +
+                                        // 🔴【0923 阿亮质疑过"上锁是不是不必要"——他问得对，所以这里必须
+                                        //   写成"可选"，别再列进"必做"，否则等于拿保险当刚需吓人。
+                                        //   上锁治的只是"被划掉"这一个动作（force-stop ⇒ 闹钟被删）。
+                                        "另外还有一个可选的保险：在「最近任务」里给这张卡片上锁。" +
+                                        "锁了之后就清不掉、也划不掉了。你不去手动划它的话，不锁也没事。\n" +
+                                        "万一还是漏了：下次打开 App 会自动补一条，不用重新设置。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(
@@ -1227,6 +1292,46 @@ private fun PermissionBlock(name: String, usage: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+/**
+ * 跳到本 App 的「系统设置 → 应用信息」页。
+ *
+ * 🔴🔴【0923 真机实测过才写的，别凭理论改】Redmi 23054RA19C / MIUI V816：
+ *   - `Settings.ACTION_APPLICATION_DETAILS_SETTINGS` ✓ **能开**，而且那一页上
+ *     **「省电策略」和「自启动」两行都在** ⇒ 保活指引只要跳一次就够，不用两颗按钮。
+ *   - `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` = "No activity found"（这台没有）。
+ *   - `com.miui.powerkeeper` 底下的 Activity 里**没有**能直达省电策略的（全是后台服务）；
+ *     `com.miui.securitycenter/...AutoStartManagementActivity` ✓ 能开，但只到自启动那一页，
+ *     ⚠️ **只作兜底候选**、不作首选（能少跳一次就少跳一次）。
+ *   - 「最近任务里上锁」系统里**没有**可跳的入口 ⇒ 那条只能写在文字里。
+ */
+private fun openAppBatterySettings(ctx: Context) {
+    val candidates = listOf(
+        Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${ctx.packageName}"),
+        ),
+        Intent().setClassName(
+            "com.miui.securitycenter",
+            "com.miui.permcenter.autostart.AutoStartManagementActivity",
+        ),
+        Intent(Settings.ACTION_SETTINGS),
+    )
+    for (i in candidates) {
+        try {
+            ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return
+        } catch (_: Exception) {
+            // 换下一个候选
+        }
+    }
+    Toast.makeText(
+        ctx,
+        "打不开系统设置，请手动去「设置 → 应用 → 小七复读机」：" +
+            "省电策略改成「无限制」、自启动改成「允许」",
+        Toast.LENGTH_LONG,
+    ).show()
 }
 
 /** 软件介绍里的一段：小标题 + 正文。【0916】从 MainActivity 一起搬过来。 */
