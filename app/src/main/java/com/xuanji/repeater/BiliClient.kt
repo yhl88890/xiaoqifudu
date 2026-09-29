@@ -61,10 +61,65 @@ object BiliClient {
         val h = mutableMapOf(
             "User-Agent" to UA,
             "Referer" to REFERER,
+            "Origin" to "https://www.bilibili.com",
             "Accept" to "application/json, text/plain, */*",
+            "Accept-Language" to "zh-CN,zh;q=0.9,en;q=0.8",
         )
         if (!cookie.isNullOrEmpty()) h["Cookie"] = cookie
         return h
+    }
+
+    /**
+     * 🔴【v73】把**登录态**和**游客设备标识**合并成一条 cookie。
+     *
+     * 为什么必须合并：B站 风控（412 / -352）除了看 SESSDATA，还看 `buvid3` 设备指纹。
+     * 原来登录时只发 `SESSDATA=xxx`，把 `buvid3` **整个丢了** ⇒ 设备身份突然"变了"
+     * ⇒ 风控更容易拦（实测连续请求就吃 412）。
+     *
+     * 规则：登录 cookie 里有的键优先，缺的用游客 cookie 补。
+     */
+    private fun mergeCookie(loginCookie: String?): String? {
+        val guest = getGuestCookie().orEmpty()
+        if (loginCookie.isNullOrBlank()) return guest.ifBlank { null }
+        if (guest.isBlank()) return loginCookie
+        val have = loginCookie.split(";").mapNotNull { it.substringBefore('=').trim().ifBlank { null } }.toSet()
+        val extra = guest.split(";").map { it.trim() }.filter { it.isNotBlank() }
+            .filter { it.substringBefore('=').trim() !in have }
+        if (extra.isEmpty()) return loginCookie
+        return loginCookie.trimEnd(';') + "; " + extra.joinToString("; ")
+    }
+
+    /**
+     * 🔴🔴【v72 真机实锤修的核心 bug】把「设置页存的 SESSDATA 值」拼成合法的 Cookie 头。
+     *
+     * 病灶（v71 诊断打出来的原文）：
+     *   `cookie构成=[28f86ade%2C1806222937%2Cc0508%2A...(222)] nav=未登录(code=-101)`
+     *   ⇒ **key 名整个丢了** —— 整串值被当成了「cookie 名的部分」，
+     *     相当于给 B站 发了一个名叫 `28f86ade...` 的 cookie。B站 当然不认，`nav` 回 -101。
+     *
+     * 原来 `AsrPrefs.loadBiliSessdata()` 存的是**纯值**（没有 `SESSDATA=` 这个名），
+     * 而调用方直接 `httpGetJson(url, cookie = 纯值)`，于是就成了上面那样。
+     *
+     * 另外值里还带 **URL 编码残留**（`%2C`=逗号、`%2A`=星号）—— 用户在浏览器地址栏 /
+     * 某些「复制 cookie」工具里拿到的是编码过的，B站 要的是**原字符**。
+     *
+     * 本函数做两件事，幂等、可反复调用：
+     *   1. 没写 `SESSDATA=` 就补上；已经写了就原样保留（兼容以后用户直接粘整条 cookie）。
+     *   2. 把 URL 编码解回原文（只针对这段值）。
+     */
+    /** 对外入口：把设置页存的 SESSDATA 原始值拼成合法的 Cookie 头（幂等）。 */
+    fun buildCookie(raw: String?): String? = normalizeSessdata(raw)
+
+    private fun normalizeSessdata(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        var v = raw.trim()
+        // 用户可能直接粘整条 cookie（含 SESSDATA= 或其它键），这时原样返回，不要画蛇添足
+        if (v.contains('=')) return v
+        // URL 解码：只处理 %XX，不碰其它字符
+        v = Regex("%([0-9A-Fa-f]{2})").replace(v) { m ->
+            m.groupValues[1].toInt(16).toChar().toString()
+        }
+        return "SESSDATA=$v"
     }
 
     private fun httpGetJson(url: String, cookie: String? = null, timeoutMs: Int = 20000): JSONObject {
@@ -84,6 +139,117 @@ object BiliClient {
             JSONObject(raw)
         } catch (e: Exception) {
             throw RuntimeException("返回非 JSON（可能限流或需登录 cookie）: $url")
+        }
+    }
+
+    /**
+     * 🔴【v70 诊断】只给「取轨」这条链用的探针版 httpGetJson（不改上面的方法）。
+     *
+     * 为什么：真机日志抓不到 tag、release 也不能 run-as，唯一可靠通道是**把线索当异常消息带出来**。
+     * 所以这里把接口的 code / message 一起丢进 RuntimeException，让调用方捕获后能落盘。
+     *
+     * ⚠️【v74 踩坑】原来写的是 `class ApiDiag(val apiCode: Int, ...)` —— R8 混淆后
+     *   属性名被改成 `s1.h.a` 之类，`"${e.apiCode}"` 拼出来的是**混淆符**而不是数字，
+     *   真机日志变成「风控s1.h: ...412...apiCode」这种读不懂的串。
+     *   ⇒ 改成**把 code 编进 message 文本**、用 `codeOf` 从文本里取，不再依赖属性名。
+     */
+    private class ApiDiag(val apiCode: Int, val apiMsg: String) :
+        RuntimeException("B站 接口异常 code=$apiCode msg=$apiMsg") {
+        /** 兼容写法：从 message 里抠出 code，避免被 R8 混淆属性名。 */
+        companion object {
+            fun codeOf(e: ApiDiag): Int {
+                val m = e.message ?: return -1
+                return Regex("code=(-?\\d+)").find(m)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+            }
+        }
+    }
+
+    /**
+     * 🔴【v70 诊断】把 cookie 的**结构**描述出来（只报 key 名 + 值长度，不泄露值本身）。
+     * 用来判断「SESSDATA 到底有没有被 B站 认」：如果 key 名写错了（比如存成了 `sessdata`），
+     * B站 就当没登录 → 同理 `needLogin=true` 时返回空轨列表。
+     */
+    private object CookieDiag {
+        fun describe(cookie: String?): String {
+            if (cookie.isNullOrEmpty()) return "空"
+            return cookie.split(";").joinToString(", ") { part ->
+                val kv = part.trim().split("=", limit = 2)
+                if (kv.size == 2) "${kv[0]}(${kv[1].length})" else "${kv[0]}(?)"
+            }
+        }
+    }
+
+    /** 调 nav 接口看 B站 认不认这个身份：真登录 → 返回 mid/uname；游客 → code=-101。 */
+    private fun navLoginState(cookie: String?): String = try {
+        val d = httpGetJsonDiagStatic("https://api.bilibili.com/x/web-interface/nav", cookie)
+        val code = d.optInt("code")
+        val data = d.optJSONObject("data")
+        if (code == 0) "已登录 mid=${data?.optLong("mid") ?: 0} name=${data?.optString("uname") ?: "?"}"
+        else "未登录(code=$code ${d.optString("message")})"
+    } catch (e: Exception) {
+        "nav异常(${e.message?.take(40)})"
+    }
+
+    /** 供 [CookieDiag] 用（object 里调不到实例方法，这里复制一份极简版）。 */
+    private fun httpGetJsonDiagStatic(url: String, cookie: String?): JSONObject {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 10000
+            readTimeout = 10000
+            setRequestProperty("User-Agent", UA)
+            setRequestProperty("Referer", REFERER)
+            if (!cookie.isNullOrEmpty()) setRequestProperty("Cookie", cookie)
+        }
+        val code = conn.responseCode
+        val raw = try {
+            if (code in 200..299) conn.inputStream.bufferedReader().readText()
+            else conn.errorStream?.bufferedReader()?.readText() ?: ""
+        } finally { conn.disconnect() }
+        return JSONObject(raw)
+    }
+
+    /**
+     * 🔴【v73】带 **412 风控退避重试**的探针版请求。
+     *
+     * 412 = B站 的风控拦截码（不是"没权限"，是"你请求太密/IP 被盯上了"）。
+     * 官方口径：**降低频率 + 等待**就能恢复。所以这里做 3 次尝试、间隔递增，
+     * 大部分偶发 412 第二次就过了；真过不了就把 412 单独抛出来，让上层给"稍后重试"的人话提示，
+     * 而不是误报成"这视频没字幕"。
+     */
+    private fun httpGetJsonDiag(url: String, cookie: String?, timeoutMs: Int = 20000): JSONObject {
+        var last: ApiDiag? = null
+        val waits = longArrayOf(0, 1500, 4000)
+        for ((i, w) in waits.withIndex()) {
+            if (w > 0) Thread.sleep(w)
+            try {
+                return httpGetJsonDiagOnce(url, cookie, timeoutMs)
+            } catch (e: ApiDiag) {
+                last = e
+                // 只有 412 / 429 才值得重试；其它（如 -101）重试也没用
+                val c = ApiDiag.codeOf(e)
+                if (c != 412 && c != 429) throw e
+            }
+        }
+        throw last ?: ApiDiag(-1, "请求失败")
+    }
+
+    private fun httpGetJsonDiagOnce(url: String, cookie: String?, timeoutMs: Int = 20000): JSONObject {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = timeoutMs
+            readTimeout = timeoutMs
+            buildHeaders(cookie).forEach { (k, v) -> setRequestProperty(k, v) }
+        }
+        val code = conn.responseCode
+        val raw = try {
+            if (code in 200..299) conn.inputStream.bufferedReader().readText()
+            else conn.errorStream?.bufferedReader()?.readText() ?: ""
+        } finally { conn.disconnect() }
+        if (code !in 200..299) throw ApiDiag(code, "HTTP $url")
+        return try {
+            JSONObject(raw)
+        } catch (e: Exception) {
+            throw ApiDiag(-999, "返回非 JSON（可能限流）: $url")
         }
     }
 
@@ -111,7 +277,7 @@ object BiliClient {
     // ---------- WBI 签名 ----------
     @Synchronized
     private fun fetchWbiKeys(cookie: String?) {
-        val ck = cookie ?: getGuestCookie()
+        val ck = mergeCookie(cookie)
         val d = httpGetJson("https://api.bilibili.com/x/web-interface/nav", cookie = ck)
         val wbi = d.optJSONObject("data")?.optJSONObject("wbi_img")
             ?: throw RuntimeException("获取 WBI 密钥失败: ${d.optString("message")}")
@@ -266,16 +432,35 @@ object BiliClient {
      */
     suspend fun fetchTimedSubtitle(inputUrl: String, cookie: String? = null): Pair<String, List<SubLine>> =
         withContext(Dispatchers.IO) {
-            val ck = cookie ?: getGuestCookie()
+            // 🔴【v73】合并登录态 + 游客设备标识（buvid3）：只发 SESSDATA 会被风控当"陌生设备"
+            val ck = mergeCookie(cookie)
             val bvid = extractBvid(inputUrl)
             val (cid, title) = getCidAndTitle(bvid, ck)
 
+            // 🔴【v73】登录态诊断**提前跑**：player 接口被风控(412)时也能看清 cookie 到底认不认。
+            val navState = navLoginState(ck)
+
             val q = sign(mapOf("bvid" to bvid, "cid" to cid.toString()), ck)
-            val player = httpGetJson("https://api.bilibili.com/x/player/wbi/v2?$q", cookie = ck)
+            // 🔴【v70】换成带 code/message 的探针版：取轨失败时把接口原始错误一起带出来
+            val player = try {
+                httpGetJsonDiag("https://api.bilibili.com/x/player/wbi/v2?$q", cookie = ck)
+            } catch (e: ApiDiag) {
+                // 🔴【v73】412 = 风控拦截，**跟"这视频没字幕"完全两码事**，必须分开说，
+                //   否则用户以为视频没字幕，其实只是被限流了、等两分钟再试就好。
+                val c = ApiDiag.codeOf(e)
+                if (c == 412 || c == 429)
+                    throw RuntimeException("B站 暂时拦了我们的请求（风控码 $c，多半是短时间导太多次）。等一两分钟再试即可。")
+                throw RuntimeException(
+                    "取轨接口调用失败（code=$c）· cookie长度=${cookie?.length ?: 0} " +
+                        "nav=$navState cookie构成=[${CookieDiag.describe(ck)}]"
+                )
+            }
 
             var needLogin = false
             var subList: JSONArray? = null
-            if (player.optInt("code") == 0) {
+            val apiCode = player.optInt("code")
+            val apiMsg = player.optString("message")
+            if (apiCode == 0) {
                 val pdata = player.optJSONObject("data") ?: JSONObject()
                 needLogin = pdata.optBoolean("need_login_subtitle")
                 subList = pdata.optJSONObject("subtitle")?.optJSONArray("list")
@@ -297,7 +482,12 @@ object BiliClient {
             //   原实现只认 en 开头 ⇒ 只有 ai-zh 中文轨的视频（很常见）被误判成"没字幕"。
             val (mainSub, auxSub) = pickTracks(subList)
             if (mainSub == null)
-                throw RuntimeException("该视频没有字幕轨（可能是硬字幕——字幕烧进画面了，任何工具都取不出来）。将改用语音识别生成。")
+                throw RuntimeException(
+                    "该视频没有字幕轨（可能是硬字幕）。· 接口code=$apiCode msg=$apiMsg " +
+                        "needLogin=$needLogin 轨数=${subList?.length() ?: -1} " +
+                        "cookie长度=${cookie?.length ?: 0} " +
+                        "cookie构成=[${CookieDiag.describe(cookie)}] nav=${navLoginState(ck)}"
+                )
             val mainLines = parseSubBody(mainSub, ck)
             if (mainLines.isEmpty()) throw RuntimeException("字幕内容为空。")
 
@@ -339,7 +529,8 @@ object BiliClient {
      */
     suspend fun fetchAllTracksDetailed(context: Context, inputUrl: String): TrackFetch =
         withContext(Dispatchers.IO) {
-            val cookie = AsrPrefs.loadBiliSessdata(context).ifBlank { null }
+            // 🔴【v72】走规范化：设置页存的是纯值 ⇒ 补 `SESSDATA=` 前缀 + URL 解码
+            val cookie = buildCookie(AsrPrefs.loadBiliSessdata(context))
             runCatching { fetchAllTracksInternal(inputUrl, cookie) }
                 .getOrElse { e ->
                     Log.w(TAG, "fetchAllTracks failed: ${e.message}")
@@ -351,7 +542,8 @@ object BiliClient {
     data class TrackFetch(val tracks: List<Track>, val note: String = "")
 
     private suspend fun fetchAllTracksInternal(inputUrl: String, cookie: String?): TrackFetch {
-        val ck = cookie ?: getGuestCookie()
+        // 🔴【v73】同样合并游客设备标识（buvid3），避免被风控当陌生设备
+        val ck = mergeCookie(cookie)
         val bvid = extractBvid(inputUrl)
         val (cid, _) = getCidAndTitle(bvid, ck)
         val q = sign(mapOf("bvid" to bvid, "cid" to cid.toString()), ck)
@@ -375,7 +567,15 @@ object BiliClient {
             val o = subList.getJSONObject(i)
             val lines = runCatching { parseSubBody(o, ck) }.getOrDefault(emptyList())
             if (lines.isEmpty()) continue
-            out.add(Track(o.optString("lan"), o.optString("lan_doc"), enScore(o) == 0, lines))
+            out.add(
+                Track(
+                    lan = o.optString("lan"),
+                    lanDoc = o.optString("lan_doc"),
+                    isChinese = enScore(o) == 0,
+                    isEnglish = enScore(o) >= 2,
+                    lines = lines,
+                )
+            )
         }
         return TrackFetch(out)
     }
@@ -385,13 +585,14 @@ object BiliClient {
         val lan: String,
         val lanDoc: String,
         val isChinese: Boolean,
+        val isEnglish: Boolean,
         val lines: List<SubLine>,
     )
 
     /** 播放地址（DASH 分离流）：返回视频流 + 音频流 URL。 */
     suspend fun fetchPlayUrl(inputUrl: String, cookie: String? = null): PlayInfo =
         withContext(Dispatchers.IO) {
-            val ck = cookie ?: getGuestCookie()
+            val ck = mergeCookie(cookie)
             val bvid = extractBvid(inputUrl)
             val (cid, _) = getCidAndTitle(bvid, ck)
             val q = sign(mapOf(
@@ -453,7 +654,7 @@ object BiliClient {
     /** 取视频标题（语音转文字流程用） */
     suspend fun fetchTitle(inputUrl: String, cookie: String? = null): String =
         withContext(Dispatchers.IO) {
-            val ck = cookie ?: getGuestCookie()
+            val ck = mergeCookie(cookie)
             val bvid = extractBvid(inputUrl)
             val (_, title) = getCidAndTitle(bvid, ck)
             title
@@ -462,7 +663,7 @@ object BiliClient {
     /** 下载 B站音频流到 destFile（选最低带宽音频，体积小、识别够用）。 */
     suspend fun downloadAudio(inputUrl: String, cookie: String? = null, destFile: File) =
         withContext(Dispatchers.IO) {
-            val ck = cookie ?: getGuestCookie()
+            val ck = mergeCookie(cookie)
             val bvid = extractBvid(inputUrl)
             val (cid, _) = getCidAndTitle(bvid, ck)
             val q = sign(mapOf(
@@ -491,7 +692,7 @@ object BiliClient {
     /** 下载 B站最佳清晰度视频流到 destFile（与音频流分开下载，后续 mux）。 */
     suspend fun downloadVideoStream(inputUrl: String, cookie: String? = null, destFile: File) =
         withContext(Dispatchers.IO) {
-            val ck = cookie ?: getGuestCookie()
+            val ck = mergeCookie(cookie)
             val bvid = extractBvid(inputUrl)
             val (cid, _) = getCidAndTitle(bvid, ck)
             val q = sign(mapOf(

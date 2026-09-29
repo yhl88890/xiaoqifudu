@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.min
 
 /**
@@ -21,6 +22,24 @@ import kotlin.math.min
  *  5) 产出 BiliImportResult，由 UI 打开（视频模式；纯音频兜底进音频模式）。
  */
 object BiliImport {
+
+    /**
+     * 【v66】B站 轨「平均段长超过多少毫秒就算太粗、宁可不用户」。
+     *
+     * 定这个数的依据（2026-09-29 实测）：
+     *  · 我们要的是**能一按复读就念完**的一句 —— 经验上 6 秒以内舒服，8 秒以上就嫌长。
+     *  · B站 自带 `en` 正文轨实测 **8.4s/条**（BV1Gf4y1y7wc）；`ai-zh` 听译轨 **2.54s/条**。
+     *  · 所以 6000ms 这条线能把"粗正文轨"挡掉、把"细听译轨"放进来。
+     *  ⚠️ 这个值是拍的，真用起来嫌松/嫌紧就调它（只有这一个地方用）。
+     */
+    private const val CC_TOO_COARSE_MS = 6000.0
+
+    /** 一列字幕的平均段长（毫秒）。空表返回 0（⇒ 不会被判成"太粗"）。 */
+    private fun avgSegMs(lines: List<SubLine>): Double {
+        if (lines.isEmpty()) return 0.0
+        val total = lines.sumOf { (it.end - it.start).coerceAtLeast(0.0) }
+        return total / lines.size * 1000.0
+    }
 
     data class Result(
         val mediaFile: File,     // 合成后的 MP4（视频或音频-only）
@@ -37,7 +56,13 @@ object BiliImport {
         translate: Boolean,
         onProgress: (String) -> Unit,
     ): Result = withContext(Dispatchers.IO) {
-        val cookie = AsrPrefs.loadBiliSessdata(context).ifBlank { null }
+        // 🔴【v72】SESSDATA 在设置页存的是**纯值**，这里必须走规范化补上 `SESSDATA=` 前缀
+        //   （v71 诊断实锤：少了这个前缀 → B站 nav 返回 -101 → 字幕轨永远取不到）
+        val cookie = BiliClient.buildCookie(AsrPrefs.loadBiliSessdata(context))
+
+        // 输出目录先建好（取轨失败时也要能往里写诊断文件）
+        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "XuanjiBili")
+        dir.mkdirs()
 
         // 1) 标题 + B站 自带字幕轨
         // 🔴【0929】"CC 字幕"这个叫法不准确：B站 的轨不只有 UP 主上传的人工字幕，
@@ -52,11 +77,28 @@ object BiliImport {
             title = t
             ccLines = lines
             onProgress("已取到 B站字幕轨（${lines.size} 句）")
+            runCatching {
+                File(dir, "_debug_取轨成功.txt").writeText(
+                    "cookie 长度  ${cookie?.length ?: 0}\n轨句数      ${lines.size}\n"
+                )
+            }
         } catch (e: Exception) {
             ccError = e.message
             title = runCatching { BiliClient.fetchTitle(inputUrl, cookie) }.getOrDefault("B站视频")
             // 让失败原因看得见（原先只在末尾 note 里体现，用户不知道为啥在跑识别）
             onProgress("无自带字幕，改用语音识别")
+            // 🔴【v68 诊断】把**取轨失败的原始原因**落盘，否则只看 SESSDATA 长度根本猜不出来。
+            //   ⚠️ 文件名跟下面判据那个**必须不同** —— 否则判据那次会把这里的覆盖掉（踩过）。
+            runCatching {
+                File(dir, "_debug_取轨失败.txt").writeText(
+                    buildString {
+                        appendLine("cookie 长度  ${cookie?.length ?: 0}")
+                        appendLine("异常类型    ${e::class.simpleName}")
+                        appendLine("异常消息    ${e.message}")
+                        appendLine("异常链路    ${e.stackTrace.take(4).joinToString(" < ")}")
+                    }
+                )
+            }
         }
 
         // 2) 播放地址
@@ -64,15 +106,41 @@ object BiliImport {
         val play = BiliClient.fetchPlayUrl(inputUrl, cookie)
 
         // 3) 输出目录（Download/XuanjiBili，媒体库会扫到；同时支持 file:// 直接打开）
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "XuanjiBili")
-        dir.mkdirs()
         val safe = safeName(title)
         val mp4File = File(dir, "$safe.mp4")
         val audioFallback = File(dir, "$safe.m4a")
 
         // 4) 字幕来源：B站 字幕轨直接用；没轨才跑 ASR
         //    【v62】ASR 分支新增「借 B站 轨的时间边界重切」——见下面 recutByBiliRuler 的说明。
-        val subLines: List<SubLine> = if (ccLines != null) {
+        //
+        //    🔴【v66 阿亮拍板"乙方案"】轨**太粗就别用**。
+        //
+        //    真机实锤（BV1Gf4y1y7wc / TED-Ed 原子，2026-09-29）：
+        //      B站 自带 `en` 轨 **27 条 / 226 秒 = 平均 8.4s 一条**，
+        //      最长一条 16.6 秒 —— **比我们自己 ASR 的段还粗**。
+        //      而 v62~v65 一直在第 2 层（`recutByBiliRuler`）做文章，
+        //      第 1 层 `ccLines != null` 一短路就把第 2 层整个绕过去了 ⇒ 白改。
+        //
+        //    所以判据挪到**这里**：算出平均段长，超过 [CC_TOO_COARSE_MS] 就**主动放弃**轨，
+        //    掉进 ASR 分支 → 走 `recutByBiliRuler`（v65 的细切逻辑这下就活了）。
+        //    ⚠️ 轨只是"粗"，文本质量往往比 ASR 好 ⇒ 放弃前把它的文本留一份，
+        //       等 ASR 出完按时间对齐，能救回来就用轨的文本（见下面 mergeCoarseTrackText）。
+        val ccTooCoarse = ccLines != null && avgSegMs(ccLines) > CC_TOO_COARSE_MS
+        if (ccTooCoarse && ccLines != null) {
+            onProgress("B站 轨太粗（平均 ${(avgSegMs(ccLines) / 1000).toInt()}s/句），改用语音识别…")
+        }
+        // 🔴【诊断】把决策依据落到文件，真机排查用（`Download/XuanjiBili/_debug_字幕来源.txt`）。
+        runCatching {
+            File(dir, "_debug_字幕来源.txt").writeText(
+                buildString {
+                    appendLine("轨句数      ${ccLines?.size ?: -1}")
+                    appendLine("轨平均段长  ${if (ccLines != null) "%.0f".format(avgSegMs(ccLines)) else "-"} ms")
+                    appendLine("阈值        $CC_TOO_COARSE_MS ms")
+                    appendLine("判定        ${if (ccLines == null) "无轨→ASR" else if (ccTooCoarse) "太粗→ASR" else "够细→直接用轨"}")
+                }
+            )
+        }
+        val subLines: List<SubLine> = if (ccLines != null && !ccTooCoarse) {
             ccLines
         } else {
             onProgress("无自带字幕，下载音频做语音识别…")
@@ -102,7 +170,11 @@ object BiliImport {
                 offsetMs += wavChunkMs(c)
             }
             if (merged.isEmpty()) throw RuntimeException("识别未返回时间戳，无法生成字幕（可换有 B站字幕的视频，或稍后重试）。")
-            recutByBiliRuler(context, inputUrl, merged, onProgress)
+            // 细切：优先借 B站 细轨当尺子；没细轨就纯用 ASR 自己的段。
+            val cut = recutByBiliRuler(context, inputUrl, merged, onProgress)
+            // 【v66】轨"粗"但文本准 ⇒ 拿它当**文字稿**，按细切后的时间轴重新分配文本。
+            //   效果：时间轴是 ASR 的细粒度，文字是 B站 的准确原文（专有名词/标点更对）。
+            if (ccLines != null && ccTooCoarse) reseatTextByTimeline(cut, ccLines, onProgress) else cut
         }
 
         // 5) 中文翻译（B站 轨已给中文的段**保留**，只补缺的 —— 阿亮 0929 定：B站 中文优先）
@@ -209,7 +281,41 @@ object BiliImport {
             return raw
         }
 
-        val ruler = tracks.flatMap { it.lines }.map { (it.start * 1000).toLong() }
+        val cnLines = tracks.filter { it.isChinese }.flatMap { it.lines }
+
+        // ============ 【v66 改】挑「够细的英文轨」直接采用它的断句 ============
+        // v65 的无条件「有英文轨就用」在乙方案下**会自相矛盾**：粗轨刚在上层被判定弃用，
+        // 这里又整盘拿回来 ⇒ 白忙一场。所以补一道**细度门槛**：轨本身够细才直接采用。
+        //   ✅ 细轨（如 `ai-zh` 听译轨，实测 2.54s/条）：文本和时间天然对齐，直接用它最好。
+        //   ❌ 粗轨（`en` 正文轨，实测 8.4s/条）：交给"ASR 给时间轴 + 轨给文字"那条路（见下）。
+        val enTrack = tracks.filter { it.isEnglish }
+            .maxByOrNull { it.lines.size }
+            ?.takeIf { t -> avgSegMs(t.lines.map { SubLine(it.text, it.start, it.end) }) <= CC_TOO_COARSE_MS }
+        if (enTrack != null && enTrack.lines.isNotEmpty()) {
+            val out = enTrack.lines
+                .filter { it.text.isNotBlank() }
+                .map { l ->
+                    SubLine(
+                        text = l.text,
+                        start = l.start,
+                        end = l.end,
+                        cn = matchCn(cnLines, l.start, l.end),
+                    )
+                }
+            if (out.isNotEmpty()) {
+                onProgress("采用 B站 英文轨断句：${raw.size} → ${out.size} 句")
+                if (out.any { it.cn.isNotBlank() }) onProgress("已带上 B站 中文对照")
+                return out
+            }
+        }
+
+        // ============ 兜底：用 B站 轨的时间点硬切我们的 ASR 文本 ============
+        // 🔴【v66】尺子取**最细的那条轨**（逐条算平均段长，取最小者），不再把所有轨混在一起。
+        //   理由：粗轨的时间点又稀又不准，混进来会把细轨的好点稀释掉。
+        val rulerTrack = tracks
+            .filter { it.lines.size >= 2 }
+            .minByOrNull { avgSegMs(it.lines.map { l -> SubLine(l.text, l.start, l.end) }) }
+        val ruler = rulerTrack?.lines?.map { (it.start * 1000).toLong() } ?: emptyList()
         if (ruler.isEmpty()) return raw
 
         val sentences = raw.map { Sentence((it.start * 1000).toLong(), (it.end * 1000).toLong(), it.text) }
@@ -220,17 +326,97 @@ object BiliImport {
         }
         onProgress("按 B站 时间轴细切：${raw.size} → ${cut.size} 句")
 
-        // 中文对照：B站 轨里属于中文的那些行，按时间就近配对
-        val cnLines = tracks.filter { it.isChinese }.flatMap { it.lines }
         return cut.map { s ->
-            val mid = (s.startMs + s.endMs) / 2000.0
-            val cn = if (cnLines.isEmpty()) "" else {
-                cnLines.minByOrNull { abs((it.start + it.end) / 2 - mid) }
-                    ?.takeIf { abs((it.start + it.end) / 2 - mid) <= 4.0 }
-                    ?.text ?: ""
-            }
-            SubLine(s.text, s.startMs / 1000.0, s.endMs / 1000.0, cn)
+            SubLine(s.text, s.startMs / 1000.0, s.endMs / 1000.0, matchCn(cnLines, s.startMs / 1000.0, s.endMs / 1000.0))
         }.also { if (it.any { l -> l.cn.isNotBlank() }) onProgress("已带上 B站 中文对照") }
+    }
+
+    /**
+     * 【v66】把 B站 轨的**准确文字**重新铺到细切后的时间轴上。
+     *
+     * ## 为什么要这一步
+     *
+     * 到这儿我们手上有两份东西，各有各的好：
+     *  · 细切后的 [cut] —— **时间轴细**（ASR 真听出来的边界，2~3s 一段），
+     *    但文字是 ASR 出来的，专有名词常错（实测把 `atom` 听成 `adams`）。
+     *  · B站 轨 [trackLines] —— **文字准**（专有名词/标点都对），
+     *    但时间轴粗（一条 8 秒，一按复读念不完）。
+     *
+     * ⇒ 取长补短：**时间轴用细的，文字用准的**。
+     *
+     * ## 怎么做（关键：不"猜"字符比例，而是"按已确定的语义单元内部分配"）
+     *
+     * 粗轨的一条 = 一个**语义完整的单元**（比如「Every atom has a core which is made up of
+     * at least one positively charged particle called a proton」）。
+     * 细切把它切成 3 段时，我们**只需在这**一条内部按时间比例分配字符 ——
+     * 这不是早先 `cutTextAtWord` 那种"在整篇里瞎猜切点"，**边界已经被细切定死了**，
+     * 分配只是在已知单元内做插值，风险小得多。
+     *
+     * ## 保守策略（宁可用 ASR 的，也不给错文字）
+     *
+     * 逐条细段去粗轨找**时间重叠最多**的那一条：
+     *  · 重叠率 ≥ [MIN_OVERLAP] 才敢换文字；否则**保留 ASR 原文**（不动）。
+     *  · 换来的文字如果**为空或异常短**（< 2 字符），也**放弃**、保留原文。
+     * ⇒ 最坏情况就是"这段没换成，还是 ASR 的文字"，不会比现在更差。
+     */
+    private fun reseatTextByTimeline(
+        cut: List<SubLine>,
+        trackLines: List<SubLine>,
+        onProgress: (String) -> Unit,
+    ): List<SubLine> {
+        if (cut.isEmpty() || trackLines.isEmpty()) return cut
+
+        var replaced = 0
+        val out = cut.map { seg ->
+            // 找跟本段时间重叠最多的那条轨
+            var best: SubLine? = null
+            var bestOverlap = 0.0
+            for (t in trackLines) {
+                val ov = min(seg.end, t.end) - max(seg.start, t.start)
+                if (ov > bestOverlap) {
+                    bestOverlap = ov
+                    best = t
+                }
+            }
+            val t = best
+            val segLen = (seg.end - seg.start).coerceAtLeast(0.001)
+            if (t == null || bestOverlap / segLen < MIN_OVERLAP) return@map seg
+
+            // 在本条轨内部按时间比例切出对应的一段字符
+            val tLen = (t.end - t.start).coerceAtLeast(0.001)
+            val lo = ((seg.start - t.start) / tLen).coerceIn(0.0, 1.0)
+            val hi = ((seg.end - t.start) / tLen).coerceIn(0.0, 1.0)
+            val text = t.text
+            val a = (text.length * lo).toInt().coerceIn(0, text.length)
+            val b = (text.length * hi).toInt().coerceIn(0, text.length)
+            val piece = text.substring(a, b).trim()
+
+            // 太短/为空 ⇒ 放弃（宁可留 ASR 原文，也别给一句残渣）
+            if (piece.length < 2) return@map seg
+            replaced++
+            seg.copy(text = piece)
+        }
+        if (replaced > 0) onProgress("用 B站 原文校正了 $replaced 句文字")
+        return out
+    }
+
+    /** 细段与轨的最小时间重叠率：低于它就**不换文字**，保留 ASR 原文。 */
+    private const val MIN_OVERLAP = 0.5
+
+    /** 在中文轨里按时间中点就近找对照（±4 秒内才算）。 */
+    private fun matchCn(cnLines: List<SubLine>, start: Double, end: Double): String {
+        if (cnLines.isEmpty()) return ""
+        val mid = (start + end) / 2.0
+        var best: SubLine? = null
+        var bestGap = Double.MAX_VALUE
+        for (l in cnLines) {
+            val gap = abs((l.start + l.end) / 2.0 - mid)
+            if (gap < bestGap) {
+                bestGap = gap
+                best = l
+            }
+        }
+        return if (best != null && bestGap <= 4.0) best.text else ""
     }
 
     private fun safeName(title: String): String {
