@@ -43,7 +43,7 @@ App 一共 **7 个页面**（`Page` 枚举定义在 `AppPages.kt`）：
 
 ## 二、代码地图（拆巨石后）
 
-源码全在 `app/src/main/java/com/xuanji/repeater/`，**63 个文件 / 约 1.93 万行**。按职责分组：
+源码全在 `app/src/main/java/com/xuanji/repeater/`，**64 个文件 / 约 2.06 万行**。按职责分组：
 
 ### 入口与骨架
 | 文件 | 职责 |
@@ -86,6 +86,7 @@ App 一共 **7 个页面**（`Page` 枚举定义在 `AppPages.kt`）：
 | `SentenceSplitter.kt` | 波形断句核心（MediaExtractor + MediaCodec，纯自研） |
 | `AsrTextAligner.kt` | ASR 文本对齐：段内断句、加标点、短句合并、边界修正 |
 | `LongSentenceSplit.kt` | 长句切分共享工具（音频与视频**共用同一套算法**） |
+| `TimelineRecut.kt` | 借 B站 字幕轨的真实时间边界重切 ASR 长句（v62，治「断句又臭又长」） |
 | `SpeechRecognizer.kt` | 单句 / 分段语音识别（硅基流动） |
 | `AsrPrefs.kt` | ASR 服务商 + API Key 配置 |
 | `SentenceCache.kt` | 断句结果缓存（句子 + 量化后的波形） |
