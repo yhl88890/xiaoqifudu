@@ -898,8 +898,15 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 when (module) {
                     // ---- 5 键控制排（含 B站 输入行、导入/识别状态提示） ----
                     VideoModule.TRANSPORT -> {
+                        // 【0930 修】原来整块被 if (videoUri != null) 包住 ⇒ **没选视频时 B站 导入入口整个消失**，
+                        // 而空状态卡只给「去选视频」。结果：手上没本地视频的人**根本没法用 B站 抓取**
+                        // （提示文案写着"可以把 B站 链接粘进来后台抓"，实际压根没那个框 —— 自己打自己脸）。
+                        // 改法：输入框**永远存在**，5 键只在该有的时候（有视频）才渲染。
+                        // 没视频时输入框**直接是展开态**（biliInputRevealed 初值 = videoUri == null），
+                        // 免去"先学会左滑才能导入"的学习成本。
+                        val hasVideo = videoUri != null
                         // 主控制一排：与音频模式统一的 5 键（上一曲/上一句/播放/下一句/下一曲）
-                        if (videoUri != null) {
+                        run {
                             // 【0903 v4 并排一体·跟手版】功能键 + B站 输入框：父容器宽 screenW，内含一个总宽
                             // screenW+inputW 的横排 Box（左=功能键，右=输入框），整体用 Animatable 横向平移：
                             //   - slideX=0：功能键填满整屏，输入框在屏外右侧（默认态）
@@ -911,9 +918,12 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             //    在右边露出一半（这就是装机后"功能键少了/不对齐"的根因）。
                             // 2) 手势 draggable 实时把拖拽增量叠进 offset = 跟手；松手 settle() 先 snapTo 到
                             //    手指当前位置再动画到锚点 = 无回跳；不用 detectHorizontalDragGestures（吃点击）。
-                            var biliInputRevealed by remember { mutableStateOf(false) }
+                            // 【0930】有视频 → 默认收起（功能键优先）；没视频 → 默认展开（导入是唯一能做的事）
+                            var biliInputRevealed by remember { mutableStateOf(!hasVideo) }
                             var dragTotal by remember { mutableStateOf(0f) }   // 本次拖拽累计位移（左滑为负）
                             val scope = rememberCoroutineScope()
+                            // slideX 单位是 px，只有进 BoxWithConstraints 拿到 inputWPx 才知道该落在哪
+                            // ⇒ 初值先用 0，进去后由下面的 LaunchedEffect 一次性校正到初始锚点。
                             val slideX = remember { Animatable(0f) }
                             BoxWithConstraints(
                                 modifier = Modifier
@@ -929,6 +939,16 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 val inputW = screenW
                                 val inputWPx = with(LocalDensity.current) { inputW.toPx() }
                                 val screenWPx = with(LocalDensity.current) { screenW.toPx() }
+                                // 【0930】进 Box 拿到 inputWPx 后，把 slideX 一次性校正到"当前状态该在的锚点"。
+                                // 没视频时 biliInputRevealed 初值为 true ⇒ 这里直接 snapTo(inputWPx)，
+                                // 输入框开局就是展开的，且**不播动画**（避免一进页面就自己滑一下）。
+                                // 用 hasVideo 当 key：从"没视频"变成"有视频"（导入成功）时才重跑一次，
+                                // 那时 biliInputRevealed 已被 onSubmit 置 false，会顺滑收回功能键位。
+                                LaunchedEffect(hasVideo) {
+                                    val target = if (biliInputRevealed) inputWPx else 0f
+                                    dragTotal = 0f
+                                    slideX.snapTo(target)
+                                }
                                 // 松手/收起/提交后统一回到锚点（0 或 inputW），不产生跳变
                                 fun settle() {
                                     val target = if (biliInputRevealed) inputWPx else 0f
@@ -967,27 +987,55 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 // 功能键 x∈[0,-inputW] 左滑出屏，输入框 x=screenW→screenW-inputW 贴其右缘滑入。
                                 // 关键：两者宽度都不超过父容器 → 不会触发"Box 对超宽子元素一律居中"的框架行为
                                 // （0903 实测：单个 screenW+inputW 宽子元素被强制居中到 x=-279，最左键顶出屏外）。
-                                VideoTransportRow(
-                                    modifier = Modifier
-                                        .requiredWidth(screenW)
-                                        .offset { IntOffset(-(slideX.value + dragTotal).coerceIn(0f, inputWPx).roundToInt(), 0) }
-                                        .draggable(
-                                            state = draggableState,
-                                            orientation = Orientation.Horizontal,
-                                            startDragImmediately = false,
-                                            onDragStopped = { v -> onDragStopped(v) },
-                                        ),
-                                    onPrevTrack = { prevVideo() },
-                                    onPrevSentence = { videoJumpSentence(-1) },
-                                    onPrevSentenceHoldChange = { held -> if (held) startRewind() else stopFast() },
-                                    onToggle = { videoTogglePlay() },
-                                    onNextSentence = { videoJumpSentence(1) },
-                                    onNextSentenceHoldChange = { held -> if (held) startFastForward() else stopFast() },
-                                    onNextTrack = { nextVideo() },
-                                    prevTrackEnabled = hasPrevVideo,
-                                    nextTrackEnabled = hasNextVideo,
-                                    playing = videoPlaying,
-                                )
+                                // 【0930】5 键只在**有视频**时才渲染；没视频时放一个等宽的空 Box 占位。
+                                // 为什么占位不能省：输入框用 matchParentSize 取 Box 尺寸、靠 screenWPx 定位，
+                                // 若这一页整个不渲染，Box 就没有内容撑高度 ⇒ 输入框塌成 0 高。
+                                // 占位 Box 高度给 72.dp（≈ 有视频时控制排的高度），保证没视频时输入框观感一致。
+                                if (hasVideo) {
+                                    VideoTransportRow(
+                                        modifier = Modifier
+                                            .requiredWidth(screenW)
+                                            .offset { IntOffset(-(slideX.value + dragTotal).coerceIn(0f, inputWPx).roundToInt(), 0) }
+                                            .draggable(
+                                                state = draggableState,
+                                                orientation = Orientation.Horizontal,
+                                                startDragImmediately = false,
+                                                onDragStopped = { v -> onDragStopped(v) },
+                                            ),
+                                        onPrevTrack = { prevVideo() },
+                                        onPrevSentence = { videoJumpSentence(-1) },
+                                        onPrevSentenceHoldChange = { held -> if (held) startRewind() else stopFast() },
+                                        onToggle = { videoTogglePlay() },
+                                        onNextSentence = { videoJumpSentence(1) },
+                                        onNextSentenceHoldChange = { held -> if (held) startFastForward() else stopFast() },
+                                        onNextTrack = { nextVideo() },
+                                        prevTrackEnabled = hasPrevVideo,
+                                        nextTrackEnabled = hasNextVideo,
+                                        playing = videoPlaying,
+                                    )
+                                } else {
+                                    // 空占位：暗示"这一页本来是播放键"，左滑即回到导入框。
+                                    // 文案极简（按项目 UI 纪律：清爽 = 文字别啰嗦），只给一句动作提示。
+                                    Box(
+                                        modifier = Modifier
+                                            .requiredWidth(screenW)
+                                            .height(72.dp)
+                                            .offset { IntOffset(-(slideX.value + dragTotal).coerceIn(0f, inputWPx).roundToInt(), 0) }
+                                            .draggable(
+                                                state = draggableState,
+                                                orientation = Orientation.Horizontal,
+                                                startDragImmediately = false,
+                                                onDragStopped = { v -> onDragStopped(v) },
+                                            ),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            "← 左滑回来粘 B站 链接",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
                                 // 输入框：与功能键排**同宽同高**的整屏页。默认在屏外右侧（x=screenW），
                                 // 左滑翻入停在 x=0。宽高都跟随功能键排（同一 Box 里两页等大 ⇒
                                 // "压缩或拉伸都跟着一样"）；外观也套同款淡色圆角卡，
