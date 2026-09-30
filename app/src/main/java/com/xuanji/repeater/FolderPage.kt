@@ -539,8 +539,13 @@ private fun FolderDetailPage(
     var refreshTick by remember { mutableStateOf(0) }
     var menuFor by remember { mutableStateOf<AudioItem?>(null) }
     var videoMenuFor by remember { mutableStateOf<VideoItem?>(null) }
-    // 视频的「忽略文件」确认（视频不提供删除/重命名，避免动到 MediaStore 里的视频记录）
+    // 视频的「忽略文件」确认
     var ignoreVideoTarget by remember { mutableStateOf<VideoItem?>(null) }
+    // 【0930 v79】视频删除：原来视频只有「忽略」，现在补上跟音频一致的「删除」。
+    // 复用同一个 pendingOp 通道（PendingOpType 加两个视频分支），授权流程完全一致。
+    var videoDeleteTarget by remember { mutableStateOf<VideoItem?>(null) }
+    // 等待系统授权后要删的视频（只有删除一种操作 ⇒ 直接存 VideoItem，不需要 PendingOp 包装）
+    var pendingVideoOp by remember { mutableStateOf<VideoItem?>(null) }
     var ignoreTarget by remember { mutableStateOf<AudioItem?>(null) }
     var deleteTarget by remember { mutableStateOf<AudioItem?>(null) }
     var renameTarget by remember { mutableStateOf<AudioItem?>(null) }
@@ -601,6 +606,63 @@ private fun FolderDetailPage(
     // API<29：WRITE_EXTERNAL_STORAGE 权限
     val legacyWriteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) runPendingOp()
+    }
+
+    // ================= 【0930 v79】视频删除（与音频完全对称的一套） =================
+    // 为什么另起一套而不复用音频的 launcher：音频那三个 launcher 回调里跑的是 runPendingOp()，
+    // 它只认 pendingOp（音频项）。视频项类型不同 ⇒ 混用会取到 null 直接 return。
+    // 视频只有「删除」一种操作 ⇒ 不需要 PendingOpType，一个 VideoItem 就够了。
+    fun runPendingVideoOp() {
+        val item = pendingVideoOp ?: return
+        pendingVideoOp = null
+        val ok = FileOps.deleteWithPermission(context, item)
+        Toast.makeText(
+            context,
+            if (ok) "已删除" else "操作失败：文件不可用或无权限",
+            Toast.LENGTH_SHORT,
+        ).show()
+        refreshTick++
+        onChanged()
+    }
+    val videoDeleteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
+            refreshTick++
+            onChanged()
+        }
+    }
+    val videoWriteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { res ->
+        if (res.resultCode == Activity.RESULT_OK) runPendingVideoOp()
+    }
+    val videoLegacyWriteLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) runPendingVideoOp()
+    }
+
+    /** 【0930 v79】发起删视频：与 requestDelete 同构，只是换成视频的表 */
+    fun requestVideoDelete(item: VideoItem) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val pi = FileOps.createVideoDeleteIntent(context, listOf(item)) ?: run {
+                Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
+                return
+            }
+            videoDeleteLauncher.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            val pi = FileOps.createVideoWriteIntent(context, listOf(item)) ?: run {
+                Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
+                return
+            }
+            pendingVideoOp = item
+            videoWriteLauncher.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+        } else {
+            pendingVideoOp = item
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                runPendingVideoOp()
+            } else {
+                videoLegacyWriteLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }
     }
 
     /** 发起删除：按 SDK 分支走系统确认 / 写授权 / 旧权限 */
@@ -939,7 +1001,7 @@ private fun FolderDetailPage(
                                         }
                                     }
                                 }
-                                // 视频行菜单：只给「忽略文件」
+                                // 【0930 v79】视频行菜单：忽略文件 + 删除（原来只有「忽略」）
                                 Box {
                                     IconButton(onClick = { videoMenuFor = item }) {
                                         Icon(Icons.Filled.MoreVert, contentDescription = "更多")
@@ -955,6 +1017,13 @@ private fun FolderDetailPage(
                                                 ignoreVideoTarget = item
                                             },
                                         )
+                                        DropdownMenuItem(
+                                            text = { Text("删除") },
+                                            onClick = {
+                                                videoMenuFor = null
+                                                videoDeleteTarget = item
+                                            },
+                                        )
                                     }
                                 }
                             }
@@ -963,6 +1032,25 @@ private fun FolderDetailPage(
                 }
             }
         }
+    }
+
+    // 【0930 v79】删除视频确认（与音频删除弹窗同文案风格）
+    videoDeleteTarget?.let { item ->
+        AlertDialog(
+            onDismissRequest = { videoDeleteTarget = null },
+            title = { Text("删除视频") },
+            text = { Text("将删除“${fileNameWithoutExt(item.path)}”这个视频文件（会弹系统确认框）。删了就没了，不能恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val t = item
+                    videoDeleteTarget = null
+                    requestVideoDelete(t)
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { videoDeleteTarget = null }) { Text("取消") }
+            },
+        )
     }
 
     // 忽略视频确认

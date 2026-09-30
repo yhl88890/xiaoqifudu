@@ -27,6 +27,65 @@ object FileOps {
         null
     }
 
+    // ================= 【0930 v79】视频版重载 =================
+    // 背景：视频行菜单原本**只有「忽略」**，当初的顾虑是"别动到 MediaStore 里的视频记录"
+    // （见 FolderPage 顶部注释）。但视频体积大、清理动机比音频强得多；而且下面这套走的是
+    // MediaStore 正规通道（系统确认框 + ContentResolver.delete），**不是裸 rm**，风险跟音频一样可控。
+    // ⇒ 直接复用音频那套，只把 MediaStore 表从 Audio 换成 Video。
+    // ⚠️ VideoItem 与 AudioItem 结构相同（id/path/title），但**是不同类型**，只能靠重载区分。
+
+    fun uriFor(item: VideoItem): Uri? = try {
+        ContentUris.withAppendedId(
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
+            item.id
+        )
+    } catch (_: Exception) {
+        null
+    }
+
+    // ⚠️ **不能叫 createDeleteIntent/createWriteIntent**：Kotlin 泛型擦除后
+    // `List<AudioItem>` 与 `List<VideoItem>` 的 JVM 签名**完全一样**
+    // ⇒ 报 "Platform declaration clash"。所以视频版一律加 `Video` 后缀。
+    // （`uriFor` 和 `deleteWithPermission` 收的是单个对象、类型不同，重载没问题。）
+
+    /** API30+：视频的系统删除请求 */
+    fun createVideoDeleteIntent(context: Context, items: List<VideoItem>): PendingIntent? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        val uris = items.mapNotNull { uriFor(it) }
+        if (uris.isEmpty()) return null
+        return try {
+            MediaStore.createDeleteRequest(context.contentResolver, uris)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** API29：视频的写授权请求 */
+    fun createVideoWriteIntent(context: Context, items: List<VideoItem>): PendingIntent? {
+        if (Build.VERSION.SDK_INT < 29) return null
+        val uris = items.mapNotNull { uriFor(it) }
+        if (uris.isEmpty()) return null
+        return try {
+            MediaStore.createWriteRequest(context.contentResolver, uris)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 已获授权后删视频：文件系统删 + 媒体库记录删（跟音频版同逻辑） */
+    fun deleteWithPermission(context: Context, item: VideoItem): Boolean {
+        var ok = false
+        try {
+            ok = File(item.path).delete()
+        } catch (_: Exception) {
+        }
+        try {
+            uriFor(item)?.let { context.contentResolver.delete(it, null, null) }
+        } catch (_: Exception) {
+        }
+        return ok
+    }
+
     /** API30+：系统删除请求（返回 PendingIntent，由 Activity Result 启动，弹系统确认框） */
     fun createDeleteIntent(context: Context, items: List<AudioItem>): PendingIntent? {
         if (Build.VERSION.SDK_INT < 30) return null
