@@ -1074,13 +1074,15 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 )
                             }
 
-                            // 导入状态常驻显示
                             // 导入状态常驻显示（不随输入框收起而消失，让"后台抓取中 / 进度"始终可见）
+                            // 【0930 修】原来 color = Color.White 是**硬编码白字**：这排卡片是淡色底，
+                            // 白字叠上去几乎看不见（阿亮截图："下载视频"几个字太浅）。
+                            // 改成主题色 onSurface ⇒ 浅底深字、深底浅字，跟主题走。
                             if (biliStatus.isNotEmpty()) {
                                 Text(
                                     biliStatus,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(start = 12.dp, top = 4.dp, bottom = 2.dp),

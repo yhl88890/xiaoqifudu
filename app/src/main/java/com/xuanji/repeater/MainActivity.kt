@@ -879,9 +879,12 @@ class MainActivity : ComponentActivity() {
                             biliStatus = event.text
                         }
                         is BiliImportEvent.Done -> {
+                            // 【0930 修】原来「成功」这条路只顾着开视频、**没有清 biliStatus**
+                            // ⇒ "下载视频…"永远挂在控制排下面（阿亮截图实锤：视频都能播完了，那行字还在，
+                            // 白占一行高度）。成功/失败都必须收掉状态文字。
+                            biliStatus = ""
                             if (!event.ok) {
                                 biliError = event.error ?: "抓取失败"
-                                biliStatus = ""
                                 return@collect
                             }
                             val path = event.path ?: return@collect
