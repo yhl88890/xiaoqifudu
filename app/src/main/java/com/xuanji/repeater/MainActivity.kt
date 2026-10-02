@@ -588,7 +588,14 @@ private fun videoGenerateLyrics(context: Context) {
     recognizing = true
     asrProgress = 0
     asrMsg = ""
-    sentences = emptyList()   // 重新生成：先清空旧字幕，逐段识别时再边生成边显示
+    // 重新生成：先清空旧字幕，逐段识别时再边生成边显示
+    // 🔴 【1003 P1】原来只清了 sentences、**没重置 videoSentenceIndexGlobal**
+    // ⇒ 暂停在第 150 句时点重新生成，索引还是 150 而列表已空/很短，
+    //    进全屏时 sentences[150] 会越界崩溃（VideoPage 那侧也补了 `in indices` 双保险）。
+    // 对照：下面 openVideoFromLibrary 的两处清空都是**成对**重置的（:455/:463、:508/:509），只有这里漏了。
+    sentences = emptyList()
+    videoSentenceIndexGlobal = 0
+    clearVideoSentenceRepeat()
     videoAsrScope.launch {
         try {
             val durUs = withContext(Dispatchers.IO) { VideoAudioExtractor.probeDurationUs(context, videoUri!!) }
@@ -872,34 +879,41 @@ class MainActivity : ComponentActivity() {
         setContent {
             val context = LocalContext.current
             // 收集抓 B站 进度/完成事件（进程内 SharedFlow，规避 Android 14 隐式广播投递限制）
+            // 🔴 【1003 P1】**刻意拆成两个协程分别订阅** progress / done（不能 merge 成一条，
+            // 理由见 BiliImportBus 注释）—— done 那条 replay=1，抓取中 Activity 被销毁也不丢结果。
             LaunchedEffect(Unit) {
-                BiliImportBus.events.collect { event ->
-                    when (event) {
-                        is BiliImportEvent.Progress -> {
-                            biliStatus = event.text
+                launch {
+                    BiliImportBus.progress.collect { event ->
+                        if (event is BiliImportEvent.Progress) biliStatus = event.text
+                    }
+                }
+                launch {
+                    BiliImportBus.done.collect { event ->
+                        if (event !is BiliImportEvent.Done) return@collect
+                        // 🔴 【1003 P1】Done 现在走 replay=1 的通道（见 BiliImportBus 注释）：
+                        // 抓取中 Activity 被销毁也不会丢结果。**处理完必须清 replay 缓存**，
+                        // 否则下次进 App 会又收到上一次的老结果、莫名自动打开一个视频。
+                        BiliImportBus.consumeLatestDone()
+                        // 【0930 修】原来「成功」这条路只顾着开视频、**没有清 biliStatus**
+                        // ⇒ "下载视频…"永远挂在控制排下面（阿亮截图实锤：视频都能播完了，那行字还在，
+                        // 白占一行高度）。成功/失败都必须收掉状态文字。
+                        biliStatus = ""
+                        if (!event.ok) {
+                            biliError = event.error ?: "抓取失败"
+                            return@collect
                         }
-                        is BiliImportEvent.Done -> {
-                            // 【0930 修】原来「成功」这条路只顾着开视频、**没有清 biliStatus**
-                            // ⇒ "下载视频…"永远挂在控制排下面（阿亮截图实锤：视频都能播完了，那行字还在，
-                            // 白占一行高度）。成功/失败都必须收掉状态文字。
-                            biliStatus = ""
-                            if (!event.ok) {
-                                biliError = event.error ?: "抓取失败"
-                                return@collect
-                            }
-                            // 【1002 修⑤】成功 = 上一次的失败已经翻篇 ⇒ 旧红字一并清掉，
-                            // 不然"抓取失败"会一直挂着直到下次导入。
-                            biliError = ""
-                            val path = event.path ?: return@collect
-                            val file = File(path)
-                            if (event.videoMode) {
-                                openVideoFileByPath(this@MainActivity, file)
-                                biliNavigate?.invoke(Page.VIDEO)
-                            } else {
-                                val item = AudioItem(id = System.currentTimeMillis(), path = path, title = event.title ?: "B站视频")
-                                PlayerService.instance?.setPlaylist(listOf(item), 0)
-                                biliNavigate?.invoke(Page.PLAYER)
-                            }
+                        // 【1002 修⑤】成功 = 上一次的失败已经翻篇 ⇒ 旧红字一并清掉，
+                        // 不然"抓取失败"会一直挂着直到下次导入。
+                        biliError = ""
+                        val path = event.path ?: return@collect
+                        val file = File(path)
+                        if (event.videoMode) {
+                            openVideoFileByPath(this@MainActivity, file)
+                            biliNavigate?.invoke(Page.VIDEO)
+                        } else {
+                            val item = AudioItem(id = System.currentTimeMillis(), path = path, title = event.title ?: "B站视频")
+                            PlayerService.instance?.setPlaylist(listOf(item), 0)
+                            biliNavigate?.invoke(Page.PLAYER)
                         }
                     }
                 }

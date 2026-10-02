@@ -732,7 +732,12 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     )
                 }
                 // 仅全屏时才在画面里叠字幕（需求6：非全屏太遮挡，不叠）
-                if (!readingMode && videoFullscreen && videoSubOn && sentences.isNotEmpty() && videoSentenceIndexGlobal >= 0) {
+                // 🔴 【1003 P1 修】原来只判 `>= 0`，**没判 < sentences.size** ⇒ 重新生成字幕时
+                // （MainActivity 会先 `sentences = emptyList()` 但**不重置** videoSentenceIndexGlobal）
+                // 暂停在第 150 句 → 点重新生成 → 第 1 段识别完（size 只有 20）→ 进全屏
+                // ⇒ sentences[150] 直接 **IndexOutOfBoundsException 崩溃**。
+                // 用 `in sentences.indices` 一个条件把两头都判掉。
+                if (!readingMode && videoFullscreen && videoSubOn && videoSentenceIndexGlobal in sentences.indices) {
                     Box(
                         modifier = Modifier.align(Alignment.BottomCenter)
                             .fillMaxWidth()

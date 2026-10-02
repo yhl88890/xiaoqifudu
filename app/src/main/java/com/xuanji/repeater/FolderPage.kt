@@ -476,7 +476,15 @@ else -> LazyColumn(
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除文件夹") },
-            text = { Text("确定删除“${folder.name}”内的 ${folder.audios.size} 个音频文件吗？此操作不可恢复。") },
+            // 【1003 P0】文案要说清**只删音频+歌词，不会碰视频/图片等其它文件**
+            // （代码已去掉递归删除，这里同步如实告知；顺带告诉用户目录空时才会被清掉）
+            text = {
+                Text(
+                    "将删除“${folder.name}”里的 ${folder.audios.size} 个音频文件" +
+                        "（含同名字幕），不可恢复。\n\n" +
+                        "视频、图片等其它文件不会被删除，文件夹也会保留。"
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     deleteTarget = null

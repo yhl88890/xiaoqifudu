@@ -189,7 +189,7 @@ object FileOps {
         val audios = AudioScanner.scanFolderAudios(context, dir)
         if (audios.isEmpty()) return false
 
-        // API30+ 拥有"所有文件访问"：文件系统级递归删除（含 LRC 与空目录）
+        // API30+ 拥有"所有文件访问"：文件系统级删除（音频 + 歌词），**不碰目录里的其它文件**
         if (Build.VERSION.SDK_INT >= 30 && android.os.Environment.isExternalStorageManager()) {
             var okAll = true
             for (a in audios) {
@@ -207,8 +207,13 @@ object FileOps {
                 } catch (_: Exception) {
                 }
             }
+            // 🔴 【1003 P0 修】原来这里是 File(dir).deleteRecursively() —— **把整个目录连视频、
+            // 封面图、用户自己放进去的其它文件全删了**，而弹窗只承诺"删 N 个音频文件"、不可恢复。
+            // 与下面非 MANAGE 分支行为不一致 ⇒ 是疏漏不是设计。
+            // 现在统一语义：**只删音频 + 歌词，目录里还有别的东西就留着**（非递归 delete，
+            // 目录非空时自然失败、无副作用）。
             try {
-                File(dir).deleteRecursively()
+                File(dir).delete()
             } catch (_: Exception) {
             }
             return okAll

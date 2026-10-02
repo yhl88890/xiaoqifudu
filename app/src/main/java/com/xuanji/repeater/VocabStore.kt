@@ -112,6 +112,22 @@ object VocabStore {
     @Volatile
     private var loaded = false
 
+    /**
+     * 🔴 【1003 P0】所有 persist() 串行化用的锁。
+     * 原来 add() 一次会开 2~3 个协程各跑一次 persist()，只有 catch 兜着 ⇒ 多个写者
+     * 真会同时写同一个文件、内容交错。配合下面的"原子写"一起用。
+     */
+    private val persistMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * 🔴 【1003 P0】读到**损坏文件**时置位：此时界面会显示"生词本空了"，
+     * 而用户任何一次增删都会把这份「空」persist 回去 ⇒ 原始数据被覆盖、永久消失。
+     * 置位后 persist 拒绝写入（宁可这次不保存，也不能覆盖掉可能还在的文件内容），
+     * 直到下次成功读到完好文件为止。用户可从 `vocab_corrupt_*.json` 找回原始数据。
+     */
+    @Volatile
+    private var readCorrupted = false
+
     private fun file(context: Context): File = File(context.filesDir, "vocab.json")
 
     fun ensureLoaded(context: Context) {
@@ -258,7 +274,20 @@ object VocabStore {
     }
 
     private suspend fun persist(context: Context) = withContext(Dispatchers.IO) {
+        // 🔴 【1003 P0】两个问题一起修：
+        // ① **非原子写**：原来 file.writeText() 直接覆盖，写到一半进程被杀 → 文件截断成半截 JSON
+        //    → 下次读回解析失败被吞成 emptyList() → 界面"生词本空了" → 之后任何增删都把这份
+        //    「空」写回 ⇒ **用户一个一个攒的生词卡永久消失**。生词本是唯一不可再生的数据。
+        //    改成「先写 .tmp，再 renameTo 原子替换」：要么是旧的完整版，要么是新的完整版，不存在半截。
+        // ② **并发写**：add() 一次会开 2~3 个协程各跑一次 persist()，原来只有 catch 兜着，
+        //    多个写者真会同时写同一个文件、内容交错。改用 Mutex 串行化。
+        persistMutex.lock()
         try {
+            // 🔴 读回损坏过 ⇒ 拒绝覆盖写，保住磁盘上的原始文件（详见 readCorrupted 注释）。
+            // ⚠️ 不能写成 `if (readCorrupted) return` —— 这里在 withContext 的 lambda 里，
+            // 非 suspend 函数的 return 会报 "Return type mismatch: expected Any, actual Unit"。
+            // 所以整段用 if 包起来。
+            if (!readCorrupted) {
             val arr = JSONArray()
             for (e in _entries.value) {
                 arr.put(
@@ -276,8 +305,23 @@ object VocabStore {
                         .put("lastReviewedAt", e.lastReviewedAt)
                 )
             }
-            file(context).writeText(JSONObject().put("entries", arr).toString())
+            val f = file(context)
+            val tmp = File(f.parentFile, f.name + ".tmp")
+            tmp.writeText(JSONObject().put("entries", arr).toString())
+            // renameTo 不覆盖已存在文件（部分设备行为不一致）⇒ 先删旧的再改名
+            if (f.exists() && !f.delete()) {
+                // 删不掉就退回直接写（此时至少不会再叠加"半截文件"以外的损坏）
+                f.writeText(tmp.readText())
+                tmp.delete()
+            } else if (!tmp.renameTo(f)) {
+                f.writeText(tmp.readText())
+                tmp.delete()
+            }
+            } // ← if (!readCorrupted) 闭合
         } catch (_: Exception) {
+            // 写失败保持静默（原样），但**原文件没被动过** —— 原子写保证这里最坏是"这次没存上"
+        } finally {
+            persistMutex.unlock()
         }
     }
 
@@ -287,7 +331,7 @@ object VocabStore {
             if (!f.exists()) return emptyList()
             val root = JSONObject(f.readText())
             val arr = root.getJSONArray("entries")
-            (0 until arr.length()).map { i ->
+            val list = (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
                 // 兼容升级前老数据：旧字段 phonetic（仅美音）兜底；ukphone 暂用 phonetic 避免空杠，启动补查会填入真实英音
                 val oldPh = if (o.isNull("phonetic")) null else o.optString("phonetic")
@@ -306,7 +350,24 @@ object VocabStore {
                     lastReviewedAt = o.optLong("lastReviewedAt", 0L),
                 )
             }
+            // 🔴 【1003 P0】读到完好数据 ⇒ 解锁写入（覆盖掉之前"损坏"的判定）
+            readCorrupted = false
+            list
         } catch (_: Exception) {
+            // 🔴 【1003 P0】解析失败：**不要再返回"空"然后让 persist 把它写回去**。
+            // 原文件可能是半截 JSON（写一半被杀），里面也许还有能救的数据
+            // ⇒ 改名留证为 vocab_corrupt_<时间戳>.json，并锁死写入，用户可手动找回。
+            runCatching {
+                val f = file(context)
+                if (f.exists()) {
+                    val bak = File(
+                        context.filesDir,
+                        "vocab_corrupt_${System.currentTimeMillis()}.json"
+                    )
+                    f.renameTo(bak)
+                }
+            }
+            readCorrupted = true
             emptyList()
         }
     }
