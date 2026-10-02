@@ -945,9 +945,19 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 // 用 hasVideo 当 key：从"没视频"变成"有视频"（导入成功）时才重跑一次，
                                 // 那时 biliInputRevealed 已被 onSubmit 置 false，会顺滑收回功能键位。
                                 LaunchedEffect(hasVideo) {
+                                    // 【1002 修①】删视频（true→false）后自动回到"输入框展开态"：
+                                    // 原来 biliInputRevealed 只在首次组合时按 !hasVideo 算一次，
+                                    // 播放中删了视频 ⇒ hasVideo 变 false 但 revealed 还是 false
+                                    // ⇒ 用户被丢在"← 左滑回来"提示页，得多滑一次才回到输入框。
+                                    if (!hasVideo) biliInputRevealed = true
                                     val target = if (biliInputRevealed) inputWPx else 0f
                                     dragTotal = 0f
-                                    slideX.snapTo(target)
+                                    // 【1002 修③】正在向同一目标动画时**不要** snapTo 打断
+                                    // （否则导入成功瞬间：onSubmit 的 settle() 250ms 收回动画
+                                    // 会被这里 snapTo(0) 拦腰打断，画面瞬跳）。
+                                    if (!(slideX.isRunning && slideX.targetValue == target)) {
+                                        slideX.snapTo(target)
+                                    }
                                 }
                                 // 松手/收起/提交后统一回到锚点（0 或 inputW），不产生跳变
                                 fun settle() {
@@ -1054,6 +1064,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                             onDragStopped = { v -> onDragStopped(v) },
                                         ),
                                     cardShape = RoundedCornerShape(20.dp),
+                                    // 【1002 修②】没视频时输入框是唯一入口 ⇒ 藏掉 ×，防止把自己关到空提示页
+                                    showClose = hasVideo,
                                     value = biliUrl,
                                     status = biliStatus,
                                     onValueChange = { biliUrl = it },
@@ -1064,6 +1076,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                             biliInputRevealed = false
                                             biliUrl = ""
                                             biliStatus = "后台抓取中…"
+                                            // 【1002 修⑤】新一次提交把上一回的错误清掉
+                                            //（旧错误对新导入没有意义，不然红字永远挂着）
+                                            biliError = ""
                                             settle()
                                         }
                                     },
@@ -1223,6 +1238,9 @@ internal fun BiliLinkInput(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     cardShape: Shape = RoundedCornerShape(12.dp),
+    // 【1002 修】没视频时输入框是唯一入口，× 点了会把自己关到"只剩一句提示"的空页
+    // ⇒ 没视频时隐藏 ×（调用方传 hasVideo）。
+    showClose: Boolean = true,
 ) {
     Surface(
         shape = cardShape,
@@ -1282,18 +1300,21 @@ internal fun BiliLinkInput(
                     }
                 }
                 // 关闭钮：与功能键同样的圆形浅色底，整排风格一致
-                Spacer(modifier = Modifier.width(8.dp))
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                    modifier = Modifier.size(44.dp),
-                ) {
-                    IconButton(onClick = onClose, modifier = Modifier.fillMaxSize()) {
-                        Icon(
-                            Icons.Filled.Close, contentDescription = "收起",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(22.dp),
-                        )
+                // 【1002 修】showClose=false（没视频）时不渲染 —— 输入槽 weight(1f) 自动占满整行。
+                if (showClose) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        modifier = Modifier.size(44.dp),
+                    ) {
+                        IconButton(onClick = onClose, modifier = Modifier.fillMaxSize()) {
+                            Icon(
+                                Icons.Filled.Close, contentDescription = "收起",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
                     }
                 }
             }

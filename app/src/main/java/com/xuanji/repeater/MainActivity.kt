@@ -887,6 +887,9 @@ class MainActivity : ComponentActivity() {
                                 biliError = event.error ?: "抓取失败"
                                 return@collect
                             }
+                            // 【1002 修⑤】成功 = 上一次的失败已经翻篇 ⇒ 旧红字一并清掉，
+                            // 不然"抓取失败"会一直挂着直到下次导入。
+                            biliError = ""
                             val path = event.path ?: return@collect
                             val file = File(path)
                             if (event.videoMode) {
