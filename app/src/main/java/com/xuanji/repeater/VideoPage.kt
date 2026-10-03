@@ -86,6 +86,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardReturn
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.filled.FastRewind
@@ -115,6 +116,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -927,6 +930,18 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             var biliInputRevealed by remember { mutableStateOf(!hasVideo) }
                             var dragTotal by remember { mutableStateOf(0f) }   // 本次拖拽累计位移（左滑为负）
                             val scope = rememberCoroutineScope()
+                            // 【1003 加】读剪贴板：左滑唤出输入框时自动预填，省掉"长按粘贴"。
+                            // 只在本页首次组合时读一次（用户复制链接 → 左滑进来就能直接点抓取）。
+                            // 不在"每次唤出"时重读：那要求跟踪唤出时机、还得区分拖拽重组，
+                            // 收益只在"唤出后又去复制一次"这种极少场景，不值那份复杂度。
+                            // 判据在 BiliLinkInput 里（只认含 bilibili.com / BV 号的），这里只给原始文本。
+                            // ⚠️ LocalClipboardManager.current 是 @Composable ⇒ 必须在 composable 作用域取，
+                            // 不能塞进 remember { }（那个 lambda 不是 composable 上下文，会编译失败）。
+                            val clipboardMgr = LocalClipboardManager.current
+                            var clipboardText by remember { mutableStateOf<String?>(null) }
+                            LaunchedEffect(Unit) {
+                                clipboardText = clipboardMgr.getText()?.text
+                            }
                             // slideX 单位是 px，只有进 BoxWithConstraints 拿到 inputWPx 才知道该落在哪
                             // ⇒ 初值先用 0，进去后由下面的 LaunchedEffect 一次性校正到初始锚点。
                             val slideX = remember { Animatable(0f) }
@@ -1071,8 +1086,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                     cardShape = RoundedCornerShape(20.dp),
                                     // 【1002 修②】没视频时输入框是唯一入口 ⇒ 藏掉 ×，防止把自己关到空提示页
                                     showClose = hasVideo,
+                                    // 【1003 加】剪贴板里像 B站 链接就自动预填（判据在组件内）
+                                    prefillFromClipboard = clipboardText,
                                     value = biliUrl,
-                                    status = biliStatus,
                                     onValueChange = { biliUrl = it },
                                     onSubmit = { url ->
                                         val u = url.trim()
@@ -1121,14 +1137,32 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         }
                         if (recognizing) {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                                CircularProgressIndicator(
-                                    progress = if (asrProgress < 100) asrProgress / 100f else 1f,
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                )
+                                // 【1003】进入「上传识别」阶段后不再显示满圈（100% 的圈会让人以为已经完事），
+                                // 换成不定长的转圈 = "还在转、还没完"。
+                                if (asrStage != null) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                } else {
+                                    CircularProgressIndicator(
+                                        progress = if (asrProgress < 100) asrProgress / 100f else 1f,
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                }
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    if (asrProgress < 100) "抽音轨中… $asrProgress%" else "云端识别中…",
+                                    // 【1003 修"100% 僵住"】以前是 `if (asrProgress < 100) "抽音轨中… X%" else "云端识别中…"`
+                                    // ⇒ 抽完一瞬间进度就满了，可transcribe（上传+云端识别）期间
+                                    // **一个数都不再上报** ⇒「100%」或「云端识别中…」僵在那儿不动，
+                                    // 阿亮反馈"停了好久，以为没成功 / 以为卡死了"，新用户尤其会以为 App 挂了。
+                                    // 现在有 asrStage 时说清"这一步在干嘛"，不再靠一个不动的数字表达"在忙"。
+                                    when {
+                                        asrStage != null -> asrStage!!
+                                        asrProgress < 100 -> "抽音轨中… $asrProgress%"
+                                        else -> "识别中…"
+                                    },
                                     style = MaterialTheme.typography.labelMedium,
                                 )
                             }
@@ -1237,7 +1271,6 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
  *  高度/宽度都不写死，由调用方的 matchParentSize 决定，因此功能键排被压扁/拉高时它自动跟随。 */
 internal fun BiliLinkInput(
     value: String,
-    status: String,
     onValueChange: (String) -> Unit,
     onSubmit: (String) -> Unit,
     onClose: () -> Unit,
@@ -1246,7 +1279,29 @@ internal fun BiliLinkInput(
     // 【1002 修】没视频时输入框是唯一入口，× 点了会把自己关到"只剩一句提示"的空页
     // ⇒ 没视频时隐藏 ×（调用方传 hasVideo）。
     showClose: Boolean = true,
+    // 【1003 加】自动预填剪贴板里的 B站 链接。
+    // 为什么需要：以前**唯一**的提交途径是键盘回车（KeyboardActions onDone），
+    // 而输入行里唯一的圆按钮是「收起 ×」—— 键盘一弹起来 × 还被顶出可视区，
+    // 提交动作零视觉提示（1003 阿亮指出"按钮不够明显"，我实测也先点错成收起）。
+    // 从 B站 复制链接过来 → 唤出输入框 → 直接点抓取。
+    prefillFromClipboard: String? = null,
 ) {
+    // 只认"看着像 B站 视频"的内容。判据必须严：认错了会把你复制的别的文字
+    // （快递地址、聊天内容）糊进输入框，还得手动清掉再改——那比"不自动填"更糟。
+    // ⇒ bilibili.com / b23.tv / BV[0-9A-Za-z]{8,} 三者命中其一才填。
+    // ⚠️ 注意：系统粘贴板（长按输入框弹出的那排历史）**照旧由系统管**，
+    // 1003 阿亮实测：点一下弹系统粘贴板、点条目才填进去，这个交互没问题、不用改。
+
+    LaunchedEffect(prefillFromClipboard) {
+        val raw = prefillFromClipboard?.trim().orEmpty()
+        if (raw.isEmpty() || value.isNotBlank()) return@LaunchedEffect
+        val looksLikeBili = raw.contains("bilibili.com", ignoreCase = true) ||
+            raw.contains("b23.tv", ignoreCase = true) ||
+            Regex("""(?i)\bBV[0-9A-Za-z]{8,}""").containsMatchIn(raw)
+        if (looksLikeBili) onValueChange(raw)
+    }
+    val canSubmit = value.isNotBlank()
+
     Surface(
         shape = cardShape,
         color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
@@ -1305,6 +1360,36 @@ internal fun BiliLinkInput(
                     }
                 }
                 // 关闭钮：与功能键同样的圆形浅色底，整排风格一致
+                // 【1003 加】显式「抓取」键：以前只能靠键盘回车，键盘一弹起连 × 都看不见，
+                // 提交动作没有任何视觉提示（实测先点错成收起）。现在两条路并存：
+                // 键盘回车照旧，这个键负责"看得见的那个"。
+                // 空内容时置灰（alpha 0.3 + onSurfaceVariant 淡色）⇒ 不会误触发空抓取。
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    IconButton(
+                        onClick = { if (canSubmit) onSubmit(value) },
+                        enabled = canSubmit,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        Icon(
+                            // 【1003 换图标】原来用 ArrowUpward（↑），阿亮一看就说"像上传"——
+                            // 确实，↑ 在 UI 通用语义里是"向上/上传"，不是"提交"。
+                            // 换 KeyboardReturn（↵ 回车键符号）：跟键盘上真正触发提交的是同一个键，
+                            // 看到它就知道"按回车也能干这事"，两条提交路在视觉上对齐了。
+                            Icons.Filled.KeyboardReturn, contentDescription = "抓取",
+                            tint = if (canSubmit) {
+                                MaterialTheme.colorScheme.onPrimary
+                            } else {
+                                MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.35f)
+                            },
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
                 // 【1002 修】showClose=false（没视频）时不渲染 —— 输入槽 weight(1f) 自动占满整行。
                 if (showClose) {
                     Spacer(modifier = Modifier.width(8.dp))
@@ -1322,13 +1407,6 @@ internal fun BiliLinkInput(
                         }
                     }
                 }
-            }
-            if (status.isNotEmpty()) {
-                Text(
-                    status, style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp, bottom = 2.dp),
-                )
             }
         }
     }

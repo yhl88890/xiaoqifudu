@@ -199,6 +199,13 @@ internal var loopSentence by mutableStateOf(false)
 internal var recognizing by mutableStateOf(false)
 internal var asrMsg by mutableStateOf("")
 internal var asrProgress by mutableStateOf(0)
+// 【1003 加】当前正在做**哪一步**（抽音轨 / 上传识别 / 合并…）。
+// 为什么需要：asrProgress 只在抽音轨时上报，transcribe（上传 + 云端识别，几分钟）
+// 期间一个数都不报 ⇒ 100% 会**僵在那不动**，阿亮反馈"让人以为没成功/卡死了"，
+// 新用户尤其会以为 App 挂了。
+// 这里给"卡住的那段"一个会动的表达：数字换成"步骤名 + 已用秒数"，让用户知道还活着。
+// null = 不在识别流程里。
+internal var asrStage by mutableStateOf<String?>(null)
 internal var videoSpeed by mutableStateOf(1f)
     // 视频播放器声明见文件顶部（进程级，跨 Activity 重建存活）。
 /** 【0903 黑屏修复】视频播放/加载错误信息：MediaPlayer onError 时设上，视频窗口显示醒目的错误卡片（替代静默黑屏）。
@@ -392,12 +399,18 @@ internal fun loadVideoPrefs(context: Context) {
     if (uriStr.isBlank()) return
     val uri = Uri.parse(uriStr)
     val path = sp.getString("path", "") ?: ""
-    // 两种 Uri 要分开判断，否则从文件管理器选的视频下次启动会恢复不了：
+    // 三种 Uri 要分开判断，否则有一类会**永远恢复不了**（1003 实测踩中）：
     //   媒体库 Uri（content://media/external/video/media/<id>）：有 READ_MEDIA_VIDEO 就能读，
     //     不需要长期授权，只要文件还在磁盘上就行。
-    //   老版本存的 SAF / PhotoPicker Uri：必须校验长期授权是否还握在手里。
+    //   file://（B站 导入等本地文件，openVideoFileByPath 用 Uri.fromFile 存的）：
+    //     🔴 绝不能走下面那条 SAF 分支！persistedUriPermissions 只装 SAF/PhotoPicker 的授权，
+    //     file:// 永远不在里面 ⇒ persisted 恒 false ⇒ 每次冷启都提前 return、视频现场全丢，
+    //     表现就是"每次更新完都要重新选视频"（更新必冷启，冷启必走这条路）。只判文件还在不在。
+    //   SAF / PhotoPicker Uri：必须校验长期授权是否还握在手里。
     if (uriStr.startsWith("content://media/")) {
         if (path.isNotBlank() && !java.io.File(path).exists()) return   // 文件已被删/移走，别恢复
+    } else if (uriStr.startsWith("file://")) {
+        if (path.isNotBlank() && !java.io.File(path).exists()) return   // 本地文件被删/移走
     } else {
         val persisted = context.contentResolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
         if (!persisted) return
@@ -588,6 +601,8 @@ private fun videoGenerateLyrics(context: Context) {
     recognizing = true
     asrProgress = 0
     asrMsg = ""
+    // 【1003】新一次识别开始 ⇒ 清掉上一轮残留的阶段名，否则 UI 会一直显示"上传识别中"
+    asrStage = null
     // 重新生成：先清空旧字幕，逐段识别时再边生成边显示
     // 🔴 【1003 P1】原来只清了 sentences、**没重置 videoSentenceIndexGlobal**
     // ⇒ 暂停在第 150 句时点重新生成，索引还是 150 而列表已空/很短，
@@ -616,6 +631,7 @@ private fun videoGenerateLyrics(context: Context) {
                     splitLongSentences(merged, res.sentences, emptyList<LrcLine>())
             } else emptyList()
             recognizing = false
+            asrStage = null   // 【1003】真识别结束，清掉阶段名
             if (finalSentences.isNotEmpty()) {
                 sentences = finalSentences
                 srtName = "生成字幕"
@@ -639,6 +655,7 @@ private fun videoGenerateLyrics(context: Context) {
             }
         } catch (t: Throwable) {
             recognizing = false
+            asrStage = null   // 【1003】真识别结束，清掉阶段名
             asrMsg = "识别出错：${t.message ?: t.javaClass.simpleName}"
         }
     }
@@ -646,12 +663,22 @@ private fun videoGenerateLyrics(context: Context) {
 
 /** 进度回调跑在 IO 线程，统一 post 回主线程更新快照状态，避免跨线程写 */
 private fun postAsrProgress(p: Int) {
-    android.os.Handler(android.os.Looper.getMainLooper()).post { asrProgress = p.coerceIn(0, 100) }
+    android.os.Handler(android.os.Looper.getMainLooper()).post {
+        asrProgress = p.coerceIn(0, 100)
+        // 有进度在动 ⇒ 就是抽音轨阶段。100% 之后再收到进度只可能是收尾，别抢"上传"的话头
+        if (asrProgress < 100) asrStage = null
+    }
+}
+
+/** 设置当前阶段文案（抽音轨有百分比，所以进度一旦 <100 就清掉阶段名，让百分比露出来） */
+private fun postAsrStage(s: String?) {
+    android.os.Handler(android.os.Looper.getMainLooper()).post { asrStage = s }
 }
 
 /** 整段识别（短视频路径）。抽出上限跟着服务商走（见 [segmentMsFor]） */
 private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key: String): VideoAsrResult {
     val wav = java.io.File(context.cacheDir, "xuanji_video_asr.wav")
+    postAsrStage(null)
     val err = withContext(Dispatchers.IO) {
         VideoAudioExtractor.extractToWav(
             context, videoUri!!, wav.absolutePath,
@@ -661,9 +688,14 @@ private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key:
         )
     }
     if (err != null) { runCatching { wav.delete() }; return VideoAsrResult(emptyList(), err, emptyList()) }
-        postAsrProgress(100)
-        val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
-        val silencePoints = withContext(Dispatchers.IO) { SentenceSplitter.silenceBoundariesMs(wav.absolutePath) }
+    postAsrProgress(100)
+    // 【1003 修"100% 僵住"】下面这行 transcribe = 上传 + 云端识别，短音频十几秒、
+    // 长音频能到几分钟，此前 asrProgress 已经 100% 且再无更新 ⇒ 界面数字死在那儿，
+    // 看着像卡死/没成功。改成说清"正在上传识别"，让用户知道这步在跑。
+    postAsrStage("上传并识别中")
+    val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
+    val silencePoints = withContext(Dispatchers.IO) { SentenceSplitter.silenceBoundariesMs(wav.absolutePath) }
+    postAsrStage(null)
         runCatching { wav.delete() }
         return when (outcome) {
             is AsrOutcome.Timed -> {
@@ -698,6 +730,7 @@ private suspend fun recognizeBySegments(
         val span = endMs - startMs
         val wav = java.io.File(context.cacheDir, "xuanji_video_seg$i.wav")
         asrMsg = "第 ${i + 1}/$n 段：抽音轨中…"
+        postAsrStage(null)
         val err = withContext(Dispatchers.IO) {
             VideoAudioExtractor.extractToWav(
                 context, videoUri!!, wav.absolutePath, startMs * 1000, endMs * 1000,
@@ -707,8 +740,13 @@ private suspend fun recognizeBySegments(
         }
         if (err != null) { runCatching { wav.delete() }; continue }
         asrMsg = "第 ${i + 1}/$n 段：识别中…"
+        // 【1003】本段抽完、进入上传+云端识别时，把该段终点百分比钉住并给阶段名
+        // ⇒ 顶栏不再显示一个"永远不动"的数，而是"第 i/n 段 · 上传识别中"。
+        postAsrProgress(((i + 1) * 100) / n)
+        postAsrStage("第 ${i + 1}/$n 段上传识别中")
         val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
         val segSil = if (outcome is AsrOutcome.Timed) withContext(Dispatchers.IO) { SentenceSplitter.silenceBoundariesMs(wav.absolutePath) } else emptyList()
+        postAsrStage(null)
         runCatching { wav.delete() }
         if (outcome is AsrOutcome.Timed) {
             okSeg++
@@ -745,6 +783,7 @@ private suspend fun recognizeBySegments(
             // 前面成功过、且这次只失败了一段 → 当成零星失败，跳过继续跑后面的段
             skipped = true   // 但这段的字幕确实缺了，最后要标记残缺
         }
+        // 本段收尾：阶段名已在上面清掉，这里只把全局百分比推到位
         postAsrProgress(((i + 1) * 100) / n)
     }
     return VideoAsrResult(
@@ -1417,6 +1456,10 @@ class MainActivity : ComponentActivity() {
                         Text(
                             text = when {
                                 !genActive -> "生成字幕"
+                                // 【1003 修"100% 僵住"】asrStage 非空 = 现在卡在"上传+云端识别"
+                                // （asrProgress 此时已满且不再变）。以前这里恒显示"识别中 100%"，
+                                // 一个数停几十分钟像卡死；现在直接把阶段说出来。
+                                asrStage != null -> asrStage!!
                                 isVideoMode -> "识别中 $asrProgress%"
                                 state.recognizeProgress.isNotEmpty() -> "识别中 ${state.recognizeProgress}"
                                 else -> "识别中…"
