@@ -181,6 +181,12 @@ import kotlinx.coroutines.isActive
 
 // ===== 视频模式 UI 状态：提升到文件级(进程内常驻),切页面/旋转不丢,回视频页自动续播 =====
 internal var videoUri by mutableStateOf<Uri?>(null)
+/** 【1003 加保险】上次启动**没能**把视频现场恢复出来（文件被删/ 授权丢失 / Uri 无法识别）。
+ *  true 时 saveVideoPrefs 一律跳过 ⇒ **保住 SP 里原有的 uri/path/srt/sentences 不被空值覆盖**。
+ *  为什么需要：App 启动时 page 还是默认 PLAYER，LaunchedEffect(page) 会无条件存一次盘，
+ *  若此刻 videoUri 是 null 就会把现场写空、再也回不来（1003 实测丢了mean girls 现场）。
+ *  恢复成功 / 用户主动选了新视频（openVideo*）时置回 false。 */
+internal var videoRestoreFailed = false
 /** 视频的真实文件路径：从文件管理器选视频时才有。有了它就能直接读同目录 .srt（不再靠猜 Uri） */
 internal var videoPath by mutableStateOf("")
 internal var videoName by mutableStateOf("")
@@ -360,6 +366,10 @@ private const val CRASH_MAX_IN_WINDOW = 5      // 窗口内崩这么多次就说
 // 否则每重建一次就多嵌套一层 Looper，装多了会出问题
 private var crashGuardInstalled = false
 internal fun saveVideoPrefs(context: Context) {
+    // 🔴【1003 加保险】恢复失败时**直接不写**：此刻 videoUri 是 null，而启动时
+    // LaunchedEffect(page) 会无条件调一次本函数 ⇒ 写下去就是 uri/path/srt/sentences 全空
+    // ⇒ 现场永久清空。宁可这次不存（SP 里旧值还在，下次启动/文件回来还能救），也不能写空。
+    if (videoRestoreFailed) return
     context.getSharedPreferences(PREFS_VIDEO, Context.MODE_PRIVATE).edit().apply {
         putString("uri", videoUri?.toString() ?: "")
         putString("path", videoPath)
@@ -407,13 +417,19 @@ internal fun loadVideoPrefs(context: Context) {
     //     file:// 永远不在里面 ⇒ persisted 恒 false ⇒ 每次冷启都提前 return、视频现场全丢，
     //     表现就是"每次更新完都要重新选视频"（更新必冷启，冷启必走这条路）。只判文件还在不在。
     //   SAF / PhotoPicker Uri：必须校验长期授权是否还握在手里。
+    //
+    // 🔴【1003 加保险】下面每处提前 return 都标记 videoRestoreFailed=true。
+    // 为什么：App 启动时 page 还是默认 PLAYER，1258 行的 LaunchedEffect(page) 会**无条件**
+    // 跑一次 saveVideoPrefs，而它在 loadVideoPrefs 之后 ⇒ 一旦这里return，videoUri 是 null
+    // ⇒ 这次就把**空值写回 SP** ⇒ 现场永久清空、再也回不来（1003 实测：mean girls 现场就是这样没的）。
+    // ⇒ 失败时**只记不改**：保住 uri/path/srt/sentences 原样，下次启动/文件回来还能救。
     if (uriStr.startsWith("content://media/")) {
-        if (path.isNotBlank() && !java.io.File(path).exists()) return   // 文件已被删/移走，别恢复
+        if (path.isNotBlank() && !java.io.File(path).exists()) { videoRestoreFailed = true; return }
     } else if (uriStr.startsWith("file://")) {
-        if (path.isNotBlank() && !java.io.File(path).exists()) return   // 本地文件被删/移走
+        if (path.isNotBlank() && !java.io.File(path).exists()) { videoRestoreFailed = true; return }
     } else {
         val persisted = context.contentResolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
-        if (!persisted) return
+        if (!persisted) { videoRestoreFailed = true; return }
     }
     videoUri = uri
     videoPath = path
@@ -459,6 +475,8 @@ private fun clearVideoHandoffPrefs(context: Context) {
  *      对 PhotoPicker 的 Uri 根本不适用，所以同名字幕一直没生效。
  */
 internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: List<VideoItem> = emptyList()) {
+    // 【1003 加保险】用户主动选了新视频 ⇒ 上一轮"恢复失败"作废，恢复正常存盘
+    videoRestoreFailed = false
     // 打开/切换视频：先停掉后台音频服务的旧音频（冷启动自动续播的幽灵音），避免与视频双声
     PlayerService.instance?.stopAudioForVideo()
     videoUri = VideoScanner.uriFor(item.id)
@@ -512,6 +530,8 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
 /** 打开本地文件视频（B站导入等：文件已落 Download/XuanjiBili，无 MediaStore id，直接用 file Uri 打开）
  *  与 openVideoFromLibrary 同款：设置 URI/路径 + 自动载入同目录 .srt。 */
 private fun openVideoFileByPath(context: Context, file: File, siblings: List<VideoItem> = emptyList()) {
+    // 【1003 加保险】同上：用户主动选了新视频 ⇒ 恢复失败标志作废，恢复正常存盘
+    videoRestoreFailed = false
     videoUri = Uri.fromFile(file)
     videoPath = file.path
     videoName = fileNameWithoutExt(file.path)
