@@ -66,6 +66,8 @@ fun VocabPage(
     val entries by VocabStore.entries.collectAsStateWithLifecycle()
     var showClearConfirm by remember { mutableStateOf(false) }
     var showStats by remember { mutableStateOf(false) }
+    // 【1005 阿亮反馈】行内垃圾桶直接就删了，零提醒 ⇒ 先挂起待删条目，弹确认框再真删
+    var deleteTarget by remember { mutableStateOf<VocabEntry?>(null) }
 
     // ---- 筛选 / 搜索（0916：生词本超过 200 条后，翻列表找不到词）----
     // ⚠️ 刻意不持久化：每次进来都从「全部」开始。
@@ -305,7 +307,8 @@ fun VocabPage(
                 ) {
                     // key 用 id 而不是下标：删一条后下标会整体前移，Compose 会认错节点、行内状态错位
                     items(shown, key = { it.id }) { entry ->
-                        VocabEntryRow(entry = entry, onDelete = { VocabStore.remove(context, entry.id) })
+                        // 【1005】点垃圾桶先记下条目、弹确认，用户点头才真删（原来直接 VocabStore.remove）
+                        VocabEntryRow(entry = entry, onDelete = { deleteTarget = entry })
                     }
                 }
             }
@@ -335,6 +338,28 @@ fun VocabPage(
 
     if (showStats) {
         StatsPage(onBack = { showStats = false }, scrollState = statsScrollState)
+    }
+
+    // 【1005】行内删除确认：样式对齐"清空生词本"，确认键同样红色警示
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除生词") },
+            text = { Text("删除「${target.text}」？此操作不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteTarget = null
+                    VocabStore.remove(context, target.id)
+                }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) {
+                    Text("取消")
+                }
+            },
+        )
     }
 }
 

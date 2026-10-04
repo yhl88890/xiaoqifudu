@@ -559,9 +559,14 @@ object VocabReminder {
         )
 
         // 点通知 = 打开 App 并落到复习页（MainActivity 读 EXTRA_GOTO_REVIEW）
+        // 【1005 修"点通知不进复习"】requestCode 原来是 0，跟 PlayerService 媒体通知的
+        // contentIntent **完全同码**（同 requestCode + 同 component，extras 不参与匹配判定）
+        // ⇒ 两边又都用 FLAG_UPDATE_CURRENT ⇒ 播放过一次媒体后，媒体通知刷新就把本通知的
+        // goto_review extra **覆盖成裸 intent** ⇒ 点生词通知 App 只回前台、不跳复习。
+        // 改成独立 requestCode 后两条 PendingIntent 各自独立，互不覆盖。
         val content = PendingIntent.getActivity(
             ctx,
-            0,
+            1001,
             Intent(ctx, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 putExtra(EXTRA_GOTO_REVIEW, true)
