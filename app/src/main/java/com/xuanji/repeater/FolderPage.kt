@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -47,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -84,8 +86,19 @@ fun FolderPage(
     simplifiedHeader: Boolean = false,
     /** 点中一个视频：由外层决定怎么打开（视频模式会自动切过去播放） */
     onOpenVideo: (VideoItem, List<VideoItem>) -> Unit,
+    // 【v89 阿亮："滑到哪里，返回来还在哪里"】以下 4 个状态由 MainActivity 持有：
+    // when(page) 切页销毁本页组合后仍保留，回到选集时停在原来那层的原位置。
+    // 🔴 带自动跟随的列表不在本页，无跟随冲突。
+    /** 总览文件夹列表的滚动状态 */
+    folderOverviewListState: LazyListState = remember { LazyListState() },
+    /** 详情文件列表的滚动状态 */
+    folderFileListState: LazyListState = remember { LazyListState() },
+    /** 当前钻入的文件夹（null = 总览）。提层后从播放页回来不再掉回第一层 */
+    folderCurrent: MutableState<FolderItem?> = remember { mutableStateOf(null) },
+    /** 总览搜索词。提层保住：不然回来列表内容变了，滚动位置对不上条目 */
+    folderQueryState: MutableState<String> = remember { mutableStateOf("") },
 ) {
-    var currentFolder by remember { mutableStateOf<FolderItem?>(null) }
+    var currentFolder by folderCurrent
     var showIgnored by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableStateOf(0) }
     // 详情页里当前看哪一类。入口类型变了（比如从视频模式进来）就跟着变
@@ -132,6 +145,8 @@ fun FolderPage(
             onTypeChange = { mediaType = it },
             currentVideoPath = currentVideoPath,
             simplifiedHeader = simplifiedHeader,
+            // 【v89】详情文件列表滚动状态由 Activity 层持有
+            fileListState = folderFileListState,
             onBack = { currentFolder = null },
             onChanged = { refreshKey++ },
             onPlay = onBackToPlayer,
@@ -140,6 +155,9 @@ fun FolderPage(
         else -> FolderOverviewPage(
             context = context,
             refreshKey = refreshKey,
+            // 【v89】总览滚动状态 + 搜索词由 Activity 层持有：回来还停在原位置
+            folderListState = folderOverviewListState,
+            queryState = folderQueryState,
             onOpenFolder = { f ->
                 currentFolder = f
                 // 这个文件夹里只有视频没有音频时，直接落到视频那一栏，别让用户看着空列表发懵
@@ -155,13 +173,16 @@ fun FolderPage(
 private fun FolderOverviewPage(
     context: Context,
     refreshKey: Int,
+    // 【v89】滚动状态 / 搜索词由外部（MainActivity）持有：页面销毁重建后仍保留
+    folderListState: LazyListState = remember { LazyListState() },
+    queryState: MutableState<String> = remember { mutableStateOf("") },
     onOpenFolder: (FolderItem) -> Unit,
     onShowIgnored: () -> Unit,
 ) {
     var folders by remember { mutableStateOf<List<FolderItem>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var refreshTick by remember { mutableStateOf(0) }
-    var folderQuery by remember { mutableStateOf("") }
+    var folderQuery by queryState
     var ignoreTarget by remember { mutableStateOf<FolderItem?>(null) }
     var deleteTarget by remember { mutableStateOf<FolderItem?>(null) }
     var renameTarget by remember { mutableStateOf<FolderItem?>(null) }
@@ -343,6 +364,7 @@ displayFolders.isEmpty() -> Box(modifier = Modifier.fillMaxSize(), contentAlignm
     Text("未找到匹配的文件夹", color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 else -> LazyColumn(
+                    state = folderListState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(vertical = 6.dp),
                 ) {
@@ -541,6 +563,8 @@ private fun FolderDetailPage(
     onChanged: () -> Unit,
     onPlay: () -> Unit,
     onOpenVideo: (VideoItem, List<VideoItem>) -> Unit,
+    // 【v89】文件列表滚动状态由外部（MainActivity）持有：页面销毁重建后仍保留
+    fileListState: LazyListState = remember { LazyListState() },
 ) {
     var audios by remember { mutableStateOf(folder.audios) }
     var videos by remember { mutableStateOf(folder.videos) }
@@ -868,6 +892,7 @@ private fun FolderDetailPage(
             }
         } else {
             LazyColumn(
+                state = fileListState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(vertical = 6.dp),
             ) {

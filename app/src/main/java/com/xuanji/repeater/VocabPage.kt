@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,7 +53,14 @@ import java.util.Locale
  * 数据由 VocabStore（JSON 持久化 + StateFlow）驱动。
  */
 @Composable
-fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
+fun VocabPage(
+    onBack: () -> Unit,
+    onReview: () -> Unit = {},
+    // 【v89 阿亮："滑到哪里，返回来还在哪里"】生词列表滚动状态 + 统计页滚动状态由外部持有：
+    // 生词本 ⇄ 复习 / 统计 来回切不再跳顶。
+    listState: LazyListState = remember { LazyListState() },
+    statsScrollState: ScrollState = remember { ScrollState(0) },
+) {
     val context = LocalContext.current
     VocabStore.ensureLoaded(context)
     val entries by VocabStore.entries.collectAsStateWithLifecycle()
@@ -290,6 +299,7 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
                 }
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 ) {
@@ -324,7 +334,7 @@ fun VocabPage(onBack: () -> Unit, onReview: () -> Unit = {}) {
     }
 
     if (showStats) {
-        StatsPage(onBack = { showStats = false })
+        StatsPage(onBack = { showStats = false }, scrollState = statsScrollState)
     }
 }
 

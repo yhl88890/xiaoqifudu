@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -91,6 +92,11 @@ fun ReadingPage(
     // 该视图就是原来的「全部」（合并播放历史：音频+视频都列、可点播），
     // 只是入口从「一排 tab 里的第三个」搬到了顶栏按钮 —— 音频进阅读、视频进阅读都能用。
     libraryRequest: androidx.compose.runtime.MutableState<Boolean>? = null,
+    // 【v89 阿亮："滑到哪里，返回来还在哪里"】正文句子列表滚动状态由外部（MainActivity）持有：
+    // 音频源阅读切页回来不再跳顶。
+    // 🔴 视频源阅读的「进页定位到当前句」LaunchedEffect 保持原样（跟随优先，阿亮 1005 定），
+    // 传默认值时行为与旧版完全一致。
+    listState: LazyListState = rememberLazyListState(),
 ) {
     val context = LocalContext.current
     VocabStore.ensureLoaded(context)
@@ -126,7 +132,8 @@ fun ReadingPage(
     val activeIndex = videoSource?.activeIndex ?: state.activeSentenceIndex
 
     val hasLyrics = state.lyrics.isNotEmpty()
-    val listState = rememberLazyListState()
+    // 【v89】listState 改由外部传入（默认 rememberLazyListState() 保持兼容），本行删除：
+    // val listState = rememberLazyListState()
     // 「播放中高亮句自动滚动」由 SentenceListPane 内部统一负责（activeIndex 已归到正确来源），
     // 这里不再重复一遍 —— 之前两处各写一份，正是「改一处忘一处」的来源。
     LaunchedEffect(Unit) {

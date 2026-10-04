@@ -133,6 +133,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -1220,6 +1221,21 @@ class MainActivity : ComponentActivity() {
         // 选集页滚动位置：提升到 Activity 层，页面切换（组合销毁/重建）后仍保留。
         // rememberSaveable 在这里有效：Activity 重建/旋转时也恢复。
         val trackListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+        // 【v89 阿亮："滑到哪里，返回来还在哪里"】各列表滚动位置 / 选集导航层级同样提到 Activity 层。
+        // 病根：when(page) 切页 = 页面组合销毁，页面内部 remember 的滚动状态跟着没了，回来就从顶部开始。
+        // 药方与 trackListState 同款。🔴 带自动跟随当前句的列表（视频字幕列表、视频源阅读正文）**不动**，
+        // 仍由页面内部管理 —— 跟随优先，位置记忆反而添乱（阿亮 1005 定）。
+        val folderOverviewListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+        val folderFileListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+        val readingListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+        val vocabListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+        val settingsScrollState = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
+        val statsScrollState = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
+        // 选集「在哪个文件夹里 / 搜索词」：普通 remember 就够 —— 只需要活过 when 分支切换；
+        // 用 mutableStateOf 包一层传给 FolderPage，页面销毁重建后导航层级不丢。
+        // （不保 mediaType tab：FolderPage 首组合的 LaunchedEffect(initialType) 会按入口重置，保持原行为。）
+        val folderCurrent = remember { mutableStateOf<FolderItem?>(null) }
+        val folderQueryState = remember { mutableStateOf("") }
 
         // 服务绑定完成后：恢复上次播放现场（服务内部判断已有播放内容时跳过）
         LaunchedEffect(svc) {
@@ -1537,6 +1553,9 @@ class MainActivity : ComponentActivity() {
                         Page.READING -> ReadingPage(
                             svc = svc,
                             state = state,
+                            // 【v89】正文句子列表滚动状态由 Activity 层持有（音频源阅读切页不再跳顶）；
+                            // 视频源阅读的「定位当前句」LaunchedEffect 保持原样，跟随行为不变。
+                            listState = readingListState,
                             onOpenVocab = { page = Page.VOCAB },
                             // 【结构·阶段1】视频源收成一个对象（null = 音频阅读）。
                             // 以前是 5 个参数分开传，容易「标志说在放视频、字幕却没给」。
@@ -1601,6 +1620,8 @@ class MainActivity : ComponentActivity() {
                         Page.VOCAB -> VocabPage(
                             onBack = { page = Page.READING },
                             onReview = { page = Page.REVIEW },
+                            listState = vocabListState,
+                            statsScrollState = statsScrollState,
                         )
                         Page.REVIEW -> ReviewPage(onBack = { page = Page.VOCAB })
                         Page.FOLDER -> FolderPage(
@@ -1612,6 +1633,11 @@ class MainActivity : ComponentActivity() {
                             currentVideoPath = videoPath,
                             jumpToCurrentVideoFolder = videoSelectJump,
                             simplifiedHeader = videoSelectJump,
+                            // 【v89】滚动位置 + 导航层级由 Activity 层持有：进出选集不再跳顶
+                            folderOverviewListState = folderOverviewListState,
+                            folderFileListState = folderFileListState,
+                            folderCurrent = folderCurrent,
+                            folderQueryState = folderQueryState,
                             onOpenVideo = { item, siblings ->
                                 // 选中视频 → 自动跳视频模式开播（音频那边同理，选音频回播放页）
                                 // siblings = 同级视频列表，供上一曲/下一曲在文件夹内切换
@@ -1656,6 +1682,8 @@ class MainActivity : ComponentActivity() {
                 floatOn = floatOn,
                 resumeOn = resumeOn,
                 layoutEdit = layoutEdit,
+                // 【v89】设置页滚动位置 Activity 层持有：关掉重开不再跳顶
+                scrollState = settingsScrollState,
                 onThemeIndexChange = onThemeIndexChange,
                 onDarkModeChange = onDarkModeChange,
                 onFloatChange = {

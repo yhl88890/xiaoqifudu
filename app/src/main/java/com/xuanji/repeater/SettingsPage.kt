@@ -14,6 +14,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -110,6 +111,9 @@ fun SettingsPage(
     onResumeChange: (Boolean) -> Unit,
     onLayoutEditChange: (Boolean) -> Unit,
     onBack: () -> Unit,
+    // 【v89 阿亮："滑到哪里，返回来还在哪里"】滚动状态由外部（MainActivity）持有：
+    // 设置页关掉重开（或从复习通知跳走再回来）不再跳顶。
+    scrollState: ScrollState = rememberScrollState(),
 ) {
     // 独立页面：系统返回键直接回上一页（不再需要 BottomSheet 那套 hide() 动画 hack）
     BackHandler { onBack() }
@@ -130,7 +134,7 @@ fun SettingsPage(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             val context = LocalContext.current

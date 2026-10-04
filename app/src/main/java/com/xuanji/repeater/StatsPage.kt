@@ -1,5 +1,6 @@
 package com.xuanji.repeater
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,7 +44,11 @@ import java.util.Calendar
  * 颜色全部走 MaterialTheme.colorScheme，跟随深浅主题，不写死任何色值。
  */
 @Composable
-fun StatsPage(onBack: () -> Unit) {
+fun StatsPage(
+    onBack: () -> Unit,
+    // 【v89】滚动状态由外部（VocabPage ← MainActivity）持有：重开不再跳顶
+    scrollState: ScrollState = rememberScrollState(),
+) {
     val context = LocalContext.current
     VocabStore.ensureLoaded(context)
     val entries by VocabStore.entries.collectAsStateWithLifecycle()
@@ -83,7 +88,7 @@ fun StatsPage(onBack: () -> Unit) {
                 }
 
                 Column(
-                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
+                    modifier = Modifier.fillMaxWidth().verticalScroll(scrollState).padding(16.dp),
                 ) {
                     // 概览卡片
                     Row(

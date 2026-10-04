@@ -147,8 +147,12 @@ object BiliImport {
             val key = AsrPrefs.loadKey(context)
             if (key.isBlank()) throw RuntimeException("未配置识别 Key：去设置页填写 ASR Key 才能自动识别无字幕视频。")
             val audioTmp = File(dir, "$safe._audio.m4a")
+            // 【1003 修"没动静"】原来这一行下载**一个字都不报**，上一句还写着
+            //「下载音频做语音识别…」就一路静默到下载完（几十秒~几分钟）⇒ 阿亮反馈
+            // "停了好久下边的小字才显示下载音频…让人以为没成功"。补一句更准确的进行态。
+            onProgress("正在下载音频…")
             BiliClient.downloadAudio(inputUrl, cookie, audioTmp)
-            onProgress("转换音频…")
+            onProgress("音频已下载，正在转换格式…")
             val wav = WavConverter.convertToWav(audioTmp, dir) { onProgress("转换音频 ${(it * 100).toInt()}%") }
             audioTmp.delete()
             // 先定服务商：切片大小要按它给（切出来的每片必须能过 transcribe 的上传闸门）
@@ -158,7 +162,11 @@ object BiliImport {
             )
             val merged = mutableListOf<AsrSegment>()
             var offsetMs = 0L
-            for (c in chunks) {
+            for ((ci, c) in chunks.withIndex()) {
+                // 【1003 修"没动静"】每片识别前报一次"第几片/共几片"。
+                // 单片 transcribe 短视频十几秒、长片能几分钟，此前整个循环**零输出**，
+                // 与"下载/转换"那两段一样的毛病：界面看着像死了。
+                onProgress("识别中 ${ci + 1}/${chunks.size}…")
                 val out = SpeechRecognizer.transcribe(c.absolutePath, provider, key)
                     ?: throw RuntimeException("语音识别失败（网络/超时/文件超限），请稍后重试。")
                 when (out) {
