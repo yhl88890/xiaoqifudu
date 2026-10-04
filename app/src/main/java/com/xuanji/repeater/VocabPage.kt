@@ -1,8 +1,10 @@
 package com.xuanji.repeater
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -75,6 +78,14 @@ fun VocabPage(
     var selecting by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    // 【v92 阿亮定】多选模式下系统返回（三键返回键 / 全面屏侧滑）= 退出多选回生词本，
+    // **不是**退出生词本页 —— 不拦的话按一下返回直接出页面了，选择全白选。
+    // 顶栏「<」和行上左滑走同一个逻辑，三条路干同一件事。
+    BackHandler(enabled = selecting) {
+        selecting = false
+        selectedIds = emptySet()
+    }
 
     // ---- 筛选 / 搜索（0916：生词本超过 200 条后，翻列表找不到词）----
     // ⚠️ 刻意不持久化：每次进来都从「全部」开始。
@@ -356,6 +367,11 @@ fun VocabPage(
                                 selecting = true
                                 selectedIds = selectedIds + entry.id
                             },
+                            // 【v92 阿亮定】多选中行上向左滑过阈值 = 退出多选回生词本（顶栏「<」/系统返回同逻辑）
+                            onSwipeLeft = {
+                                selecting = false
+                                selectedIds = emptySet()
+                            },
                         )
                     }
                 }
@@ -393,7 +409,8 @@ fun VocabPage(
     }
 }
 
-/** 单条生词卡片：文本 + 翻译 + 来源/时间。长按进多选，多选中点击切换选中（【1005 阿亮定】） */
+/** 单条生词卡片：文本 + 翻译 + 来源/时间。长按进多选，多选中点击切换选中（【1005 阿亮定】）；
+ *  多选中向左滑过阈值 = 退出多选（【v92 阿亮定】）。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun VocabEntryRow(
@@ -402,6 +419,7 @@ private fun VocabEntryRow(
     selecting: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onSwipeLeft: () -> Unit = {},
 ) {
     Surface(
         shape = RoundedCornerShape(14.dp),
@@ -413,6 +431,21 @@ private fun VocabEntryRow(
         Row(
             modifier = Modifier
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .pointerInput(selecting) {
+                    // 【v92 阿亮定】多选模式下，行上向左拖累计超 200px ≈ 屏宽 1/5 → 退出多选。
+                    // 与点击/长按不冲突（tap 与 drag 手势各自判定：动过 touch slop 的 tap 自动取消）；
+                    // 与列表垂直滚动不冲突（LazyColumn 只消费垂直拖动，水平方向的落到这里）。
+                    // selecting=false 时 pointerInput key 变化重启 block，直接结束 = 不挂监听。
+                    if (selecting) {
+                        var totalDrag = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { totalDrag = 0f },
+                            onDragEnd = { if (totalDrag < -200f) onSwipeLeft() },
+                        ) { _, dragAmount ->
+                            totalDrag += dragAmount
+                        }
+                    }
+                }
                 .padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
