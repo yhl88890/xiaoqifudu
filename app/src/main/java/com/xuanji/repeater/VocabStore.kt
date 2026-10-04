@@ -207,6 +207,14 @@ object VocabStore {
         scope.launch { persist(context) }
     }
 
+    /** 【1005 阿亮：长按多选删除】一次删一批，只写一次盘（循环调 remove 会 persist N 次） */
+    fun removeMany(context: Context, ids: Collection<Long>) {
+        if (ids.isEmpty()) return
+        val s = ids.toSet()
+        _entries.value = _entries.value.filterNot { it.id in s }
+        scope.launch { persist(context) }
+    }
+
     /**
      * 【0916】记一次复习结果。
      * @param known true = 认识（连续次数 +1，攒够 [VocabEntry.MASTERED_AT] 算掌握）

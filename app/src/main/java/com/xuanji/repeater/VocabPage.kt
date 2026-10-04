@@ -1,6 +1,8 @@
 package com.xuanji.repeater
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,9 +51,13 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 生词本页：展示收藏的单词与句子（含翻译、来源、时间），支持删除与清空。
+ * 生词本页：展示收藏的单词与句子（含翻译、来源、时间）。
+ * 删除交互（【1005 阿亮定】）：**长按生词进入多选**，可全选/多选后批量删除；
+ * 行内垃圾桶和右上角"清空"已删 —— 全选+删除等价于清空，界面更清爽。
+ * 右上角改为「复习」入口（原来在概览行中间）。
  * 数据由 VocabStore（JSON 持久化 + StateFlow）驱动。
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun VocabPage(
     onBack: () -> Unit,
@@ -64,10 +70,11 @@ fun VocabPage(
     val context = LocalContext.current
     VocabStore.ensureLoaded(context)
     val entries by VocabStore.entries.collectAsStateWithLifecycle()
-    var showClearConfirm by remember { mutableStateOf(false) }
     var showStats by remember { mutableStateOf(false) }
-    // 【1005 阿亮反馈】行内垃圾桶直接就删了，零提醒 ⇒ 先挂起待删条目，弹确认框再真删
-    var deleteTarget by remember { mutableStateOf<VocabEntry?>(null) }
+    // ---- 多选删除（【1005 阿亮定】长按进多选，全选/多选后批量删）----
+    var selecting by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     // ---- 筛选 / 搜索（0916：生词本超过 200 条后，翻列表找不到词）----
     // ⚠️ 刻意不持久化：每次进来都从「全部」开始。
@@ -107,47 +114,44 @@ fun VocabPage(
             modifier = Modifier.fillMaxWidth().height(48.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) {
-                Icon(XuanjiIcons.Back, contentDescription = "返回")
-            }
-            Spacer(modifier = Modifier.weight(1f))
-            TextButton(
-                onClick = { showClearConfirm = true },
-                enabled = entries.isNotEmpty(),
-            ) {
-                Icon(
-                    XuanjiIcons.Delete,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("清空")
-            }
-        }
-
-        if (entries.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (selecting) {
+                // ---- 多选模式顶栏：返回(退出多选) + 已选 N + 全选 + 删除 ----
+                IconButton(onClick = {
+                    selecting = false
+                    selectedIds = emptySet()
+                }) {
+                    Icon(XuanjiIcons.Back, contentDescription = "退出多选")
+                }
                 Text(
-                    text = "生词本还是空的",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
+                    text = "已选 ${selectedIds.size}",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(start = 4.dp),
                 )
-            }
-        } else {
-            // ---- 概览 + 搜索 + 筛选档（0916）----
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, bottom = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(
-                    onClick = { showStats = true },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
-                ) {
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = {
+                    // 全选 ⇄ 取消全选（针对当前筛选显示的条目）
+                    selectedIds = if (selectedIds.size == shown.size) emptySet() else shown.map { it.id }.toSet()
+                }) {
                     Text(
-                        text = "学习统计",
+                        text = if (selectedIds.size == shown.size && shown.isNotEmpty()) "取消全选" else "全选",
                         style = MaterialTheme.typography.labelMedium,
                     )
+                }
+                TextButton(
+                    onClick = { if (selectedIds.isNotEmpty()) showDeleteConfirm = true },
+                    enabled = selectedIds.isNotEmpty(),
+                ) {
+                    Text(
+                        text = "删除",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (selectedIds.isNotEmpty()) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                // ---- 常态顶栏：返回 + 右上角复习入口（【1005】从概览行挪上来，替掉原"清空"）----
+                IconButton(onClick = onBack) {
+                    Icon(XuanjiIcons.Back, contentDescription = "返回")
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 FilledTonalButton(
@@ -166,6 +170,34 @@ fun VocabPage(
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = if (pending > 0) "复习 $pending" else "复习",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+        }
+
+        if (entries.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = "生词本还是空的",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        } else {
+            // ---- 概览 + 搜索 + 筛选档（0916）----
+            // 【1005】复习入口挪到顶栏右上角（原"清空"位置）⇒ 这行只剩 学习统计 + 排序 + 搜索
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(
+                    onClick = { showStats = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                ) {
+                    Text(
+                        text = "学习统计",
                         style = MaterialTheme.typography.labelMedium,
                     )
                 }
@@ -307,29 +339,49 @@ fun VocabPage(
                 ) {
                     // key 用 id 而不是下标：删一条后下标会整体前移，Compose 会认错节点、行内状态错位
                     items(shown, key = { it.id }) { entry ->
-                        // 【1005】点垃圾桶先记下条目、弹确认，用户点头才真删（原来直接 VocabStore.remove）
-                        VocabEntryRow(entry = entry, onDelete = { deleteTarget = entry })
+                        // 【1005 阿亮定】长按进多选；多选中点击 = 切换选中。
+                        // 行内垃圾桶已删（删除统一走多选顶栏的「删除」）
+                        VocabEntryRow(
+                            entry = entry,
+                            selected = entry.id in selectedIds,
+                            selecting = selecting,
+                            onClick = {
+                                if (selecting) {
+                                    selectedIds = if (entry.id in selectedIds) selectedIds - entry.id
+                                    else selectedIds + entry.id
+                                }
+                            },
+                            onLongClick = {
+                                // 长按 = 进多选并选中这一条（再长按其他条继续加）
+                                selecting = true
+                                selectedIds = selectedIds + entry.id
+                            },
+                        )
                     }
                 }
             }
         }
     }
 
-    if (showClearConfirm) {
+    // 【1005 阿亮定】批量删除确认：样式对齐原"清空生词本"，确认键红色警示。
+    // 原「清空」入口已删 —— 全选 + 删除等价于清空（多一次确认反而更稳）。
+    if (showDeleteConfirm) {
         AlertDialog(
-            onDismissRequest = { showClearConfirm = false },
-            title = { Text("清空生词本") },
-            text = { Text("将删除全部 ${entries.size} 条生词，此操作不可恢复。") },
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("删除生词") },
+            text = { Text("删除所选 ${selectedIds.size} 条生词？此操作不可恢复。") },
             confirmButton = {
                 TextButton(onClick = {
-                    showClearConfirm = false
-                    VocabStore.clear(context)
+                    showDeleteConfirm = false
+                    VocabStore.removeMany(context, selectedIds)
+                    selectedIds = emptySet()
+                    selecting = false
                 }) {
-                    Text("清空", color = MaterialTheme.colorScheme.error)
+                    Text("删除", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showClearConfirm = false }) {
+                TextButton(onClick = { showDeleteConfirm = false }) {
                     Text("取消")
                 }
             },
@@ -339,43 +391,51 @@ fun VocabPage(
     if (showStats) {
         StatsPage(onBack = { showStats = false }, scrollState = statsScrollState)
     }
-
-    // 【1005】行内删除确认：样式对齐"清空生词本"，确认键同样红色警示
-    deleteTarget?.let { target ->
-        AlertDialog(
-            onDismissRequest = { deleteTarget = null },
-            title = { Text("删除生词") },
-            text = { Text("删除「${target.text}」？此操作不可恢复。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    deleteTarget = null
-                    VocabStore.remove(context, target.id)
-                }) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) {
-                    Text("取消")
-                }
-            },
-        )
-    }
 }
 
-/** 单条生词卡片：文本 + 翻译 + 来源/时间 + 删除 */
+/** 单条生词卡片：文本 + 翻译 + 来源/时间。长按进多选，多选中点击切换选中（【1005 阿亮定】） */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun VocabEntryRow(entry: VocabEntry, onDelete: () -> Unit) {
+private fun VocabEntryRow(
+    entry: VocabEntry,
+    selected: Boolean,
+    selecting: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp,
         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
     ) {
         Row(
-            modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
+            modifier = Modifier
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // 多选模式：左侧选中圈（选中 = 实心✓）
+            if (selecting) {
+                Surface(
+                    shape = androidx.compose.foundation.shape.CircleShape,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.size(22.dp),
+                ) {
+                    if (selected) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = "✓",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+            }
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // 🔴🔴 `weight(1f, fill = false)` 不能删（0917 阿亮报"句子没有角标也没有星"的根因）：
@@ -496,13 +556,7 @@ private fun VocabEntryRow(entry: VocabEntry, onDelete: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            IconButton(onClick = onDelete) {
-                Icon(
-                    XuanjiIcons.Delete,
-                    contentDescription = "删除",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            // 【1005】行内垃圾桶已删：删除统一走「长按 → 多选 → 顶栏删除」
         }
     }
 }
