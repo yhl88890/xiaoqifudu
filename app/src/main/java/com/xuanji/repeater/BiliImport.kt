@@ -363,9 +363,15 @@ object BiliImport {
         }
         onProgress("按 B站 时间轴细切：${raw.size} → ${cut.size} 句")
 
-        return cut.map { s ->
+        var out = cut.map { s ->
             SubLine(s.text, s.startMs / 1000.0, s.endMs / 1000.0, matchCn(cnLines, s.startMs / 1000.0, s.endMs / 1000.0))
-        }.also { if (it.any { l -> l.cn.isNotBlank() }) onProgress("已带上 B站 中文对照") }
+        }
+        // 【v94 补缺口】拼装产物仍可能有 >8s 长尾（相邻两个轨点间距大，TimelineRecut 只能切到轨点），
+        //   v93 只在三个退化出口挂了兜底，这条成功路径漏了 ⇒ 阿亮 v93 实测仍见超 8s 句。
+        //   recutLongByWaveform 幂等（只动 >8s 段），有长段才解码音频，无长段零开销。
+        val w = recutLongByWaveform(out, wavPath, onProgress)
+        if (w.size > out.size) out = w
+        return out.also { if (it.any { l -> l.cn.isNotBlank() }) onProgress("已带上 B站 中文对照") }
     }
 
     // ==================== 【v93 阿亮定】无轨兜底：ASR 超长段按波形静音细切 ====================
