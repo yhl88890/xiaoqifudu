@@ -189,6 +189,38 @@ object WavConverter {
         return if (chunks.isEmpty()) listOf(wav) else chunks
     }
 
+    /**
+     * 【v97】沿指定停顿点把 WAV 切成块（每块带合法头）。
+     * 与 splitWavIfNeeded（按大小硬切）不同：切点由调用方从波形静音谷挑出（真实停顿），
+     * 块边界不落在语音中间 ⇒ 每块单独识别时模型「看哪块识别哪块」，文本不会跨块串。
+     * 返回 (块文件, 块起点ms) 有序列表；cuts 为空/不合法时返回整条单块（文件原样、起点 0）。
+     * ⚠️ 前提：wav 必须是 convertToWav 的产物（16kHz/16bit/单声道/44 字节标准头）。
+     */
+    fun splitWavAtPoints(wav: File, cutsMs: List<Long>, outDir: File): List<Pair<File, Long>> {
+        val bytesPerMs = OUT_SAMPLE_RATE.toLong() * 2 * OUT_CHANNELS / 1000L
+        val totalMs = (wav.length() - 44) / bytesPerMs
+        val cuts = cutsMs.filter { it > 0 && it < totalMs }.distinct().sorted()
+        if (cuts.isEmpty()) return listOf(Pair(wav, 0L))
+        outDir.mkdirs()
+        val bounds = (listOf(0L) + cuts + listOf(totalMs)).distinct()
+        val out = mutableListOf<Pair<File, Long>>()
+        RandomAccessFile(wav, "r").use { raf ->
+            for (i in 0 until bounds.size - 1) {
+                val startB = 44 + bounds[i] * bytesPerMs
+                val endB = 44 + bounds[i + 1] * bytesPerMs
+                val take = (endB - startB).toInt()
+                if (take <= 0) continue
+                raf.seek(startB)
+                val data = ByteArray(take)
+                raf.readFully(data)
+                val f = File(outDir, "asr_blk_$i.wav")
+                writeWavFromData(f, data, OUT_SAMPLE_RATE, OUT_CHANNELS)
+                out.add(Pair(f, bounds[i]))
+            }
+        }
+        return if (out.isEmpty()) listOf(Pair(wav, 0L)) else out
+    }
+
     private fun resamplePcmFileToWav(
         pcmFile: File, wavOut: File, srcRate: Int, dstRate: Int, channels: Int,
         onProgress: (Float) -> Unit = {}

@@ -718,16 +718,28 @@ private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key:
     }
     if (err != null) { runCatching { wav.delete() }; return VideoAsrResult(emptyList(), err, emptyList()) }
     postAsrProgress(100)
-    // 【1003 修"100% 僵住"】下面这行 transcribe = 上传 + 云端识别，短音频十几秒、
-    // 长音频能到几分钟，此前 asrProgress 已经 100% 且再无更新 ⇒ 界面数字死在那儿，
-    // 看着像卡死/没成功。改成说清"正在上传识别"，让用户知道这步在跑。
-    postAsrStage("上传并识别中")
-    val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
-    // 【v95】静音点门槛 350→180ms：快语速素材句间停顿常 150~300ms，350 全漏 ⇒ 切点找不到、大段切不动
-    //   （与 BiliImport 波形兜底 WAVE_MIN_SILENCE_MS 一致）。切点只用于长句切分候选，放宽无副作用。
-    //   【v96】带静音长度：句间停顿(≥400ms)供边界吸附，换气口不碰。
+
+    // 静音谷（整条 wav 算一次，全局时间轴）：长句切分、块边界挑选共用
+    // 【v95】门槛 350→180ms：快语速素材句间停顿 150~300ms，350 全漏。
+    // 【v96】带静音长度：句间停顿(≥400ms)供边界吸附/挑块边界，换气口不碰。
     val silenceValleys = withContext(Dispatchers.IO) { SentenceSplitter.silenceValleysWithLen(wav.absolutePath, minSilenceMs = 180L) }
-    postAsrStage(null)
+
+    // 【v97】超过 3 分钟就沿句间停顿切块、逐块串行识别：
+    //   根治模型长音频「文本/时间错位」（and as always 串句案）——模型看哪块识别哪块，文本无法跨块串；
+    //   块内时间戳独立，不累积漂移。串行调用（同一时刻只有一个请求，无限流风险）；
+    //   每块识别完立即流式追加到 sentences（同 recognizeBySegments 的策略）。
+    val wavMs = (wav.length() - 44) / 32
+    val gapCenters = silenceValleys.filter { it.second >= SENTENCE_GAP_MS }.map { it.first }
+    val blocks = if (wavMs > BLOCK_TARGET_MS) {
+        val cuts = chooseBlockCuts(gapCenters, wavMs, BLOCK_TARGET_MS)
+        withContext(Dispatchers.IO) { WavConverter.splitWavAtPoints(wav, cuts, java.io.File(context.cacheDir, "xuanji_vblk")) }
+    } else listOf(Pair(wav, 0L))
+
+    if (blocks.size == 1) {
+        // 原整段路径（短视频）：模型对短音频时间戳可信
+        postAsrStage("上传并识别中")
+        val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
+        postAsrStage(null)
         runCatching { wav.delete() }
         return when (outcome) {
             is AsrOutcome.Timed -> {
@@ -737,6 +749,64 @@ private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key:
             is AsrOutcome.Plain -> VideoAsrResult(emptyList(), "识别未返回时间戳，建议改用「导入字幕」选 .srt", silenceValleys)
             null -> VideoAsrResult(emptyList(), "识别失败/超时（检查网络与 Key）", silenceValleys)
         }
+    }
+
+    // 多块路径（长音频）
+    val all = mutableListOf<Sentence>()
+    var note = ""
+    var consecFail = 0
+    var incomplete = false
+    for ((i, b) in blocks.withIndex()) {
+        postAsrStage("第 ${i + 1}/${blocks.size} 块上传识别中")
+        val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(b.first.absolutePath, provider, key) }
+        runCatching { b.first.delete() }
+        if (outcome !is AsrOutcome.Timed) {
+            consecFail++
+            note = "第 ${i + 1} 块识别失败"
+            // 连续两块失败就中止：网络/Key 问题会块块失败，继续烧请求没意义（对齐 recognizeBySegments）
+            if (consecFail >= 2) { incomplete = true; break }
+            continue
+        }
+        consecFail = 0
+        val blockSpan = ((blocks[i + 1].second - b.second).takeIf { i + 1 < blocks.size } ?: (wavMs - b.second))
+        val segSentences = outcome.segments.map {
+            // 相对时间戳 clamp 到本块内：防模型幻觉时间越界到下一块
+            val s = it.startMs.coerceIn(0, blockSpan)
+            val e = it.endMs.coerceAtLeast(s + 1).coerceAtMost(blockSpan)
+            Sentence(b.second + s, b.second + e, it.text.trim())
+        }.filter { it.text.isNotEmpty() && it.endMs > it.startMs }
+        all.addAll(segSentences)
+        // 流式展示：每块识别完立即追加到字幕列表，不用等全部识别完
+        if (segSentences.isNotEmpty()) sentences = sentences + segSentences
+    }
+    postAsrStage(null)
+    runCatching { wav.delete() }
+    if (all.isEmpty()) return VideoAsrResult(emptyList(), note.ifBlank { "识别失败/超时（检查网络与 Key）" }, silenceValleys)
+    return VideoAsrResult(all, note, silenceValleys, incomplete = incomplete)
+}
+
+/** 【v97】块目标时长 3 分钟：块内模型时间戳可信、块数少（10 分钟视频 = 4 块，串行无限流压力） */
+private const val BLOCK_TARGET_MS = 180_000L
+
+/**
+ * 【v97】挑块切点：目标块长 [target]，切点优先落在附近最近的句间停顿（不砍词）；
+ * ±60s 内没有放宽到 ±90s，再没有就在目标位置硬切（保底；词被劈开只影响该词识别，概率很低）。
+ */
+private fun chooseBlockCuts(gapCenters: List<Long>, totalMs: Long, target: Long): List<Long> {
+    val cuts = mutableListOf<Long>()
+    var pos = 0L
+    while (totalMs - pos > target * 5 / 4) {   // 尾巴不足一块半就不切了，留给最后一块
+        val want = pos + target
+        val c = gapCenters.filter { it > pos + target / 2 && it < want + 60_000 }
+            .minByOrNull { kotlin.math.abs(it - want) }
+            ?: gapCenters.filter { it > pos + 30_000 && it < want + 90_000 }
+                .minByOrNull { kotlin.math.abs(it - want) }
+        val cut = (c ?: want).coerceIn(pos + 30_000, totalMs - 30_000)
+        if (cut <= pos) break
+        cuts.add(cut)
+        pos = cut
+    }
+    return cuts
 }
 
 /** 分片识别（长视频路径）：逐段抽音轨+上传识别，段内相对时间戳 + 段起始偏移 = 全局时间戳，最后拼接 */
