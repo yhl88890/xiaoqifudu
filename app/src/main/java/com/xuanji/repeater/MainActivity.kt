@@ -596,11 +596,11 @@ private fun segmentMsFor(provider: AsrProvider): Long {
 /** 整段识别的时长阈值 = 一段的长度（短视频只要能塞进一段，就整段走，少一次拼接） */
 private fun wholeLimitMsFor(provider: AsrProvider): Long = segmentMsFor(provider)
 
-/** 视频 ASR 总结果：识别句 + 提示 + 音轨波形真实静音点(全局 ms)，后者供长句切分当切点 */
+/** 视频 ASR 总结果：识别句 + 提示 + 音轨波形静音谷(全局ms, 静音时长ms)，后者供长句切分/边界吸附 */
 private data class VideoAsrResult(
     val sentences: List<Sentence>,
     val note: String,
-    val silencePoints: List<Long>,
+    val silenceValleys: List<Pair<Long, Long>>,
     /**
      * 这份结果是不是**残缺**的（【0929 新增】）。
      *
@@ -642,14 +642,22 @@ private fun videoGenerateLyrics(context: Context) {
             else recognizeWhole(context, provider, key)
             // 统一在最后合并短句：分片段边界产生的半截短句也能跨段合并
             val merged = if (res.sentences.isNotEmpty()) mergeShortAsrSentences(res.sentences) else emptyList()
+            // 【v96】边界吸附：TeleSpeech 偶发把文本记进下一个 segment 而时间边界没跟着走
+            //   （实测：'and as always' 发音在上一句区间、文本在下句、下句 startMs 又跳到 'thank you'）。
+            //   把相邻两句的公共边界吸附到最近的句间停顿(≥400ms 长静音)，文本与声音对齐。
+            //   吸附目标只用长停顿（换气口不碰）；窗口/重叠保护见 snapBoundariesToSilence。
+            val allPoints = res.silenceValleys.map { it.first }
+            val gapCenters = res.silenceValleys.filter { it.second >= SENTENCE_GAP_MS }.map { it.first }
+            val snapped = if (merged.isNotEmpty() && gapCenters.isNotEmpty())
+                snapBoundariesToSilence(merged, gapCenters) else merged
             // 视频断句：用「音轨波形真实静音点」当切点（而非 ASR segment 间隙）。
             // 慢速教学音频 ASR 段少、段间间隙不够长，靠 segment 间隙切不动；波形静音点是真正停顿，
             // 长句(>6s 或 >40 字)能在最近静音点自然切开。取不到静音点再退回 gap 方案兜底。
-            val finalSentences = if (merged.isNotEmpty()) {
-                if (res.silencePoints.isNotEmpty())
-                    splitLongSentencesByPoints(merged, res.silencePoints, emptyList<LrcLine>())
+            val finalSentences = if (snapped.isNotEmpty()) {
+                if (allPoints.isNotEmpty())
+                    splitLongSentencesByPoints(snapped, allPoints, emptyList<LrcLine>())
                 else
-                    splitLongSentences(merged, res.sentences, emptyList<LrcLine>())
+                    splitLongSentences(snapped, res.sentences, emptyList<LrcLine>())
             } else emptyList()
             recognizing = false
             asrStage = null   // 【1003】真识别结束，清掉阶段名
@@ -717,16 +725,17 @@ private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key:
     val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
     // 【v95】静音点门槛 350→180ms：快语速素材句间停顿常 150~300ms，350 全漏 ⇒ 切点找不到、大段切不动
     //   （与 BiliImport 波形兜底 WAVE_MIN_SILENCE_MS 一致）。切点只用于长句切分候选，放宽无副作用。
-    val silencePoints = withContext(Dispatchers.IO) { SentenceSplitter.silenceValleysMs(wav.absolutePath, minSilenceMs = 180L) }
+    //   【v96】带静音长度：句间停顿(≥400ms)供边界吸附，换气口不碰。
+    val silenceValleys = withContext(Dispatchers.IO) { SentenceSplitter.silenceValleysWithLen(wav.absolutePath, minSilenceMs = 180L) }
     postAsrStage(null)
         runCatching { wav.delete() }
         return when (outcome) {
             is AsrOutcome.Timed -> {
                 val list = outcome.segments.map { Sentence(it.startMs, it.endMs, it.text.trim()) }.filter { it.text.isNotEmpty() }
-                VideoAsrResult(list, "", silencePoints)
+                VideoAsrResult(list, "", silenceValleys)
             }
-            is AsrOutcome.Plain -> VideoAsrResult(emptyList(), "识别未返回时间戳，建议改用「导入字幕」选 .srt", silencePoints)
-            null -> VideoAsrResult(emptyList(), "识别失败/超时（检查网络与 Key）", silencePoints)
+            is AsrOutcome.Plain -> VideoAsrResult(emptyList(), "识别未返回时间戳，建议改用「导入字幕」选 .srt", silenceValleys)
+            null -> VideoAsrResult(emptyList(), "识别失败/超时（检查网络与 Key）", silenceValleys)
         }
 }
 
@@ -739,7 +748,7 @@ private suspend fun recognizeBySegments(
     val maxBytes = SpeechRecognizer.maxUploadBytes(provider)
     val n = ((durMs + segmentMs - 1) / segmentMs).toInt().coerceAtLeast(1)
     val all = mutableListOf<Sentence>()
-    val allSilence = mutableListOf<Long>()   // 各段音轨波形静音点（加段偏移后拼成全局）
+    val allSilence = mutableListOf<Pair<Long, Long>>()   // 各段音轨波形静音谷（加段偏移后拼成全局）
     var tried = 0
     var okSeg = 0
     var skipped = false   // 有没有段被跳过（零星失败）：有 ⇒ 字幕中间缺了内容
@@ -769,7 +778,7 @@ private suspend fun recognizeBySegments(
         postAsrStage("第 ${i + 1}/$n 段上传识别中")
         val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
         // 【v95】同 718 行：门槛 350→180ms，快语速素材的长句才切得动
-        val segSil = if (outcome is AsrOutcome.Timed) withContext(Dispatchers.IO) { SentenceSplitter.silenceValleysMs(wav.absolutePath, minSilenceMs = 180L) } else emptyList()
+        val segSil = if (outcome is AsrOutcome.Timed) withContext(Dispatchers.IO) { SentenceSplitter.silenceValleysWithLen(wav.absolutePath, minSilenceMs = 180L) } else emptyList()
         postAsrStage(null)
         runCatching { wav.delete() }
         if (outcome is AsrOutcome.Timed) {
@@ -785,7 +794,7 @@ private suspend fun recognizeBySegments(
                 }
                 .filter { it.text.isNotEmpty() && it.endMs > it.startMs }
             all.addAll(segSentences)
-            allSilence.addAll(segSil.map { it + startMs })
+            allSilence.addAll(segSil.map { Pair(it.first + startMs, it.second) })
             // 流式展示：每识别完一段立即把这一段字幕追加到列表，不用等全部生成完才显示
             if (segSentences.isNotEmpty()) sentences = sentences + segSentences
         } else {

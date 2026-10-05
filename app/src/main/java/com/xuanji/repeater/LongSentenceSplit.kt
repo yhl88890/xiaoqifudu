@@ -52,6 +52,68 @@ internal fun splitLongSentencesByPoints(
     return sentences.flatMap { splitOneLong(it, silencePoints, lyrics) }
 }
 
+/** 句间停顿最短算多长：低于它的静音算句中换气，**不做吸附目标**（吸到换气口会把句子切在词中间）。 */
+internal const val SENTENCE_GAP_MS = 400L
+/** 边界吸附窗口：ASR 边界离最近句间停顿超过这个距离就不动（太远多半不是同一处停顿）。 */
+internal const val SNAP_WINDOW_MS = 2500L
+
+/**
+ * 【v96】ASR 段边界吸附到真实句间停顿。
+ *
+ * 为什么：TeleSpeech 偶发「文本记到下一个 segment、时间边界却没跟着走」——
+ * 实测（1005 阿亮真机）：'and as always' 的发音落在上一句区间内，文本却在下一句开头，
+ * 下一句 startMs 又设在 'thank you' ⇒ 点上一句会读到下句的词、点下一句跳过句头。
+ * 波形静音点是真实停顿（永远准）：把相邻两句的公共边界吸附到最近的句间停顿，
+ * 文本与声音自然对齐。前半段模型标得准的边界本来就在停顿上，吸附距离≈0，零影响。
+ *
+ * 保守策略：
+ *  · 吸附目标只用 ≥ [SENTENCE_GAP_MS] 的长静音（句间停顿），换气口不碰；
+ *  · 窗口 [SNAP_WINDOW_MS] 外不动；
+ *  · 吸附后 start ≥ end、或越过邻句边界 ⇒ 该边放弃吸附，回退原值。
+ */
+internal fun snapBoundariesToSilence(
+    sentences: List<Sentence>,
+    gapCenters: List<Long>,
+): List<Sentence> {
+    if (gapCenters.isEmpty() || sentences.isEmpty()) return sentences
+    val sorted = gapCenters.sorted()
+    val out = ArrayList<Sentence>(sentences.size)
+    for (idx in sentences.indices) {
+        val s = sentences[idx]
+        val prev = out.getOrNull(idx - 1)          // 前一句用吸附后的值判交叉
+        val nextRaw = sentences.getOrNull(idx + 1) // 后一句还没吸附，用原值
+        var startMs = snapOne(sorted, s.startMs) ?: s.startMs
+        var endMs = snapOne(sorted, s.endMs) ?: s.endMs
+        // 保护 1：长度为正
+        if (startMs >= endMs) { out.add(s); continue }
+        // 保护 2：不与已吸附的前句重叠
+        if (prev != null && startMs < prev.endMs) startMs = s.startMs.coerceAtLeast(prev.endMs)
+        if (startMs >= endMs) { out.add(s); continue }
+        // 保护 3：end 不越过下一句的原始起点（下一句起点之后它自己还会吸附）
+        if (nextRaw != null && endMs > nextRaw.startMs) endMs = s.endMs.coerceAtMost(nextRaw.startMs)
+        if (endMs <= startMs) { out.add(s); continue }
+        out.add(Sentence(startMs, endMs, s.text))
+    }
+    return out
+}
+
+/** 离 v 最近的吸附目标；距离超窗返回 null。 */
+private fun snapOne(sorted: List<Long>, v: Long): Long? {
+    var lo = 0
+    var hi = sorted.size - 1
+    var ans = -1
+    while (lo <= hi) {
+        val m = (lo + hi) / 2
+        if (sorted[m] >= v) { ans = m; hi = m - 1 } else lo = m + 1
+    }
+    val nearest = when {
+        ans < 0 -> sorted.last()
+        ans > 0 && v - sorted[ans - 1] < sorted[ans] - v -> sorted[ans - 1]
+        else -> sorted[ans]
+    }
+    return if (kotlin.math.abs(nearest - v) <= SNAP_WINDOW_MS) nearest else null
+}
+
 internal fun splitOneLong(s: Sentence, silences: List<Long>, lyrics: List<LrcLine>): List<Sentence> {
     // 空文本句（前奏/尾奏占位）：不切分，保持 1 行（纯音乐段再长也不碎）
     if (s.text.isEmpty()) return listOf(s)
