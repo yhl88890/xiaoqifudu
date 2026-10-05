@@ -128,8 +128,9 @@ object SentenceSplitter {
         return SplitResult(sentences, waveform, totalMs, rawSegments)
     }
 
-    /** 解码音频并按帧计算 RMS，返回 (帧能量序列, 总时长ms) */
-    private fun decodeRmsFrames(path: String, onProgress: (Float) -> Unit): Pair<FloatArray, Long> {
+    /** 解码音频并按帧计算 RMS，返回 (帧能量序列, 总时长ms)
+     *  【v93】改 internal：B站导入的"无轨兜底波形细切"（BiliImport.recutLongByWaveform）复用同一解码。 */
+    internal fun decodeRmsFrames(path: String, onProgress: (Float) -> Unit): Pair<FloatArray, Long> {
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(path)

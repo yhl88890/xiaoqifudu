@@ -34,6 +34,21 @@ object BiliImport {
      */
     private const val CC_TOO_COARSE_MS = 6000.0
 
+    // ---------- 【v93 阿亮定】无轨兜底：ASR 超长段按波形静音细切 ----------
+
+    /** 超过这个段长才值得动刀（与轨粗线 CC_TOO_COARSE_MS 同量级：轨那边 6s 也算粗）。 */
+    private const val WAVE_RECUT_LONG_MS = 8000.0
+
+    /**
+     * 兜底细切的最小静音门槛：快语速句间停顿常只有 150~300ms。
+     * 🔴 这是本函数自己的参数，**与 SentenceSplitter.MIN_SILENCE_MS(350) 无关**——
+     * 那个是慢速教学音频的基线（阿亮定调别动），两边各管各的，别合并。
+     */
+    private const val WAVE_MIN_SILENCE_MS = 180L
+
+    /** 切出的每片最短时长：比它短的静音谷不下刀（防切碎；复读场景 <2s 的段没意义）。 */
+    private const val WAVE_MIN_PIECE_MS = 2000L
+
     /** 一列字幕的平均段长（毫秒）。空表返回 0（⇒ 不会被判成"太粗"）。 */
     private fun avgSegMs(lines: List<SubLine>): Double {
         if (lines.isEmpty()) return 0.0
@@ -179,7 +194,8 @@ object BiliImport {
             }
             if (merged.isEmpty()) throw RuntimeException("识别未返回时间戳，无法生成字幕（可换有 B站字幕的视频，或稍后重试）。")
             // 细切：优先借 B站 细轨当尺子；没细轨就纯用 ASR 自己的段。
-            val cut = recutByBiliRuler(context, inputUrl, merged, onProgress)
+            // 【v93】wav 路径传进去：三层漏斗都没切成时，用波形静音兜底细切超长段。
+            val cut = recutByBiliRuler(context, inputUrl, merged, wav.absolutePath, onProgress)
             // 【v66】轨"粗"但文本准 ⇒ 拿它当**文字稿**，按细切后的时间轴重新分配文本。
             //   效果：时间轴是 ASR 的细粒度，文字是 B站 的准确原文（专有名词/标点更对）。
             if (ccLines != null && ccTooCoarse) reseatTextByTimeline(cut, ccLines, onProgress) else cut
@@ -275,6 +291,8 @@ object BiliImport {
         context: Context,
         inputUrl: String,
         merged: List<AsrSegment>,
+        // 【v93】ASR 用的 wav 文件：三层漏斗都没切成时，波形兜底细切拿它做 RMS 分析
+        wavPath: String,
         onProgress: (String) -> Unit,
     ): List<SubLine> {
         val raw = merged.map { SubLine(it.text, it.startMs / 1000.0, it.endMs / 1000.0) }
@@ -283,6 +301,9 @@ object BiliImport {
         val fetched = BiliClient.fetchAllTracksDetailed(context, inputUrl)
         val tracks = fetched.tracks
         if (tracks.isEmpty()) {
+            // 【v93】没轨 = 没尺子 → 波形兜底：超长段按段内静音谷细切（原来直接 return raw 一坨）
+            val w = recutLongByWaveform(raw, wavPath, onProgress)
+            if (w.size > raw.size) return w
             // 有原因就照实说（SESSDATA 失效 / 该视频没轨），没有就只说识别完成
             if (fetched.note.isNotBlank()) onProgress("识别完成 ${raw.size} 句（未细切：${fetched.note}）")
             else onProgress("识别完成 ${raw.size} 句")
@@ -324,11 +345,19 @@ object BiliImport {
             .filter { it.lines.size >= 2 }
             .minByOrNull { avgSegMs(it.lines.map { l -> SubLine(l.text, l.start, l.end) }) }
         val ruler = rulerTrack?.lines?.map { (it.start * 1000).toLong() } ?: emptyList()
-        if (ruler.isEmpty()) return raw
+        if (ruler.isEmpty()) {
+            // 【v93】有轨但都撑不起尺子（<2 条线）→ 同样走波形兜底
+            val w = recutLongByWaveform(raw, wavPath, onProgress)
+            if (w.size > raw.size) return w
+            return raw
+        }
 
         val sentences = raw.map { Sentence((it.start * 1000).toLong(), (it.end * 1000).toLong(), it.text) }
         val cut = TimelineRecut.recut(sentences, ruler)
         if (cut.size == raw.size) {
+            // 【v93】轨时间点没切成（切完没变多）→ 波形兜底
+            val w = recutLongByWaveform(raw, wavPath, onProgress)
+            if (w.size > raw.size) return w
             onProgress("识别完成 ${raw.size} 句")
             return raw
         }
@@ -337,6 +366,136 @@ object BiliImport {
         return cut.map { s ->
             SubLine(s.text, s.startMs / 1000.0, s.endMs / 1000.0, matchCn(cnLines, s.startMs / 1000.0, s.endMs / 1000.0))
         }.also { if (it.any { l -> l.cn.isNotBlank() }) onProgress("已带上 B站 中文对照") }
+    }
+
+    // ==================== 【v93 阿亮定】无轨兜底：ASR 超长段按波形静音细切 ====================
+
+    /**
+     * 第 3 层兜底（v93）：走到这的 ASR 段没有任何轨可用（没轨 / 轨线太少 / TimelineRecut 没切成），
+     * 原来直接 return raw —— 快语速素材一段十几秒一坨，没法按句复读。
+     *
+     * ## 思路
+     *
+     * 断句不需要标点，需要的是**声音里的停顿**。把每条超长段对应的音频区间做 RMS 能量分析：
+     * 段内静音谷 = 真实停顿点 = 切点；文本按子段时长比例摊回（就近对齐空格，不硬切单词）。
+     * 这样标点有没有根本无所谓。
+     *
+     * ## 保守策略（宁可不切，不切错）
+     *
+     *  · 只动超过 [WAVE_RECUT_LONG_MS] 的段，正常段原样；
+     *  · 每片最短 [WAVE_MIN_PIECE_MS]，谷太密/太靠边都不下刀；
+     *  · 段内一个谷都没有（BGM 填满 / 纯连读）→ 该段保持原样；
+     *  · 文本摊分数量对不上片数 → 该段放弃切分；
+     *  · RMS 解码失败 → 全部原样（等价于 v92 之前的行为）。
+     *
+     * 复用 [SentenceSplitter.decodeRmsFrames] 的解码（声道/时长校准那些坑都已踩平）；
+     * 只在"三层漏斗都没切成"时才解码整条音频，正常路径零开销。
+     */
+    private fun recutLongByWaveform(
+        raw: List<SubLine>,
+        wavPath: String,
+        onProgress: (String) -> Unit,
+    ): List<SubLine> {
+        val longs = raw.filter { (it.end - it.start) * 1000.0 > WAVE_RECUT_LONG_MS }
+        if (longs.isEmpty()) return raw
+
+        onProgress("分析语音停顿（无轨兜底细切）…")
+        val (rms, totalMs) = SentenceSplitter.decodeRmsFrames(wavPath) { }
+        if (rms.isEmpty() || totalMs <= 0) return raw
+        val frameMs = totalMs / rms.size
+        if (frameMs <= 0.0) return raw
+
+        var cutSegCount = 0
+        var totalPieces = 0
+        val out = raw.flatMap { seg ->
+            val segMs = (seg.end - seg.start) * 1000.0
+            if (segMs <= WAVE_RECUT_LONG_MS) return@flatMap listOf(seg)
+
+            val f0 = ((seg.start * 1000.0) / frameMs).toInt().coerceIn(0, rms.size - 1)
+            val f1 = ((seg.end * 1000.0) / frameMs).toInt().coerceIn(f0, rms.size - 1)
+            if (f1 - f0 < 3) return@flatMap listOf(seg)
+
+            // 段内局部阈值：抗整条音频的响度差（BGM 段整体响，用全曲峰值会把真停顿判成有声）
+            val localPeak = rms.copyOfRange(f0, f1 + 1).max()
+            if (localPeak <= 0f) return@flatMap listOf(seg)
+            val threshold = localPeak * 0.075f
+
+            // 段内静音谷（相对段头的 ms 位置）
+            val valleys = mutableListOf<Double>()
+            var i = f0
+            while (i <= f1) {
+                if (rms[i] < threshold) {
+                    var j = i
+                    while (j <= f1 && rms[j] < threshold) j++
+                    if ((j - i) * frameMs >= WAVE_MIN_SILENCE_MS) {
+                        val centerMs = (i + j) / 2.0 * frameMs
+                        val rel = centerMs - seg.start * 1000.0
+                        // 切点离两头都要留足最小片长
+                        if (rel >= WAVE_MIN_PIECE_MS && segMs - rel >= WAVE_MIN_PIECE_MS) valleys.add(rel)
+                    }
+                    i = j
+                } else i++
+            }
+            if (valleys.isEmpty()) return@flatMap listOf(seg)
+
+            // 谷间距不足最小片长的丢弃（贪心保谷）
+            val picks = mutableListOf<Double>()
+            for (v in valleys) {
+                if (picks.isEmpty() || v - picks.last() >= WAVE_MIN_PIECE_MS) picks.add(v)
+            }
+            if (picks.isEmpty()) return@flatMap listOf(seg)
+
+            // 按切点分片 + 文本按时长比例摊分
+            val bounds = listOf(0.0) + picks + listOf(segMs)
+            val pieces = (0 until bounds.size - 1).map { k ->
+                Triple(bounds[k], bounds[k + 1], bounds[k + 1] - bounds[k])
+            }
+            val texts = splitTextByRatio(seg.text, pieces.map { it.third / segMs })
+            if (texts.size != pieces.size) return@flatMap listOf(seg)   // 摊不开就别切（保守）
+
+            cutSegCount++
+            totalPieces += pieces.size
+            pieces.mapIndexed { k, (a, b) ->
+                SubLine(texts[k], seg.start + a / 1000.0, seg.start + b / 1000.0, seg.cn)
+            }
+        }
+        if (cutSegCount == 0) return raw
+        onProgress("按停顿细切长句：$cutSegCount 条 → 共 $totalPieces 句")
+        return out
+    }
+
+    /**
+     * 把一段文本按各片时长占比切成 n 份：切点就近对齐**空格**（英文按词切，不硬切单词）；
+     * 窗口内没空格才硬切字符。切点强制严格递增（数量可能少于 n，调用方数量对不上就放弃）。
+     */
+    private fun splitTextByRatio(text: String, ratios: List<Double>): List<String> {
+        val n = ratios.size
+        if (n <= 1) return listOf(text)
+        val L = text.length
+        if (L == 0) return List(n) { "" }
+        val sum = ratios.sum().takeIf { it > 0.0 } ?: 1.0
+        val win = (L * 0.25).toInt().coerceAtLeast(4)
+        val points = mutableListOf<Int>()
+        var acc = 0.0
+        for (i in 0 until n - 1) {
+            acc += ratios[i]
+            val want = (L * acc / sum).toInt().coerceIn(1, L - 1)
+            // 就近空格吸附：找 |距 want| 最近的空格，切点落在空格之后
+            var cutAt = want
+            var bestD = Int.MAX_VALUE
+            for (d in 0..win) {
+                if (want + d < L && text[want + d] == ' ' && d < bestD) { cutAt = want + d + 1; bestD = d }
+                if (want - d > 0 && text[want - d] == ' ' && d < bestD) { cutAt = want - d + 1; bestD = d }
+            }
+            points.add(cutAt)
+        }
+        // 保序去重（吸附可能把两个切点吸到同一个空格）
+        val ps = mutableListOf<Int>()
+        for (p in points) if (ps.isEmpty() || p > ps.last()) ps.add(p)
+        val bounds = listOf(0) + ps + listOf(L)
+        return (0 until bounds.size - 1).map { k ->
+            text.substring(bounds[k], bounds[k + 1]).trim()
+        }
     }
 
     /**
