@@ -768,7 +768,10 @@ private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key:
             continue
         }
         consecFail = 0
-        val blockSpan = ((blocks[i + 1].second - b.second).takeIf { i + 1 < blocks.size } ?: (wavMs - b.second))
+        // 🔴【v97.1 修】不能写 "(blocks[i+1].second - b.second).takeIf { i+1 < size }"——
+        //   Kotlin 先求值 receiver 再判条件，最后一块时 blocks[i+1] 直接越界 → 异常被外层
+        //   catch 吃掉 → 只剩流式追加的原始 segment（未切分）＝「一大段一大段」。
+        val blockSpan = if (i + 1 < blocks.size) blocks[i + 1].second - b.second else wavMs - b.second
         val segSentences = outcome.segments.map {
             // 相对时间戳 clamp 到本块内：防模型幻觉时间越界到下一块
             val s = it.startMs.coerceIn(0, blockSpan)
@@ -1549,6 +1552,8 @@ class MainActivity : ComponentActivity() {
                 val isVideoMode = activeKind == MediaKind.VIDEO
                 val genActive = if (isVideoMode) recognizing else state.recognizing
                 val genDisabled = if (isVideoMode) (videoUri == null) else (state.currentItem == null)
+                // 【1005 阿亮】以前生成过字幕的，按钮变成「重新生成」，一眼知道能重跑
+                val hasSubs = if (isVideoMode) sentences.isNotEmpty() else state.lyrics.isNotEmpty()
                 Surface(
                     onClick = {
                         if (isVideoMode) { if (!recognizing) videoGenerateLyrics(context) }
@@ -1572,8 +1577,8 @@ class MainActivity : ComponentActivity() {
                             Spacer(modifier = Modifier.width(5.dp))
                         }
                         Text(
-                            text = when {
-                                !genActive -> "生成字幕"
+                        text = when {
+                            !genActive -> if (hasSubs) "重新生成" else "生成字幕"
                                 // 【1003 修"100% 僵住"】asrStage 非空 = 现在卡在"上传+云端识别"
                                 // （asrProgress 此时已满且不再变）。以前这里恒显示"识别中 100%"，
                                 // 一个数停几十分钟像卡死；现在直接把阶段说出来。
