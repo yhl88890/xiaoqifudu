@@ -412,15 +412,17 @@ object SentenceSplitter {
     }
 
     /** 取音频中的静音段中心点（ms）：供视频模式长句切分当真实停顿点。
-     *  解码 RMS 帧 → 找连续静音 ≥ MIN_SILENCE_MS(350ms) 的段 → 取其中心时间。
-     *  仅算帧能量、不留存 PCM，内存安全（11 分钟视频约 1.3 万帧 Float，tiny）。 */
-    fun silenceBoundariesMs(path: String): List<Long> {
+     *  解码 RMS 帧 → 找连续静音 ≥ minSilenceMs 的段 → 取其中心时间。
+     *  仅算帧能量、不留存 PCM，内存安全（11 分钟视频约 1.3 万帧 Float，tiny）。
+     *  【v95】参数化：视频「生成字幕」链路传 180ms——快语速素材句间停顿常 150~300ms，
+     *  默认 350ms（慢速教学基线，别动）会把它们全漏掉 ⇒ 切点找不到 ⇒ 大段切不动。 */
+    fun silenceValleysMs(path: String, minSilenceMs: Long, ratio: Float = SILENCE_RATIO): List<Long> {
         val (rms, totalMs) = decodeRmsFrames(path) { }
         if (rms.isEmpty() || totalMs <= 0) return emptyList()
         val peak = rms.max()
         if (peak <= 0f) return emptyList()
         val frameMsReal = (totalMs.toDouble() / rms.size).coerceIn(20.0, 60.0)
-        val threshold = peak * SILENCE_RATIO
+        val threshold = peak * ratio
         val silent = BooleanArray(rms.size) { rms[it] < threshold }
         val out = mutableListOf<Long>()
         var i = 0
@@ -429,7 +431,7 @@ object SentenceSplitter {
             if (silent[i]) {
                 var j = i
                 while (j < n && silent[j]) j++
-                if ((j - i) * frameMsReal >= MIN_SILENCE_MS) {
+                if ((j - i) * frameMsReal >= minSilenceMs) {
                     out.add(((i + j) / 2 * frameMsReal).toLong())
                 }
                 i = j
@@ -439,4 +441,7 @@ object SentenceSplitter {
         }
         return out
     }
+
+    /** 原门槛（350ms）版本：慢速教学素材语义上的"句子级停顿"。新代码请用 [silenceValleysMs] 并显式传门槛。 */
+    fun silenceBoundariesMs(path: String): List<Long> = silenceValleysMs(path, MIN_SILENCE_MS)
 }

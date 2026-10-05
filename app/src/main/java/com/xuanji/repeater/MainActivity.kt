@@ -715,7 +715,9 @@ private suspend fun recognizeWhole(context: Context, provider: AsrProvider, key:
     // 看着像卡死/没成功。改成说清"正在上传识别"，让用户知道这步在跑。
     postAsrStage("上传并识别中")
     val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
-    val silencePoints = withContext(Dispatchers.IO) { SentenceSplitter.silenceBoundariesMs(wav.absolutePath) }
+    // 【v95】静音点门槛 350→180ms：快语速素材句间停顿常 150~300ms，350 全漏 ⇒ 切点找不到、大段切不动
+    //   （与 BiliImport 波形兜底 WAVE_MIN_SILENCE_MS 一致）。切点只用于长句切分候选，放宽无副作用。
+    val silencePoints = withContext(Dispatchers.IO) { SentenceSplitter.silenceValleysMs(wav.absolutePath, minSilenceMs = 180L) }
     postAsrStage(null)
         runCatching { wav.delete() }
         return when (outcome) {
@@ -766,7 +768,8 @@ private suspend fun recognizeBySegments(
         postAsrProgress(((i + 1) * 100) / n)
         postAsrStage("第 ${i + 1}/$n 段上传识别中")
         val outcome = withContext(Dispatchers.IO) { SpeechRecognizer.transcribe(wav.absolutePath, provider, key) }
-        val segSil = if (outcome is AsrOutcome.Timed) withContext(Dispatchers.IO) { SentenceSplitter.silenceBoundariesMs(wav.absolutePath) } else emptyList()
+        // 【v95】同 718 行：门槛 350→180ms，快语速素材的长句才切得动
+        val segSil = if (outcome is AsrOutcome.Timed) withContext(Dispatchers.IO) { SentenceSplitter.silenceValleysMs(wav.absolutePath, minSilenceMs = 180L) } else emptyList()
         postAsrStage(null)
         runCatching { wav.delete() }
         if (outcome is AsrOutcome.Timed) {
