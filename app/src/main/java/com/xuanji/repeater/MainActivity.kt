@@ -1476,10 +1476,18 @@ class MainActivity : ComponentActivity() {
                 //    不然返回箭头会被状态栏压住（视频全屏那条分支**不加**，全屏就是要铺满）。
                 val hideTopBar = (page == Page.VIDEO && videoFullscreen) ||
                     page == Page.VOCAB || page == Page.REVIEW
-                if (!hideTopBar) Row(
-                    modifier = Modifier.fillMaxWidth().statusBarsPadding().height(52.dp).padding(end = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                if (!hideTopBar) Box(
+                    modifier = Modifier.fillMaxWidth().statusBarsPadding().height(52.dp)
                 ) {
+                    // 【1007 顶栏三层布局】阿亮：定时按钮钉死屏幕正中间（对准摄像头位置），
+                    // 其他按钮以它为中心分两组贴两边 —— 左组「设置+选集」贴左、右组「生成字幕+文件夹」贴右。
+                    // 以前是单 Row + 两个 weight Spacer：闹钟只在「选集右缘↔生成字幕左缘」之间居中，
+                    // 右边「识别中 87%」文字一变宽就把它挤歪。Box 叠加后三组互不推挤。
+                    // ---- 左组：设置 + 选集（贴左） ----
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterStart),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")
                     }
@@ -1548,20 +1556,20 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
-                // 【1007 睡眠定时】顶栏小闹钟按钮（阿亮：放中间居中，别靠边看着尴尬）：
-                // 点一下弹 AppDropdownMenu 选 15/30/45/60/90 分钟；倒计时中按钮直接显示剩余时间
-                //（阿亮："显示在按钮上，小一点，不是重要信息不会老看"）。到点暂停播放（SleepTimer）。
-                val sleepEndsAt by SleepTimer.endsAt.collectAsStateWithLifecycle()
-                val sleepTick by SleepTimer.tick.collectAsStateWithLifecycle()
-                var sleepMenu by remember { mutableStateOf(false) }
-                val sleepRemainMs = (sleepEndsAt - System.currentTimeMillis()).coerceAtLeast(0L)
-                val sleepRemainText = if (sleepEndsAt > 0L && sleepRemainMs > 0L) {
-                    // sleepTick 只为驱动每秒重组，显示值由实时时间算出
-                    @Suppress("UNUSED_EXPRESSION") sleepTick
-                    String.format("%d:%02d", sleepRemainMs / 60_000, sleepRemainMs / 1000 % 60)
-                } else null
-                Spacer(modifier = Modifier.weight(1f))
-                Box {
+                }
+                    // ---- 中间：定时按钮（绝对居中，正对屏幕中心/摄像头） ----
+                    // 【1007 睡眠定时】点一下弹 AppDropdownMenu 选 15/30/45/60/90 分钟；倒计时中按钮
+                    // 直接显示剩余时间（阿亮："显示在按钮上，小一点，不是重要信息不会老看"）。到点暂停。
+                    val sleepEndsAt by SleepTimer.endsAt.collectAsStateWithLifecycle()
+                    val sleepTick by SleepTimer.tick.collectAsStateWithLifecycle()
+                    var sleepMenu by remember { mutableStateOf(false) }
+                    val sleepRemainMs = (sleepEndsAt - System.currentTimeMillis()).coerceAtLeast(0L)
+                    val sleepRemainText = if (sleepEndsAt > 0L && sleepRemainMs > 0L) {
+                        // sleepTick 只为驱动每秒重组，显示值由实时时间算出
+                        @Suppress("UNUSED_EXPRESSION") sleepTick
+                        String.format("%d:%02d", sleepRemainMs / 60_000, sleepRemainMs / 1000 % 60)
+                    } else null
+                    Box(modifier = Modifier.align(Alignment.Center)) {
                     Surface(
                         onClick = { sleepMenu = true },
                         shape = RoundedCornerShape(16.dp),
@@ -1611,8 +1619,12 @@ class MainActivity : ComponentActivity() {
                             },
                         )
                     }
-                }
-                Spacer(modifier = Modifier.weight(1f))
+                    }
+                    // ---- 右组：生成字幕/重新生成 + 文件夹（贴右） ----
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                 // Phase3-步骤2：改用「当前播放源」唯一真值判定。
                 // 原先写死 page == Page.VIDEO，漏了「从视频进阅读/生词本」→ 按钮错判成音频。
                 val isVideoMode = activeKind == MediaKind.VIDEO
@@ -1629,6 +1641,10 @@ class MainActivity : ComponentActivity() {
                     shape = RoundedCornerShape(16.dp),
                     color = if (genActive || genDisabled) MaterialTheme.colorScheme.surfaceVariant
                     else MaterialTheme.colorScheme.primaryContainer,
+                    // 【1007 顶栏对称】选集按钮有 padding(horizontal=6.dp)，生成字幕/重新生成原来没有
+                    // ⇒ 左边「设置→选集」间隙 18dp、右边「生成字幕→文件夹」只有 12dp，看着歪。
+                    // 补上同样的 6dp，两边间隙一致（18dp）。
+                    modifier = Modifier.padding(horizontal = 6.dp),
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -1669,6 +1685,7 @@ class MainActivity : ComponentActivity() {
                 }) {
                     Icon(XuanjiIcons.Folder, contentDescription = "文件夹")
                 }
+                    }
                 }
 
                 // 内容区（占据剩余空间）
