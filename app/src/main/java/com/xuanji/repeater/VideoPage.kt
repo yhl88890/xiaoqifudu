@@ -652,6 +652,24 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         if (videoSentenceIndexGlobal >= 0) subtitleListState.animateScrollToItem(videoSentenceIndexGlobal)
     }
 
+    // 【1007】识别进度/结果浮层（显示在视频画面正中间的半透明胶囊，替代 TRANSPORT 模块里
+    // 那两行状态文字 —— 阿亮："不占下面一行字的空间，抓取/识别时在画面上就能看到进度，
+    // 抓取完了自动消掉"）。
+    // 显示规则：识别中常驻（黑底白字+转圈）；完成后 asrMsg 挂一段时间自动消失 ——
+    // 成功（「识别完成」开头）3 秒；其余（出错/字幕缺失/未配 Key…）红底 8 秒，给足看报错的时间。
+    var asrOverlayVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(recognizing, asrMsg) {
+        when {
+            recognizing -> asrOverlayVisible = true
+            asrMsg.isNotEmpty() -> {
+                asrOverlayVisible = true
+                delay(if (asrMsg.startsWith("识别完成")) 3000L else 8000L)
+                asrOverlayVisible = false
+            }
+            else -> asrOverlayVisible = false
+        }
+    }
+
     // 【0915 宽度对齐】水平内边距 12→16dp，与音频页（PlayerPage 外层 padding horizontal = 16.dp）
     // 完全一致：实测音频模块统一 996px 宽（1080-42*2），视频页原来 12dp 只有 1016px，
     // 两个页面切换时模块左右边缘差 20px，看着"视频这边胖一圈"。
@@ -863,6 +881,46 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         }
                     }
                 }
+                // 【1007】识别进度/结果胶囊：叠在画面**正中间**（阿亮定的位置，比顶部/半中不挡字幕）
+                val asrOverlayText = when {
+                    recognizing -> when {
+                        asrStage != null -> asrStage!!
+                        asrProgress < 100 -> "抽音轨中… $asrProgress%"
+                        else -> "识别中…"
+                    }
+                    asrOverlayVisible && asrMsg.isNotEmpty() -> asrMsg
+                    else -> null
+                }
+                if (asrOverlayText != null) {
+                    // 出错/警告 = 非成功文案且非识别中（识别中的段进度文案也别染红）
+                    val asrOverlayErr = !recognizing && !asrOverlayText.startsWith("识别完成")
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = if (asrOverlayErr) Color(0xE6B3261E) else Color(0xE6000000),
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(horizontal = 32.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            if (recognizing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color.White,
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                            Text(
+                                asrOverlayText,
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
+                    }
+                }
             }
         }
         // ===== 非全屏时的下方内容（全屏时隐藏，画面独占） =====
@@ -899,7 +957,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 flexible = { it == VideoModule.SUBTITLES },
                 minHeightOf = { VideoLayoutPrefs.MIN_HEIGHT_TRANSPORT },
                 maxHeight = VideoLayoutPrefs.MAX_HEIGHT,
-                // 【0915】控制排会临时长出状态文字（未配置Key提示/抓取中/识别进度/asrMsg），
+                // 【0915】控制排会临时长出状态文字（B站 抓取状态 biliStatus/biliError；
+                // 识别进度/asrMsg 已于 1007 挪到视频画面正中间的胶囊，不再撑这里），
                 // 高度被钉死就会溢出重叠 ⇒ 让它带 autoFit：偏好高度当下限，内容更高就撑开。
                 autoFit = { it == VideoModule.TRANSPORT },
             ) { module ->
@@ -1135,46 +1194,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 )
                             }
                         }
-                        if (recognizing) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                                // 【1003】进入「上传识别」阶段后不再显示满圈（100% 的圈会让人以为已经完事），
-                                // 换成不定长的转圈 = "还在转、还没完"。
-                                if (asrStage != null) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(18.dp),
-                                        strokeWidth = 2.dp,
-                                    )
-                                } else {
-                                    CircularProgressIndicator(
-                                        progress = if (asrProgress < 100) asrProgress / 100f else 1f,
-                                        modifier = Modifier.size(18.dp),
-                                        strokeWidth = 2.dp,
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    // 【1003 修"100% 僵住"】以前是 `if (asrProgress < 100) "抽音轨中… X%" else "云端识别中…"`
-                                    // ⇒ 抽完一瞬间进度就满了，可transcribe（上传+云端识别）期间
-                                    // **一个数都不再上报** ⇒「100%」或「云端识别中…」僵在那儿不动，
-                                    // 阿亮反馈"停了好久，以为没成功 / 以为卡死了"，新用户尤其会以为 App 挂了。
-                                    // 现在有 asrStage 时说清"这一步在干嘛"，不再靠一个不动的数字表达"在忙"。
-                                    when {
-                                        asrStage != null -> asrStage!!
-                                        asrProgress < 100 -> "抽音轨中… $asrProgress%"
-                                        else -> "识别中…"
-                                    },
-                                    style = MaterialTheme.typography.labelMedium,
-                                )
-                            }
-                        }
-                        if (asrMsg.isNotEmpty()) {
-                            Text(
-                                asrMsg,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 6.dp),
-                            )
-                        }
+                        // 【1007 修】识别进度（recognizing 转圈行）和 asrMsg 两行状态文字已挪到
+                        // 视频画面正中间的半透明胶囊（见上方视频 Box 内「识别进度/结果胶囊」），
+                        // 不再占 TRANSPORT 模块的布局高度 —— 识别期间控制排不再被撑开。
                     }
                     // ---- 字幕列表（弹性模块：占满剩余空间，不参与调高矮） ----
                     VideoModule.SUBTITLES -> {
