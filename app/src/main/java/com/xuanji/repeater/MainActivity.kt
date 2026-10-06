@@ -1731,6 +1731,18 @@ class MainActivity : ComponentActivity() {
                                 openVideoFromLibrary(context, item, siblings)
                                 page = Page.VIDEO
                             },
+                            // 【1007 统一】选中音频 → 自动跳音频模式开播（与上面选视频对称）。
+                            // 原来点音频走「setPlaylist + 原路返回」：视频模式进文件夹选音频时，
+                            // 页面被切回视频页、视频画面没变 = "选了没反应/跳回原来的视频"。
+                            // 音频真正开始发声后 activeKind 自动置 AUDIO，顶栏/底栏会跟着切过来。
+                            onOpenAudio = { item, siblings ->
+                                // 视频正在响先暂停（视频是手搓 MediaPlayer，不会自己停）→ 防双声
+                                if (videoPlaying) videoTogglePlay()
+                                svc?.setPlaylist(siblings, siblings.indexOf(item))
+                                videoSelectJump = false
+                                folderReturnPage = Page.PLAYER
+                                page = Page.PLAYER
+                            },
                         )
                         Page.VIDEO -> { /* 视频层由上方常驻 if 渲染，避免切阅读卸载 VideoView 导致播放器重建 */ }
                     }

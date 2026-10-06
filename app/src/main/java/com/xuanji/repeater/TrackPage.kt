@@ -21,6 +21,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -75,8 +76,15 @@ fun TrackPage(
         loading = false
     }
 
-    // 展示列表：按用户选择的排序方式（与文件夹页共享偏好）
-    val displayAudios = remember(items, sortMode) { sortedAudios(items, sortMode) }
+    // 展示列表：搜索过滤 + 按用户选择的排序方式（与文件夹页共享偏好）
+    // 【1007 统一】音频选集补上搜索框（文件夹页/视频选集本来就有，阿亮："两边统一都有"）
+    var query by remember { mutableStateOf("") }
+    val displayAudios = remember(items, sortMode, query) {
+        val q = query.trim()
+        val filtered = if (q.isEmpty()) items
+        else items.filter { fileNameWithoutExt(it.path).contains(q, ignoreCase = true) }
+        sortedAudios(filtered, sortMode)
+    }
 
     // 排序跳顶不能用 LaunchedEffect(sortMode)——页面重新组合时 effect 也会启动，
     // 会把"返回选集"变成无条件跳顶；只在用户主动点排序 chip 时手动滚回顶部。
@@ -118,6 +126,14 @@ fun TrackPage(
                 label = { Text("时间") },
             )
         }
+        // 【1007 统一】搜索框：与文件夹页同款（样式/占位文字一致，阿亮："两边统一都有"）
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = { Text("搜索文件名") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        )
         if (loading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()

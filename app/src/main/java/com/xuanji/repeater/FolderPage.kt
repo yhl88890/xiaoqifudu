@@ -86,6 +86,10 @@ fun FolderPage(
     simplifiedHeader: Boolean = false,
     /** 点中一个视频：由外层决定怎么打开（视频模式会自动切过去播放） */
     onOpenVideo: (VideoItem, List<VideoItem>) -> Unit,
+    // 【1007 统一】点中一个音频：由外层决定怎么打开（切到音频模式播放）——
+    // 与 onOpenVideo 对称。原来音频走「setPlaylist + 原路返回(onPlay)」：从视频模式进时
+    // onPlay 把页面切回视频页，音频在后台播了画面却没变 = 阿亮说的"选了没反应/跳回原视频"。
+    onOpenAudio: (AudioItem, List<AudioItem>) -> Unit,
     // 【v89 阿亮："滑到哪里，返回来还在哪里"】以下 4 个状态由 MainActivity 持有：
     // when(page) 切页销毁本页组合后仍保留，回到选集时停在原来那层的原位置。
     // 🔴 带自动跟随的列表不在本页，无跟随冲突。
@@ -151,6 +155,7 @@ fun FolderPage(
             onChanged = { refreshKey++ },
             onPlay = onBackToPlayer,
             onOpenVideo = onOpenVideo,
+            onOpenAudio = onOpenAudio,
         )
         else -> FolderOverviewPage(
             context = context,
@@ -563,6 +568,8 @@ private fun FolderDetailPage(
     onChanged: () -> Unit,
     onPlay: () -> Unit,
     onOpenVideo: (VideoItem, List<VideoItem>) -> Unit,
+    // 【1007 统一】点音频也交给外层统一切模式（与 onOpenVideo 对称，见 FolderPage 参数注释）
+    onOpenAudio: (AudioItem, List<AudioItem>) -> Unit,
     // 【v89】文件列表滚动状态由外部（MainActivity）持有：页面销毁重建后仍保留
     fileListState: LazyListState = remember { LazyListState() },
 ) {
@@ -898,13 +905,13 @@ private fun FolderDetailPage(
             ) {
                 if (isAudioTab) {
                     items(displayAudios, key = { it.path }) { item ->
-                        val index = displayAudios.indexOf(item)
                         val selected = state.currentItem?.path == item.path
                         Surface(
                             onClick = {
-                                // 点击音频：整个文件夹的音频+歌词加载进播放列表并播放
-                                svc?.setPlaylist(displayAudios, index)
-                                onPlay()
+                                // 【1007 统一】点音频 → 外层切到音频模式播放（与点视频对称）。
+                                // 原来在这里 svc?.setPlaylist(...) + onPlay()：「原路返回」在
+                                // 视频模式进来时会把页面切回视频页 = 选了没反应。
+                                onOpenAudio(item, displayAudios)
                             },
                             shape = RoundedCornerShape(14.dp),
                             color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
