@@ -344,6 +344,9 @@ internal var videoPrepared by mutableStateOf(false)
 internal var videoLastSeekAt = 0L
 // 【1007 黑屏看门狗】最近一次收到解码帧的时间戳（onSurfaceTextureUpdated 打点）
 internal var videoLastFrameAt = 0L
+// 【1007 看门狗连击】0=画面正常；1=已软重绑还没救回；收到帧即清零。
+// 连击到 2 ⇒ 软重绑无效，升级「硬自愈」整个重建 MediaPlayer（videoHardRebuildPlayer）。
+internal var videoWatchdogStrikes = 0
 
 /** 视频「外部控制器」：塞给 PlayerService，让系统媒体中心/音频焦点统一控制视频。
  *  与 UI 控制条共用同一套文件级视频状态与播放函数。 */
