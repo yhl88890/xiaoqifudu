@@ -96,6 +96,7 @@ import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material.icons.filled.Download
@@ -110,6 +111,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -1547,6 +1549,70 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 Spacer(modifier = Modifier.weight(1f))
+                // 【1007 睡眠定时】顶栏小闹钟按钮（放在选集按钮和右侧按钮群之间的空白带，阿亮定的）：
+                // 点一下弹 AppDropdownMenu 选 15/30/45/60/90 分钟；倒计时中按钮直接显示剩余时间
+                //（阿亮："显示在按钮上，小一点，不是重要信息不会老看"）。到点暂停播放（SleepTimer）。
+                val sleepEndsAt by SleepTimer.endsAt.collectAsStateWithLifecycle()
+                val sleepTick by SleepTimer.tick.collectAsStateWithLifecycle()
+                var sleepMenu by remember { mutableStateOf(false) }
+                val sleepRemainMs = (sleepEndsAt - System.currentTimeMillis()).coerceAtLeast(0L)
+                val sleepRemainText = if (sleepEndsAt > 0L && sleepRemainMs > 0L) {
+                    // sleepTick 只为驱动每秒重组，显示值由实时时间算出
+                    @Suppress("UNUSED_EXPRESSION") sleepTick
+                    String.format("%d:%02d", sleepRemainMs / 60_000, sleepRemainMs / 1000 % 60)
+                } else null
+                Box {
+                    Surface(
+                        onClick = { sleepMenu = true },
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (sleepRemainText != null) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Filled.Timer,
+                                contentDescription = "定时停止",
+                                modifier = Modifier.size(15.dp),
+                                tint = if (sleepRemainText != null) MaterialTheme.colorScheme.primary
+                                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (sleepRemainText != null) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = sleepRemainText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                    }
+                    AppDropdownMenu(
+                        expanded = sleepMenu,
+                        onDismissRequest = { sleepMenu = false },
+                    ) {
+                        listOf(15L, 30L, 45L, 60L, 90L).forEach { m ->
+                            DropdownMenuItem(
+                                text = { Text("$m 分钟后暂停") },
+                                onClick = {
+                                    SleepTimer.start(m)
+                                    sleepMenu = false
+                                },
+                            )
+                        }
+                        if (sleepEndsAt > 0L) {
+                            DropdownMenuItem(
+                                text = { Text("取消定时") },
+                                onClick = {
+                                    SleepTimer.cancel()
+                                    sleepMenu = false
+                                },
+                            )
+                        }
+                    }
+                }
                 // Phase3-步骤2：改用「当前播放源」唯一真值判定。
                 // 原先写死 page == Page.VIDEO，漏了「从视频进阅读/生词本」→ 按钮错判成音频。
                 val isVideoMode = activeKind == MediaKind.VIDEO

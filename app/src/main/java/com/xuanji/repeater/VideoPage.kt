@@ -222,6 +222,39 @@ internal fun videoTogglePlay() {
     PlayerService.instance?.notifyVideoStateChanged()
 }
 
+/**
+ * 【1007】整集播完后的连播：与音频模式**共用同一份 PlayMode 设置**（PlayerService state 里的
+ * playMode，音频那边选的「顺序播放/列表循环/单曲循环」视频直接认）。
+ * - LOOP_ONE：本集重播（PlaybackCompleted 态下 seek 后 start 位置不可靠，学 PlayerService
+ *   resetToTrackStart 的三连：start 脱离该态 → pause → seekTo(0) → start 重播）
+ * - SEQUENCE：有下一集就切下一集（openVideoFromLibrary 内部自动开播），列表尾停下
+ * - LOOP_LIST：循环切下一集（尾部回第一集）
+ * 复读中（videoSentencePin >= 0）不连播：保持「播完即停」的原状，不打断复读意图。
+ * 🔴 必须主线程调（onCompletion 回调是 MediaPlayer 内部线程，调用处已 post）。
+ */
+internal fun videoAutoAdvanceIfEnabled() {
+    if (videoSentencePin >= 0) return
+    val mode = PlayerService.instance?.state?.value?.playMode ?: PlayMode.SEQUENCE
+    if (mode == PlayMode.LOOP_ONE) {
+        val mp = videoMpRef[0] ?: return
+        runCatching {
+            mp.start(); mp.pause(); mp.seekTo(0); mp.start()
+        }
+        videoPlaying = true
+        return
+    }
+    if (videoFolderVideos.isEmpty()) return
+    val idx = videoFolderVideos.indexOfFirst { it.path == videoPath }
+    if (idx < 0) return
+    val next = when (mode) {
+        PlayMode.LOOP_LIST -> (idx + 1) % videoFolderVideos.size
+        else -> idx + 1
+    }
+    val item = videoFolderVideos.getOrNull(next) ?: return
+    val ctx = PlaybackSession.context ?: return
+    openVideoFromLibrary(ctx, item, videoFolderVideos)
+}
+
 /** 精确 seek（API 26+ 用 SEEK_CLOSEST 取最近关键帧） */
 internal fun videoSeek(targetMs: Long, whence: String = "?" ) {
     val mp = videoMpRef[0] ?: return
@@ -623,6 +656,11 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         mp.setOnCompletionListener {
             videoPlaying = false
             PlayerService.instance?.notifyVideoStateChanged()
+            // 【1007 连播】按播放模式自动续播（顺序/列表循环/单曲循环，与音频共用设置）。
+            // 回调在 MediaPlayer 内部线程 ⇒ 必须先 post 回主线程再动播放器/重组状态。
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                videoAutoAdvanceIfEnabled()
+            }
         }
         // 【0903 黑屏修复】MediaPlayer 错误回调：文件读不到/权限拒/解码失败时显示具体错误到视频窗口
         // （替代静默黑屏）；并给「换视频 / 重试」按钮（见 VideoStateOverlay）。
