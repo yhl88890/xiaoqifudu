@@ -342,6 +342,8 @@ internal fun bindVideoSurface(sf: Surface?, whence: String) {
 internal var videoDuration by mutableStateOf(0L)
 internal var videoPrepared by mutableStateOf(false)
 internal var videoLastSeekAt = 0L
+// 【1007 黑屏看门狗】最近一次收到解码帧的时间戳（onSurfaceTextureUpdated 打点）
+internal var videoLastFrameAt = 0L
 
 /** 视频「外部控制器」：塞给 PlayerService，让系统媒体中心/音频焦点统一控制视频。
  *  与 UI 控制条共用同一套文件级视频状态与播放函数。 */
@@ -1548,8 +1550,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
-                Spacer(modifier = Modifier.weight(1f))
-                // 【1007 睡眠定时】顶栏小闹钟按钮（放在选集按钮和右侧按钮群之间的空白带，阿亮定的）：
+                // 【1007 睡眠定时】顶栏小闹钟按钮（阿亮：放中间居中，别靠边看着尴尬）：
                 // 点一下弹 AppDropdownMenu 选 15/30/45/60/90 分钟；倒计时中按钮直接显示剩余时间
                 //（阿亮："显示在按钮上，小一点，不是重要信息不会老看"）。到点暂停播放（SleepTimer）。
                 val sleepEndsAt by SleepTimer.endsAt.collectAsStateWithLifecycle()
@@ -1561,6 +1562,7 @@ class MainActivity : ComponentActivity() {
                     @Suppress("UNUSED_EXPRESSION") sleepTick
                     String.format("%d:%02d", sleepRemainMs / 60_000, sleepRemainMs / 1000 % 60)
                 } else null
+                Spacer(modifier = Modifier.weight(1f))
                 Box {
                     Surface(
                         onClick = { sleepMenu = true },
@@ -1602,17 +1604,17 @@ class MainActivity : ComponentActivity() {
                                 },
                             )
                         }
-                        if (sleepEndsAt > 0L) {
-                            DropdownMenuItem(
-                                text = { Text("取消定时") },
-                                onClick = {
-                                    SleepTimer.cancel()
-                                    sleepMenu = false
-                                },
-                            )
-                        }
+                        // 【1007 修】取消定时常显：原来只在倒计时中才显示，阿亮反馈"选项里没有取消定时"
+                        DropdownMenuItem(
+                            text = { Text(if (sleepEndsAt > 0L) "取消定时" else "取消定时（未在倒计时）") },
+                            onClick = {
+                                SleepTimer.cancel()
+                                sleepMenu = false
+                            },
+                        )
                     }
                 }
+                Spacer(modifier = Modifier.weight(1f))
                 // Phase3-步骤2：改用「当前播放源」唯一真值判定。
                 // 原先写死 page == Page.VIDEO，漏了「从视频进阅读/生词本」→ 按钮错判成音频。
                 val isVideoMode = activeKind == MediaKind.VIDEO

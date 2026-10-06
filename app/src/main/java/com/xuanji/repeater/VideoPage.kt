@@ -201,6 +201,15 @@ internal fun releaseVideoPlayer() {
         // 下次进入会拿到新的 SurfaceTexture 并重新建 Surface 绑定，不会误判成"同一个纹理"）。
         videoMpBoundSurface = null
         videoSurfaceRef[0] = null
+        // 【1007 修·黑屏根因】导航离开时 TextureView 随页面销毁，onSurfaceTextureDestroyed
+        // 返回 false KEEP 的 SurfaceTexture **框架不再释放、调用者负责**——但这里从没释放过！
+        // 每切一次（视频→音频/文件夹→回视频）泄漏一份 SurfaceTexture+Surface 图形缓冲，
+        // 真机（1080p 视频每份数 MB）反复切换后图形缓冲耗尽 → 新 TextureView 拿不到渲染
+        // 资源 → 整个视频区黑屏、只有声音（阿亮实测；force-stop 重启释放全部即恢复）。
+        // ⚠️ 前后台切换（appInBackground）不走本函数，st 常驻无缝的方案 B 行为不变。
+        runCatching { videoSurfaceRef[0]?.release() }
+        runCatching { videoSurfaceTexRef?.release() }
+        videoSurfaceRef[0] = null
         videoSurfaceTexRef = null
         videoPrepared = false
         videoDuration = 0L
@@ -553,6 +562,17 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 videoTogglePlay()   // 当前在播 → 暂停
                 videoSentenceStopAt = null
             }
+            // 【1007 黑屏看门狗】在播且画面 3 秒没进新帧（阿亮实测：反复切模式后整个视频区黑掉、
+            // 只有声音；绑定链路日志全部正常但解码帧没到新 TextureView）→ 强制重绑 Surface，
+            // 解码器会重新输出当前帧自愈。重绑是幂等函数的强制版（清 videoMpBoundSurface）。
+            // seek 后 3 秒内不判（seek 本身不产帧回调的窗口期）；暂停时不判。
+            if (videoPlaying && videoPrepared && videoSurfaceRef[0] != null &&
+                now - videoLastFrameAt > 3000 && now - videoLastSeekAt > 3000
+            ) {
+                videoLastFrameAt = now   // 先占位，防止重绑无效时每 200ms 疯狂重绑
+                videoMpBoundSurface = null
+                bindVideoSurface(videoSurfaceRef[0], "WATCHDOG")
+            }
         }
     }
 
@@ -744,6 +764,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                             Log.d("XJ_VID", "TEXTURE available REUSE(same st); skip rebind")
                                             return
                                         }
+                                        // 【1007 探针】黑屏排查：记录新旧纹理身份，确认 available 是否触发、st 是否复用
+                                        Log.d("XJ_VID", "TEXTURE available NEW st=${System.identityHashCode(st)} prev=${videoSurfaceTexRef?.let { System.identityHashCode(it) }}")
                                         // 【黑屏铁律】用 TextureView【自带】的 st 建 Surface，绝不用 new SurfaceTexture(0) 兜底
                                         videoSurfaceTexRef = st
                                         val sf = Surface(st)
@@ -759,10 +781,15 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                         // 前后台切换时 Surface 不销毁 → 回前台 MediaPlayer 无需重绑 →
                                         // 不重解关键帧 → 画面真正无缝。
                                         // 也不再 setSurface(null)/清空 videoSurfaceRef：那正是重播的触发点。
-                                        Log.d("XJ_VID", "TEXTURE destroyed -> KEEP (surface 常驻、不摘画面、不重绑)")
+                                        // 【1007 探针】记录被销毁的纹理身份
+                                        Log.d("XJ_VID", "TEXTURE destroyed -> KEEP st=${System.identityHashCode(st)} (surface 常驻、不摘画面、不重绑)")
                                         return false
                                     }
-                                    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+                                    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
+                                        // 【1007 黑屏看门狗】记录最近一次收到解码帧的时刻：
+                                        // 播放中若长时间没有新帧（黑屏症状），轮询里会强制重绑 Surface 自愈。
+                                        videoLastFrameAt = System.currentTimeMillis()
+                                    }
                                 }
                             }
                         },
