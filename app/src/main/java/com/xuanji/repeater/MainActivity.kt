@@ -1534,7 +1534,9 @@ class MainActivity : ComponentActivity() {
                     shape = RoundedCornerShape(16.dp),
                     color = if (selectionIsVideo || isReadingSel || state.currentItem != null || page == Page.FOLDER || page == Page.TRACK) MaterialTheme.colorScheme.primaryContainer
                     else MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.padding(horizontal = 6.dp),
+                    // 【1007 顶栏】阿亮：选集往左挪、贴着设置键（原来有 6dp 外距嫌远）。
+                    // 去掉 start 外距，只在右侧留 6dp 与中间定时按钮的呼吸空隙。
+                    modifier = Modifier.padding(end = 6.dp),
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
