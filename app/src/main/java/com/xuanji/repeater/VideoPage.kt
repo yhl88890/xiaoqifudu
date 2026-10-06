@@ -201,12 +201,6 @@ internal fun releaseVideoPlayer() {
         // 下次进入会拿到新的 SurfaceTexture 并重新建 Surface 绑定，不会误判成"同一个纹理"）。
         videoMpBoundSurface = null
         videoSurfaceRef[0] = null
-        // 【1007 二分实锤】此处**不许** release 旧 st/Surface！TextureView 的 KEEP（destroyed 返回
-        // false）语义 =「框架不管、调用者负责」，但 TextureView 在 detach 过程中内部仍持有该 st；
-        // 在这里提前 release 会让 TextureView 状态错乱 → 切回后新 TextureView 收不到解码帧
-        // （绑定链路日志全正常但 onSurfaceTextureUpdated 不来 = 黑屏有声，压测每轮必现）。
-        // v98-v101 没这行所以从不黑。真泄漏量级 = 每次导航离开一份 st，且看门狗（下方轮询）
-        // 已兜住黑屏症状 ⇒ 先不释放，宁可泄漏不可黑屏。
         videoSurfaceTexRef = null
         videoPrepared = false
         videoDuration = 0L
@@ -226,68 +220,6 @@ internal fun videoTogglePlay() {
         attachVideoPlayback()
     }
     PlayerService.instance?.notifyVideoStateChanged()
-}
-
-/**
- * 【1007 强自愈】黑屏看门狗连击 2 次后的最后手段：**整个重建 MediaPlayer**。
- * 模拟器实测（0927 压测）：切模式后解码帧不到新 TextureView 时，setSurface 软重绑**救不回**
- * （日志 WATCHDOG 每 3 秒连击、帧依旧不来）——只有重建播放器才让解码器重新出帧
- * （等价于阿亮"force-stop 重启恢复"的 App 内版）。流程照抄 loadVideo 换片分支：
- * 保存位置/播放态 → release 旧 mp → 新建 → setDataSource → 绑当前 Surface →
- * prepareAsync → onPrepared 里 SEEK_NEXT_SYNC 回位续播。必须主线程调。
- */
-internal fun videoHardRebuildPlayer() {
-    val ctx = PlaybackSession.context ?: return
-    val uri = videoUri ?: return
-    val mp0 = videoMpRef[0]
-    val resume = (runCatching { mp0?.currentPosition?.toLong() }.getOrNull() ?: 0L)
-        .takeIf { it > 0 } ?: currentPos
-    val wasPlaying = videoPlaying
-    val speed = videoSpeed
-    Log.d("XJ_VID", "HARD REBUILD begin: resume=$resume playing=$wasPlaying sf=${videoSurfaceRef[0] != null}")
-    runCatching { mp0?.setSurface(null) }
-    runCatching { mp0?.release() }
-    videoMpRef[0] = null
-    val mp = MediaPlayer()
-    try {
-        mp.setAudioAttributes(AudioAttributes.Builder()
-            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-            .setUsage(AudioAttributes.USAGE_MEDIA).build())
-        mp.setDataSource(ctx, uri)
-    } catch (e: Throwable) {
-        Log.w("XJ_VID", "HARD REBUILD setDataSource failed: ${e.message}")
-        videoPlaying = false
-        runCatching { mp.release() }
-        return
-    }
-    videoMpRef[0] = mp
-    videoMpSourceUri = uri
-    videoMpBoundSurface = null
-    videoSurfaceRef[0]?.let { bindVideoSurface(it, "HARDREBUILD") }
-    mp.setOnPreparedListener { mpp ->
-        videoDuration = mpp.duration.toLong().coerceAtLeast(0)
-        videoPrepared = true
-        runCatching { mpp.playbackParams = mpp.playbackParams.setSpeed(speed) }
-        val target = if (resume >= videoDuration - 2500) 0L else resume
-        if (target > 0) {
-            // 与 loadVideo 同款：只往前吸（SEEK_NEXT_SYNC），绝不回退重播
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                runCatching { mpp.seekTo(target, MediaPlayer.SEEK_NEXT_SYNC) }
-            } else {
-                runCatching { mpp.seekTo(target.toInt()) }
-            }
-            currentPos = target
-        }
-        if (wasPlaying) mpp.start() else runCatching { mpp.pause() }
-        attachVideoPlayback()
-        PlayerService.instance?.notifyVideoStateChanged()
-        Log.d("XJ_VID", "HARD REBUILD onPrepared target=$target playing=$wasPlaying")
-    }
-    mp.setOnErrorListener { _, what, extra ->
-        Log.w("XJ_VID", "HARD REBUILD ERROR what=$what extra=$extra")
-        true
-    }
-    runCatching { mp.prepareAsync() }
 }
 
 /**
@@ -621,24 +553,6 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 videoTogglePlay()   // 当前在播 → 暂停
                 videoSentenceStopAt = null
             }
-            // 【1007 黑屏看门狗·两级自愈】在播且画面 3 秒没进新帧：
-            // 第 1 击 = 软重绑 Surface（解码器重新配置输出）；第 2 击 = 软重绑无效，
-            // 整个重建 MediaPlayer（videoHardRebuildPlayer，模拟器实测唯一救得回的手段）。
-            // seek 后 3 秒内不判（seek 本身不产帧回调的窗口期）；暂停时不判。
-            if (videoPlaying && videoPrepared && videoSurfaceRef[0] != null &&
-                now - videoLastFrameAt > 3000 && now - videoLastSeekAt > 3000
-            ) {
-                videoLastFrameAt = now   // 先占位，防止自愈无效时每 200ms 疯狂触发
-                videoWatchdogStrikes++
-                if (videoWatchdogStrikes >= 2) {
-                    videoWatchdogStrikes = 0
-                    Log.d("XJ_VID", "WATCHDOG strike x2 -> HARD REBUILD")
-                    videoHardRebuildPlayer()
-                } else {
-                    videoMpBoundSurface = null
-                    bindVideoSurface(videoSurfaceRef[0], "WATCHDOG")
-                }
-            }
         }
     }
 
@@ -830,8 +744,6 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                             Log.d("XJ_VID", "TEXTURE available REUSE(same st); skip rebind")
                                             return
                                         }
-                                        // 【1007 探针】黑屏排查：记录新旧纹理身份，确认 available 是否触发、st 是否复用
-                                        Log.d("XJ_VID", "TEXTURE available NEW st=${System.identityHashCode(st)} prev=${videoSurfaceTexRef?.let { System.identityHashCode(it) }}")
                                         // 【黑屏铁律】用 TextureView【自带】的 st 建 Surface，绝不用 new SurfaceTexture(0) 兜底
                                         videoSurfaceTexRef = st
                                         val sf = Surface(st)
@@ -847,17 +759,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                         // 前后台切换时 Surface 不销毁 → 回前台 MediaPlayer 无需重绑 →
                                         // 不重解关键帧 → 画面真正无缝。
                                         // 也不再 setSurface(null)/清空 videoSurfaceRef：那正是重播的触发点。
-                                        // 【1007 探针】记录被销毁的纹理身份
-                                        Log.d("XJ_VID", "TEXTURE destroyed -> KEEP st=${System.identityHashCode(st)} (surface 常驻、不摘画面、不重绑)")
+                                        Log.d("XJ_VID", "TEXTURE destroyed -> KEEP (surface 常驻、不摘画面、不重绑)")
                                         return false
                                     }
-                                    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
-                                        // 【1007 黑屏看门狗】记录最近一次收到解码帧的时刻：
-                                        // 播放中若长时间没有新帧（黑屏症状），轮询里会强制重绑 Surface 自愈。
-                                        videoLastFrameAt = System.currentTimeMillis()
-                                        // 收到帧 = 画面正常 ⇒ 看门狗连击清零
-                                        videoWatchdogStrikes = 0
-                                    }
+                                    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
                                 }
                             }
                         },
