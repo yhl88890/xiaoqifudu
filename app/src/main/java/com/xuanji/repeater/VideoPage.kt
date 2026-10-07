@@ -729,7 +729,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     //    重播 3 秒（阿亮：音频↔视频 必现；视频↔阅读 不出现，因为本页压根没卸载）。
     //    ⇒ 用 seenMsg 记"这条消息展示过没有"：**首次组合即视为已看过**，
     //    只认本次组合内**新出现**的 asrMsg。（同样是"别拿数据快照反推事件"那条纪律。）
-    var seenMsg by remember { mutableStateOf(asrMsg) }
+    // ⚠️ 初值**只把"上一次识别的回执"标为已看过**（"识别完成…"/"识别出错…"），那才是要屏蔽的重播；
+    //    其余消息一律当作新消息照常显示 —— 尤其 "⚠️ 字幕缺失…" 是**当前视频的状态**（不是回执），
+    //    若一起屏蔽，从文件夹页打开残字视频时就看不到提醒了 = 重犯 0929 修过的那个问题。
+    var seenMsg by remember { mutableStateOf(if (asrMsg.startsWith("识别")) asrMsg else "") }
     var asrOverlayVisible by remember { mutableStateOf(false) }
     LaunchedEffect(recognizing, asrMsg) {
         when {
