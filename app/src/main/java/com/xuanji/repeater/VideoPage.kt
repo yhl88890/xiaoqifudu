@@ -967,9 +967,13 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         overlayBusy -> false
                         else -> !asrOverlayText.startsWith("识别完成")
                     }
+                    // 【1008】阿亮："黑底白字太挡了 ⇒ 透明化、尽量浅、能看得到就行"。
+                    // 改成**浅底半透明 + 深色字**：底 70% 白（背后的画面能透出来），字用近黑。
+                    // 错误态同理：浅红底 + 红字，警示性留着但不糊画面。
+                    val overlayFg = if (asrOverlayErr) Color(0xFFB3261E) else Color(0xDE000000)
                     Surface(
                         shape = RoundedCornerShape(20.dp),
-                        color = if (asrOverlayErr) Color(0xE6B3261E) else Color(0xE6000000),
+                        color = if (asrOverlayErr) Color(0xCCFFEBEE) else Color(0xB3FFFFFF),
                         modifier = Modifier
                             .align(Alignment.Center)
                             .padding(horizontal = 32.dp),
@@ -983,13 +987,13 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),
                                     strokeWidth = 2.dp,
-                                    color = Color.White,
+                                    color = overlayFg,
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                             }
                             Text(
                                 asrOverlayText,
-                                color = Color.White,
+                                color = overlayFg,
                                 style = MaterialTheme.typography.labelMedium,
                             )
                         }
