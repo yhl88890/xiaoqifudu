@@ -920,6 +920,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     }
                 }
                 // 【1007】识别进度/结果胶囊：叠在画面**正中间**（阿亮定的位置，比顶部/半中不挡字幕）
+                // 【1008 扩】B站抓取状态也上同一颗胶囊 —— 阿亮反馈"抓 B站 时提示还在下面功能键区"。
+                // 优先级：识别中 > 识别结果 > B站错误(红) > B站进度(黑)。
+                // 抓取完 Done 会清 biliStatus 并自动进识别（recognizing 接管），两者先后衔接不并存。
                 val asrOverlayText = when {
                     recognizing -> when {
                         asrStage != null -> asrStage!!
@@ -927,11 +930,18 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         else -> "识别中…"
                     }
                     asrOverlayVisible && asrMsg.isNotEmpty() -> asrMsg
+                    biliError.isNotEmpty() -> biliError
+                    biliStatus.isNotEmpty() -> biliStatus
                     else -> null
                 }
                 if (asrOverlayText != null) {
-                    // 出错/警告 = 非成功文案且非识别中（识别中的段进度文案也别染红）
-                    val asrOverlayErr = !recognizing && !asrOverlayText.startsWith("识别完成")
+                    // 染红规则：识别中的段进度不染；「识别完成」不染；B站进度文案（无错时）不染；其余红
+                    val overlayBusy = recognizing || (biliError.isEmpty() && asrOverlayText == biliStatus)
+                    val asrOverlayErr = when {
+                        recognizing -> false
+                        overlayBusy -> false
+                        else -> !asrOverlayText.startsWith("识别完成")
+                    }
                     Surface(
                         shape = RoundedCornerShape(20.dp),
                         color = if (asrOverlayErr) Color(0xE6B3261E) else Color(0xE6000000),
@@ -943,7 +953,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                         ) {
-                            if (recognizing) {
+                            if (overlayBusy) {
+                                // 进度型：不定长转圈 = "还在转、还没完"（识别 100% 僵住的老教训，同款处理）
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),
                                     strokeWidth = 2.dp,
@@ -1207,30 +1218,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 )
                             }
 
-                            // 导入状态常驻显示（不随输入框收起而消失，让"后台抓取中 / 进度"始终可见）
-                            // 【0930 修】原来 color = Color.White 是**硬编码白字**：这排卡片是淡色底，
-                            // 白字叠上去几乎看不见（阿亮截图："下载视频"几个字太浅）。
-                            // 改成主题色 onSurface ⇒ 浅底深字、深底浅字，跟主题走。
-                            if (biliStatus.isNotEmpty()) {
-                                Text(
-                                    biliStatus,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(start = 12.dp, top = 4.dp, bottom = 2.dp),
-                                )
-                            }
-                            if (biliError.isNotEmpty()) {
-                                Text(
-                                    biliError,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color(0xFFFF6B6B),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(start = 12.dp, top = 2.dp, bottom = 4.dp),
-                                )
-                            }
+                            // 【1008 修】B站抓取状态（biliStatus/biliError）已挪到视频画面正中间的
+                            // 胶囊（与识别进度同一颗，见上方视频 Box）——阿亮："抓 B站 的提示
+                            // 别在功能键下面，要在视频上面"。控制排不再被这两行撑高。
                         }
                         // 【1007 修】识别进度（recognizing 转圈行）和 asrMsg 两行状态文字已挪到
                         // 视频画面正中间的半透明胶囊（见上方视频 Box 内「识别进度/结果胶囊」），
