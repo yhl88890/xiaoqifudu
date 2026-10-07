@@ -642,11 +642,36 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 currentPos = target
             }
             videoResumePos = 0                    // 消费掉，避免后续冷启误用
-            if (startPlaying) {
+            // 🔴【1008 黑屏修复】这里改用**实时** videoPlaying 判定，不用上面那个 startPlaying 快照：
+            // 从快照点(L596)到这里之间隔着「等 Surface」的挂起点（最长 500ms），期间音频焦点被抢
+            // /媒体中心操作都会走 videoTogglePlay() 把状态改掉，拿旧快照决策就是拿过期意图开机关。
+            if (videoPlaying) {
                 mpp.start()
                 attachVideoPlayback()
             } else {
-                runCatching { mpp.pause() }
+                if (target > 0) {
+                    // 🔴【1008 黑屏根因修复】「暂停态恢复 + 有续播位置」时**不能直接 pause()**。
+                    // seekTo() 是异步的，而播放器此刻刚 prepare 完、**从没 start 过** ⇒ NuPlayer 的
+                    // renderer 处于 paused 状态，seek 落到目标帧也不会提交到 Surface ⇒ 视频窗口纯黑、
+                    // 没有任何字（真机实锤：dumpsys numFramesTotal 停在 1，播放键显示「▶️」）。
+                    // ⇒ 先让 renderer 跑起来、把目标帧渲染出来，等 seek 落定后再停住。
+                    //   起播期间静音：这一下纯粹为了出画面，绝不能漏出声音。
+                    // 注：seek 在暂停态下不渲染这件事，项目里 `videoAutoAdvanceIfEnabled` 的
+                    // LOOP_ONE 分支（start→pause→seek→start 四连）和 `videoSeekToSentence`
+                    // （seek→start）早就各自绕过一次，只有这条路径漏了。
+                    runCatching { mpp.setVolume(0f, 0f) }
+                    mpp.setOnSeekCompleteListener { m ->
+                        m.setOnSeekCompleteListener(null)
+                        // 若这几十毫秒里用户自己点了播放（videoPlaying=true），就别再把它按停。
+                        if (!videoPlaying) runCatching { mpp.pause() }
+                        runCatching { mpp.setVolume(1f, 1f) }
+                        PlayerService.instance?.notifyVideoStateChanged()
+                    }
+                    runCatching { mpp.start() }
+                } else {
+                    // 从头开始且保持暂停：没有 seek，直接停在首帧（首帧本身就有画面，不黑）。
+                    runCatching { mpp.pause() }
+                }
                 // 即便暂停也要接管媒体中心/通知/焦点，并停掉旧音频（防幽灵双声）：
                 // 进视频模式但视频处于暂停态时，若不接管，残留的音频会继续响。
                 attachVideoPlayback()
