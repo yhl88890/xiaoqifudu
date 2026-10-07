@@ -718,8 +718,11 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     // 【1007】识别进度/结果浮层（显示在视频画面正中间的半透明胶囊，替代 TRANSPORT 模块里
     // 那两行状态文字 —— 阿亮："不占下面一行字的空间，抓取/识别时在画面上就能看到进度，
     // 抓取完了自动消掉"）。
-    // 显示规则：识别中常驻（黑底白字+转圈）；完成后 asrMsg 挂一段时间自动消失 ——
-    // 成功（「识别完成」开头）3 秒；其余（出错/字幕缺失/未配 Key…）红底 8 秒，给足看报错的时间。
+    // 显示规则：识别中常驻（浅底深字+转圈，1008 由黑底白字改）；完成后 asrMsg 挂一段时间自动消失 ——
+    // 成功（「识别完成」开头）3 秒；其余（出错/字幕缺失/未配 Key…）浅红底 8 秒，给足看报错的时间。
+    // 🔴 这颗胶囊是**所有**视频状态提示的唯一出口：识别进度 / 识别结果 / B站 抓取状态 / 各类错误，
+    //    全部从下方 asrOverlayText 的 when 分支进来、共用同一个 Surface
+    //    ⇒ 改样式/配色一处即全覆盖，不存在"只改了某一种状态"的可能。
     var asrOverlayVisible by remember { mutableStateOf(false) }
     LaunchedEffect(recognizing, asrMsg) {
         when {
