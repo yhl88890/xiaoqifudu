@@ -723,15 +723,33 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     // 🔴 这颗胶囊是**所有**视频状态提示的唯一出口：识别进度 / 识别结果 / B站 抓取状态 / 各类错误，
     //    全部从下方 asrOverlayText 的 when 分支进来、共用同一个 Surface
     //    ⇒ 改样式/配色一处即全覆盖，不存在"只改了某一种状态"的可能。
+    // 🔴【1008 修②】"识别完成：N 句"是**数据快照**不是事件：asrMsg 识别完就一直留着不清空，
+    //    而本页在切去音频模式时会被**卸载**（MainActivity 只在 page==VIDEO、或「从视频进阅读」时
+    //    渲染本页），切回来 = 重建组合 ⇒ LaunchedEffect 首次执行，把这段陈旧消息当成"刚发生"
+    //    重播 3 秒（阿亮：音频↔视频 必现；视频↔阅读 不出现，因为本页压根没卸载）。
+    //    ⇒ 用 seenMsg 记"这条消息展示过没有"：**首次组合即视为已看过**，
+    //    只认本次组合内**新出现**的 asrMsg。（同样是"别拿数据快照反推事件"那条纪律。）
+    var seenMsg by remember { mutableStateOf(asrMsg) }
     var asrOverlayVisible by remember { mutableStateOf(false) }
     LaunchedEffect(recognizing, asrMsg) {
         when {
-            recognizing -> asrOverlayVisible = true
-            asrMsg.isNotEmpty() -> {
+            // 新一轮识别开始：清账，保证之后即使文本与上次完全相同也能再显示
+            recognizing -> {
+                asrOverlayVisible = true
+                seenMsg = ""
+            }
+            asrMsg.isNotEmpty() && asrMsg != seenMsg -> {
+                seenMsg = asrMsg
                 asrOverlayVisible = true
                 delay(if (asrMsg.startsWith("识别完成")) 3000L else 8000L)
                 asrOverlayVisible = false
             }
+            // asrMsg 被清空（打开新视频等）：连账一起清，下次同文本仍能提示
+            asrMsg.isEmpty() -> {
+                asrOverlayVisible = false
+                seenMsg = ""
+            }
+            // 非空但已经看过（= 切页面回来时的那段陈旧消息）：什么都不做
             else -> asrOverlayVisible = false
         }
     }
