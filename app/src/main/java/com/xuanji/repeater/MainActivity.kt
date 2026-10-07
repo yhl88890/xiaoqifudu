@@ -1663,11 +1663,14 @@ class MainActivity : ComponentActivity() {
                         Text(
                         text = when {
                             !genActive -> if (hasSubs) "重新生成" else "生成字幕"
-                                // 【1003 修"100% 僵住"】asrStage 非空 = 现在卡在"上传+云端识别"
-                                // （asrProgress 此时已满且不再变）。以前这里恒显示"识别中 100%"，
-                                // 一个数停几十分钟像卡死；现在直接把阶段说出来。
-                                asrStage != null -> asrStage!!
-                                isVideoMode -> "识别中 $asrProgress%"
+                                // 【1010 阿亮】视频模式：识别进度**只在画面正中那颗胶囊里**露
+                                // （带 % 和阶段名，见 VideoPage 的 asrOverlayText），顶栏按钮只留「识别中」。
+                                // 原因：asrStage 文案形如"第 3/5 块上传识别中"，一长就把按钮顶宽 ——
+                                // 顶栏是 Box 三层叠加布局（见上方 1007 注释），右组变宽只会往左长，
+                                // 直接压到中间钉死的定时按钮上。
+                                // ⚠️ asrProgress / asrStage 都是**视频识别链路专用**；音频走 state.recognizeProgress，
+                                //    下面那条不动，音频页照旧显示自己的进度。
+                                isVideoMode -> "识别中"
                                 state.recognizeProgress.isNotEmpty() -> "识别中 ${state.recognizeProgress}"
                                 else -> "识别中…"
                             },
