@@ -43,7 +43,7 @@ App 一共 **7 个页面**（`Page` 枚举定义在 `AppPages.kt`）：
 
 ## 二、代码地图（拆巨石后）
 
-源码全在 `app/src/main/java/com/xuanji/repeater/`，**64 个文件 / 约 2.06 万行**。按职责分组：
+源码全在 `app/src/main/java/com/xuanji/repeater/`，**70 个文件 / 约 2.48 万行**。按职责分组：
 
 ### 入口与骨架
 | 文件 | 职责 |
@@ -62,6 +62,7 @@ App 一共 **7 个页面**（`Page` 枚举定义在 `AppPages.kt`）：
 | `MediaController.kt` | 对外的媒体控制接口（视频模式时把控制权转发给视频） |
 | `PlaybackPrefs.kt` | 一次已保存的播放现场（续播） |
 | `RepeatPrefs.kt` | 复读次数 / 倍速（**音频与视频共享**） |
+| `SleepTimer.kt` | 睡眠定时器：倒计时到点暂停播放（音频 / 视频各停各的），不杀 App |
 
 ### 播放页 / 选集页 UI
 | 文件 | 职责 |
@@ -93,11 +94,16 @@ App 一共 **7 个页面**（`Page` 枚举定义在 `AppPages.kt`）：
 | `SentenceCodec.kt` | 句子表的文本序列化 + 短句合并工具 |
 | `SentenceLabels.kt` | 无歌词时给句子编号（第 1 句 / 第 2 句…） |
 | `LrcParser.kt` / `SrtParser.kt` | 歌词 / 字幕解析 |
+| `SubtitleParser.kt` | **字幕唯一真值**：SRT / ASS / SSA 解析、多级自动匹配（`pickBest`）、双语同刻合并、垃圾样式剔除 |
+| `ManualSubtitle.kt` | 手动指定的字幕（SAF 选文件 → 复制进私有目录 + 按视频路径记，**优先级最高**） |
+| `SubtitleExport.kt` | 把当前句表导出成 SRT（同名不覆盖） |
+| `EmbeddedSubtitle.kt` | **视频内封字幕轨**提取（v120）：Media3 `MatroskaExtractor` 读 MKV 字幕轨 + 系统 MediaExtractor 兜其它容器；自动挑轨、缓存、静默退回 |
 
 ### B 站导入链路
 | 文件 | 职责 |
 |---|---|
 | `BiliClient.kt` | B 站网络客户端（纯 `HttpURLConnection` + `org.json`，零额外依赖） |
+| `BiliLogin.kt` | B 站扫码登录（二维码生成 + 轮询），登录后字幕轨列表才拿得到 |
 | `BiliImport.kt` | 导入编排：把链接变成「可播放的本地文件 + 双语字幕」 |
 | `BiliImportService.kt` | **前台服务**：长流程放这儿跑，切后台不被系统掐 |
 | `BiliImportBus.kt` | 进度 / 完成事件总线 |

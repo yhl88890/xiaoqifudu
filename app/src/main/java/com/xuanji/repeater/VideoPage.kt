@@ -494,6 +494,13 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     //    `expandedVideoIndex`，而局部函数捕获的局部属性只在其声明点之后可见（编译期就报 Unresolved）。
     var subMenuOpen by remember { mutableStateOf(false) }
 
+    // 【v120】视频**内封**字幕轨（阿亮："往手机里一丢就自动出字幕"）。
+    //   打开菜单时才去读一次轨道列表（IO，大文件要几秒），读到几条就列几条。
+    //   ⚠️ 多条轨**不能同时显示**（会重叠打架）⇒ 菜单是"切换"入口，一次只用一条。
+    var embeddedTracks by remember { mutableStateOf<List<EmbeddedSubtitle.Track>>(emptyList()) }
+    var embeddedLoadedFor by remember { mutableStateOf("") }
+    var embeddedBusy by remember { mutableStateOf(false) }
+
     /**
      * 选中一份字幕后立刻用上。
      * ⚠️ 纪律：**先重置 UI 状态、再换数据** —— 反了的话新字幕会有一帧带着旧高亮/旧展开项（等于答案泄露）。
@@ -546,6 +553,56 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     val hasNextVideo = curFolderIdx in 0 until videoFolderVideos.size - 1
 
     val pageScope = rememberCoroutineScope()
+
+    /**
+     * 【v120】切到某条**内封**字幕轨。纪律跟 [applyPickedSubtitle] 一模一样：
+     * **先重置 UI 状态、再换数据**（反了会有一帧带着旧高亮/旧展开项 = 答案泄露）。
+     * 扒不出（图片字幕 / 压缩轨 / 索引坏）就只弹一句提示，**不动**当前字幕。
+     */
+    fun applyEmbeddedTrack(trackIndex: Int) {
+        val path = videoPath
+        val uri = videoUri
+        if (path.isBlank() || uri == null || embeddedBusy) return
+        embeddedBusy = true
+        Toast.makeText(context, "正在从视频里读字幕…", Toast.LENGTH_SHORT).show()
+        pageScope.launch {
+            val r = withContext(Dispatchers.IO) {
+                EmbeddedSubtitle.extractAndCache(context.applicationContext, uri, path, trackIndex)
+            }
+            embeddedBusy = false
+            if (r == null) {
+                Toast.makeText(context, "这条字幕读不出来（可能是图片字幕或压缩轨）", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            clearVideoSentenceRepeat()
+            expandedVideoIndex = -1
+            videoSentenceIndexGlobal = 0
+            currentPos = r.second.first().startMs
+            sentences = r.second
+            srtName = r.first
+            asrMsg = ""
+            videoSeek(r.second.first().startMs)
+            SubtitleLibrary.saveVideo(context, videoName, r.second, path)
+            saveVideoPrefs(context)
+            Toast.makeText(context, "已用这份字幕：${r.first}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** 打开字幕菜单时顺手读一次内封字幕轨。同一个视频只读一次（换视频会自动重读）。 */
+    fun loadEmbeddedTracks() {
+        val path = videoPath
+        val uri = videoUri ?: return
+        if (path.isBlank() || embeddedLoadedFor == path) return
+        embeddedTracks = emptyList()
+        embeddedLoadedFor = path
+        pageScope.launch {
+            val list = withContext(Dispatchers.IO) {
+                runCatching { EmbeddedSubtitle.tracks(context.applicationContext, uri) }
+                    .getOrDefault(emptyList())
+            }
+            if (embeddedLoadedFor == path) embeddedTracks = list
+        }
+    }
 
     // 播放控制：togglePlay / seek / jumpSentence / seekToSentence 已抽到文件级（VideoPage 上方），
     // 供控制条 / 系统媒体中心 / 音频焦点共用。本页只保留 UI 专属的快进/快退与上下曲。
@@ -1027,7 +1084,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         // 塞在"点画面才浮出的控制层"里（跟右边全屏键同一时机出现）：不常驻、不占布局高度，
                         // 也不动字幕列表和 5 键控制排 —— 那两处阿亮调过很多轮，不碰。
                         Box {
-                            IconButton(onClick = { subMenuOpen = true }) {
+                            IconButton(onClick = { subMenuOpen = true; loadEmbeddedTracks() }) {
                                 Icon(Icons.Filled.Subtitles, contentDescription = "字幕", tint = Color.White)
                             }
                             AppDropdownMenu(expanded = subMenuOpen, onDismissRequest = { subMenuOpen = false }) {
@@ -1041,6 +1098,30 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                         pickSubtitleFile.launch(arrayOf("*/*"))
                                     },
                                 )
+                                // 【v120】视频**自带**的字幕轨（内封软字幕）。有几条列几条，当前在用的打勾。
+                                // ⚠️ 多条轨不能同时叠加（会重叠打架）⇒ 这里是"切换"入口，一次只用一条。
+                                // 自动挑的那条 = 简英双语 > 中上英下 > 简体中字 > 繁中 > 纯英文（见 EmbeddedSubtitle.score）。
+                                if (embeddedTracks.isNotEmpty()) {
+                                    DropdownMenuItem(
+                                        text = { Text("内封字幕（${embeddedTracks.size} 条）") },
+                                        enabled = false,
+                                        onClick = {},
+                                    )
+                                    val activeLabel = srtName
+                                        .takeIf { it.startsWith(EmbeddedSubtitle.TAG_PREFIX) }
+                                        ?.removePrefix(EmbeddedSubtitle.TAG_PREFIX)
+                                    embeddedTracks.forEach { t ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(if (t.label == activeLabel) "✓ ${t.label}" else "     ${t.label}")
+                                            },
+                                            onClick = {
+                                                subMenuOpen = false
+                                                applyEmbeddedTrack(t.index)
+                                            },
+                                        )
+                                    }
+                                }
                                 DropdownMenuItem(
                                     text = { Text("导出字幕") },
                                     onClick = { subMenuOpen = false; exportSubtitleNow() },

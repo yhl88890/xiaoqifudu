@@ -563,6 +563,27 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
                 if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
             }
     }
+    // 【v120】前三级都没有 ⇒ 最后试「视频**内封**的字幕轨」（阿亮：往手机里一丢就自动出字幕）。
+    //   🔴 优先级**故意放最低**：同目录 .srt / 以前识别过的结果，一个字都不许被它改掉。
+    //   🔴 扒不到就**静默退回** —— 不提示、不占位，界面跟以前完全一样（别为加功能搞坏存量场景）。
+    //   ⚠️ 扒一条轨要顺着文件扫一遍（大 MKV 几秒），所以走后台；回来时可能已经换视频了 ⇒ 用路径对上号再写回。
+    if (sentences.isEmpty()) {
+        val vp = item.path
+        val vUri = videoUri
+        if (vUri != null) EmbeddedSubtitle.autoLoad(context, vp, vUri) { name, list ->
+            if (vp != videoPath) return@autoLoad   // 已经切走了，别把 A 的字幕糊到 B 上
+            if (list.isEmpty()) return@autoLoad
+            // 走到这里说明本来一句字幕都没有（没有句子列表 ⇒ 用户不可能已经钉过句子/启过复读），
+            // 所以这次重置是安全的、也是必需的（否则下标/钉子带着上一个视频的残留）。
+            clearVideoSentenceRepeat()
+            videoSentenceIndexGlobal = 0
+            sentences = list
+            srtName = name
+            asrMsg = ""
+            SubtitleLibrary.saveVideo(context, videoName, list, vp)
+            saveVideoPrefs(context)
+        }
+    }
     saveVideoPrefs(context)
 }
 
@@ -608,6 +629,22 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
                 // 残缺标记同样要提示（与 openVideoFromLibrary 一致）
                 if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
             }
+    }
+    // 【v120】内封字幕轨：与 openVideoFromLibrary 完全同款（优先级最低 + 扒不到静默退回）。
+    //   B站 导入的视频也走这条路 —— 下载工具把字幕封进 MKV 的情况，以后就不用另外配一份 .srt 了。
+    if (sentences.isEmpty()) {
+        val vp = file.path
+        EmbeddedSubtitle.autoLoad(context, vp, Uri.fromFile(file)) { name, list ->
+            if (vp != videoPath) return@autoLoad
+            if (list.isEmpty()) return@autoLoad
+            clearVideoSentenceRepeat()
+            videoSentenceIndexGlobal = 0
+            sentences = list
+            srtName = name
+            asrMsg = ""
+            SubtitleLibrary.saveVideo(context, videoName, list, vp)
+            saveVideoPrefs(context)
+        }
     }
     saveVideoPrefs(context)
 }
