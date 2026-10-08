@@ -11,9 +11,7 @@ import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.TextureView
 import android.view.Surface
-import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
 import androidx.media3.exoplayer.ExoPlayer
 import android.os.Build
@@ -312,23 +310,28 @@ internal fun startBiliImport(context: Context, url: String) {
     context.startForegroundService(intent)
 }
 
-// 【单播放器·彻底修】视频渲染用 TextureView（持有常驻 SurfaceTexture）+ 自建 MediaPlayer。
-// 【方案B 0905 · 回前台「重播当句」根因修复】原用 SurfaceView：窗口不可见时 Surface 被销毁
-// (surfaceDestroyed)，回前台 surfaceCreated 新建 Surface 重绑 → MediaPlayer 从「最近关键帧」重新
-// 解码显示 → 开头/结尾 GOP 长时画面闪回句首/片尾（看着像重播第一/二/最后句），而音频一直连续、
-// 位置始终正确（故此前"位置连续=无缝"是误判）。
-// 改 TextureView 后：onSurfaceTextureDestroyed 返回 false 保留 SurfaceTexture，Surface 不随前后台
-// 销毁，MediaPlayer 的 Surface 一直有效、不需要重绑 → 不重解关键帧 → 画面真正无缝。
-// ⚠️ 黑屏铁律：只能用 TextureView 在 onSurfaceTextureAvailable 里【自带的】st 建 Surface；
-// 绝不可 new SurfaceTexture(0) 兜底——那才是当年「TextureView 黑屏」的真正元凶，与 TextureView 无关。
-internal val videoSurfaceRef = arrayOfNulls<Surface?>(1)  // 当前视频渲染 Surface（由 TextureView 自有 SurfaceTexture 建，常驻）
-// 记录 MediaPlayer 当前绑定的 Surface，用于幂等绑定：重复 setSurface 会触发解码器重新出帧（重解关键帧）。
+// 【单播放器·彻底修】视频渲染用 SurfaceView + 自建 ExoPlayer。
+// 【v122 · 治 HDR 发灰】为什么从 TextureView 换回 SurfaceView：官方明说 Android 13+ 的 TextureView
+// 会把 HDR 转码成 SDR（细节丢失、色彩剪切、条带）⇒ 画面整体暗一档、对比度塌，跟系统播放器一比就发灰。
+// SurfaceView 独立成层、走硬件叠加，由显示端 tone mapping，观感才对。
+// 【为什么当初换成过 TextureView（0905）】那时用 SurfaceView 踩到「切后台→回前台画面闪回句首」，
+// 看着像重播当句：窗口不可见 → surfaceDestroyed → 回前台新建 Surface 重绑 → **MediaPlayer** 没能力
+// 不 flush 换 Surface，只能 release + 重建解码器 → 被迫从最近关键帧重解。
+// 【v122 为什么敢换回来】那两条前提都变了：
+//   ① 内核已换 ExoPlayer（v119），走 MediaCodec.setOutputSurface()（API 23+，专为「不 flush 换画面」
+//      设计，我们 minSdk=26 恒走此路）⇒ 换/摘 Surface 不再强行回关键帧；
+//   ② Android 14(API 34)+ 新增 SurfaceView.setSurfaceLifecycle(
+//      SURFACE_LIFECYCLE_FOLLOWS_ATTACHMENT) ⇒ Surface 跟「挂载」而非「可见性」走，切后台压根不销毁。
+// ⚠️ 保留的老铁律：Surface 必须来自 SurfaceView 自己的 holder，绝不自造兜底 Surface（那才是当年
+//    「黑屏」的真正元凶）；也绝不开 setZOrderOnTop(true)（画面会盖住字幕/控制排/顶栏）。
+internal val videoSurfaceRef = arrayOfNulls<Surface?>(1)  // 当前视频渲染 Surface（由 SurfaceView 的 holder 提供）
+// 记录播放器当前绑定的 Surface，用于幂等绑定：重复 setSurface 会白折腾解码器。
 internal var videoMpBoundSurface: Surface? = null
-// 记录当前 Surface 所基于的 SurfaceTexture：回前台若还是同一个纹理则完全不重建、不重绑。
-internal var videoSurfaceTexRef: SurfaceTexture? = null
 
 /** 幂等绑定画面：仅当目标 Surface 与「当前已绑定的」不是同一个对象时才真正 setSurface。
- *  重复绑定同一个 Surface 会让解码器重新出帧，是回前台重解关键帧的帮凶，故必须幂等。 */
+ *  重复绑定同一个 Surface 会在解码器侧白折腾一趟，故必须幂等。
+ *  （传 null = 摘画面，等价 ExoPlayer 的 clearVideoSurface()；API 23+ 走 setOutputSurface，**不 flush**，
+ *  所以回前台重接不会回关键帧，别因为怕重播而当鸵鸟不摘。） */
 internal fun bindVideoSurface(sf: Surface?, whence: String) {
     val mp = videoMpRef[0] ?: return   // 播放器还没建好（CREATE 分支会创建后再绑），此处不做事
     if (videoMpBoundSurface === sf) {
@@ -1190,11 +1193,13 @@ class MainActivity : ComponentActivity() {
             videoHandedToBg = true
             videoBgResumePos = currentPos
             videoResumePos = currentPos
-            // 【方案B】不再 setSurface(null) 摘画面：
-            // ① TextureView 是普通 View，随窗口一起隐藏，不像 SurfaceView 那样独立成层透到锁屏，无需摘；
-            // ② 摘画面会让回前台必须重新 setSurface → 解码器重解关键帧 → 画面闪回=重播当句（本 bug 根因）。
-            // 保持 Surface 常驻，声音继续播放。
-            Log.d("XJ_VID", "onPause cur=${videoMpRef[0]?.currentPosition} KEEP surface(TextureView 常驻); audio keeps playing")
+            // 切后台【不主动摘画面】（v122 起对 SurfaceView 亦然）：
+            // ① API 34+ 的 SURFACE_LIFECYCLE_FOLLOWS_ATTACHMENT 让 Surface 跟挂载走，切后台系统根本
+            //    不销毁它，什么都不会发生；
+            // ② 万一系统真销毁了（API 13 及以下 / 系统回收），则由 surfaceDestroyed 回调去摘 —— 那是
+            //    "Surface 已死不得不摘"，跟这里"没事先摘掉"是两回事。主动摘只会平白多一次重接。
+            // ③ 保持表面常驻，声音继续播放。
+            Log.d("XJ_VID", "onPause cur=${videoMpRef[0]?.currentPosition} KEEP surface; audio keeps playing")
             // 【0905 续播不重播】后台持续刷续播位：每 1.5s 读一次最新位置落盘，
             // 避免 Activity 被销毁重建时续播位滞后、SEEK_NEXT_SYNC 往前跳一大段。
             bgPosRunnable = object : Runnable {
@@ -1211,10 +1216,11 @@ class MainActivity : ComponentActivity() {
         // 切后台不再交接给第二个播放器（那正是每次进/出后台卡顿的根因）。保持 videoPlaying 原样即可。
     }
 
-    // 回前台：【方案B】TextureView 的 SurfaceTexture 常驻，切后台不摘画面、不销毁 Surface，音频一直在播。
-    // 画面接回：Surface 一直有效，通常什么都不用做；只有纹理真的换了才由 onSurfaceTextureAvailable 重绑。
-    // 全程只操作同一个 MediaPlayer：无双播放器交接、无 seek，也【不会重解关键帧】
-    // （此前 SurfaceView 每次回前台都要重绑 → 重解关键帧 → 画面闪回句首，看着像重播当句）。
+    // 回前台：v122 起用 SurfaceView。
+    // ① API 34+：FOLLOWS_ATTACHMENT ⇒ 切后台 Surface 没销毁，本方法里的 bindVideoSurface 会被幂等
+    //    判定 SKIP 掉，什么都不做，画面本来就还在 ⇒ 不闪不卡；
+    // ② API 13 及以下：Surface 被销毁重建过，surfaceCreated 已经接过新 Surface，这里同样 SKIP；
+    // ③ 无论哪条路都不 seek、不重建播放器、不 flush 解码器 ⇒ 不会「重播当句」。
     override fun onResume() {
         super.onResume()
         appInBackground = false
@@ -1526,9 +1532,9 @@ class MainActivity : ComponentActivity() {
 
         // 视频当前句 → 悬浮窗（0917 阿亮要求"视频下的字幕也能用悬浮窗播"）
         //
-        // 【为什么必须有这段】视频的字幕只活在 MainActivity 的变量里（手搓 MediaPlayer + TextureView，
-        // 搬不进 Service），而悬浮窗是个独立 Service ⇒ 它够不着。这里把「当前句文本」推给
-        // PlaybackSession.floatText，悬浮窗去读那一条。
+        // 【为什么必须有这段】视频的字幕只活在 MainActivity 的变量里（自建 ExoPlayer + SurfaceView，
+        // 绑在 TextureView->SurfaceView 的 View 上、搬不进 Service），而悬浮窗是个独立 Service ⇒ 它够不着。
+        // 这里把「当前句文本」推给 PlaybackSession.floatText，悬浮窗去读那一条。
         //
         // 【为什么用 snapshotFlow 而不是在写入点各补一行】videoSentenceIndexGlobal 有 6 个写入点
         // （加载重置 / 点句 / seek / 播放轮询…），抄漏一处就会出现"某条路径切句后悬浮窗不跟"。
@@ -1906,7 +1912,7 @@ class MainActivity : ComponentActivity() {
                             // 页面被切回视频页、视频画面没变 = "选了没反应/跳回原来的视频"。
                             // 音频真正开始发声后 activeKind 自动置 AUDIO，顶栏/底栏会跟着切过来。
                             onOpenAudio = { item, siblings ->
-                                // 视频正在响先暂停（视频是手搓 MediaPlayer，不会自己停）→ 防双声
+                                // 视频正在响先暂停（视频是自建 ExoPlayer，不会自己停）→ 防双声
                                 if (videoPlaying) videoTogglePlay()
                                 svc?.setPlaylist(siblings, siblings.indexOf(item))
                                 videoSelectJump = false

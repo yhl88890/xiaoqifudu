@@ -11,10 +11,11 @@ import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.TextureView
 import android.view.Surface
+import android.view.View
+import android.view.ViewOutlineProvider
 import android.widget.Toast
-import android.graphics.SurfaceTexture
+import android.graphics.Outline
 import android.media.AudioAttributes
 // 【v119】视频内核换 ExoPlayer：框架 MediaPlayer 的 MKV 解析器不认 AC3/EAC3（整条音轨静默跳过）⇒
 //   MKV+杜比必哑。ExoPlayer 自带 MatroskaExtractor，原生支持 A_AC3/A_EAC3。
@@ -135,6 +136,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.ImeAction
@@ -191,7 +193,6 @@ import kotlinx.coroutines.isActive
 // ===== 视频播放控制 + 视频页 UI（从 MainActivity 纯搬迁；可见性 private->internal，逻辑零改动） =====
 
 // ===== 视频播放控制（文件级）：控制条 / 系统媒体中心 / 音频焦点 共用同一套状态 =====
-/** 【0903】VideoView 方案：Surface 由 VideoView 自己管理，无需手动 Surface/SurfaceTexture。 */
 
 /** 视频真正开始播放时，把控制器塞给 PlayerService（接管媒体中心/通知/音频焦点） */
 internal fun attachVideoPlayback() {
@@ -206,11 +207,10 @@ internal fun releaseVideoPlayer() {
         runCatching { videoMpRef[0]?.release() }
         videoMpRef[0] = null
         videoMpSourceUri = null
-        // 播放器释放 → 绑定/纹理/Surface 记录一并作废（此刻 TextureView 也随页面销毁了，
-        // 下次进入会拿到新的 SurfaceTexture 并重新建 Surface 绑定，不会误判成"同一个纹理"）。
+        // 播放器释放 → 绑定/Surface 记录一并作废（此刻 SurfaceView 也随页面销毁了，
+        // 下次进入会拿到新的 Surface 并重新绑定，不会误判成"同一个 Surface"）。
         videoMpBoundSurface = null
         videoSurfaceRef[0] = null
-        videoSurfaceTexRef = null
         videoPrepared = false
         videoDuration = 0L
         PlayerService.instance?.detachVideoController()
@@ -711,7 +711,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         }
     }
 
-    // 装载 / 换片：自建 MediaPlayer + SurfaceView（单播放器·彻底修）。
+    // 装载 / 换片：自建 ExoPlayer + SurfaceView（单播放器·彻底修）。
     // 重要：续播严格尊重 videoPlaying 状态——暂停后返回/切回绝不自动开始；
     // 只有打开新视频(openVideoFromLibrary 会把 videoPlaying 置 true) 或本来就在播放才续播。
     LaunchedEffect(videoUri) {
@@ -778,7 +778,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         }
         videoMpRef[0] = mp
         videoMpSourceUri = uri
-        // 已有 Surface 立即绑定（TextureView 已就位）；否则等 onSurfaceTextureAvailable 再绑。
+        // 已有 Surface 立即绑定（SurfaceView 已就位）；否则等 surfaceCreated 再绑。
         // ⚠️ 必须放在 videoMpRef[0] = mp 之后——bindVideoSurface 靠 videoMpRef[0] 取播放器，
         // 放前面会取到 null 而静默跳过绑定 → 新建播放器永远没画面（黑屏）。
         videoMpBoundSurface = null   // 新播放器，强制绑定一次
@@ -793,6 +793,16 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         // 对应物是 Player.Listener.onPositionDiscontinuity(reason = SEEK)。
         var pendingPauseAfterSeek = false
         fun onVideoPrepared() {
+            // 【v123 修·报错浮层粘住】片子真的就绪了 ⇒ 上一次那条报错已经不成立，必须清掉。
+            // 🔴 根因（阿亮实测：「一切集就播放失败，这个报错现在还在播放页，切其他集也是一直报错」）：
+            //    videoErrorMessage 原本**只有**「重试 / 知道了」两个按钮会清，而切集走的是
+            //    LaunchedEffect(videoUri) 重建播放器这条**完全不相干**的路 ⇒ 新片子明明放得好好的，
+            //    那层 75% 黑罩却一直挂在画面上，看着就像"画面不行/一直在报错"
+            //    （实测点一下浮层，画面立刻恢复正常 ⇒ 底层播放从来没坏，纯粹是浮层粘住）。
+            // ⚠️ 为什么放这里、而不是 LaunchedEffect 开头就清：只有**真到 READY**才算翻篇。
+            //    放开头会在「新片子照样打不开」时把刚发生的错误一闪而过 —— 那不是修，是把错误藏起来。
+            videoErrorMessage = null
+
             videoDuration = mp.duration.coerceAtLeast(0)
             videoPrepared = true
             checkSubtitleTimeline()
@@ -993,37 +1003,71 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 if (videoUri != null) {
                     AndroidView(
                         factory = { ctx ->
-                            // 【方案B】TextureView + 常驻 SurfaceTexture：Surface 不随前后台销毁/重建，
-                            // 回前台无需重绑 → 不重解关键帧 → 画面无缝（不重播当句）。
-                            TextureView(ctx).also { tv ->
-                                tv.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                                    override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
-                                        // 回前台若还是同一个纹理 → 已有 Surface 依然有效，
-                                        // 绝不重建、绝不重绑（重绑就会重解关键帧=重播当句）。
-                                        if (videoSurfaceTexRef === st && videoSurfaceRef[0] != null) {
-                                            Log.d("XJ_VID", "TEXTURE available REUSE(same st); skip rebind")
+                            // 【v122 · 治 HDR 发灰】SurfaceView 取代 TextureView。
+                            // 官方明说：Android 13+ 的 TextureView 会把 HDR 转码成 SDR（细节丢失、色彩
+                            // 剪切、出现条带）⇒ 我们之前拿到的是一份"劣质 HDR→SDR"结果，表现就是整体
+                            // 暗一档、对比度塌。SurfaceView 独立成层，走硬件叠加路径、由显示端做 tone
+                            // mapping，才跟系统播放器（小米视频）一个观感。
+                            SurfaceView(ctx).also { sv ->
+                                // 【圆角】SurfaceView 是独立图层，不吃父级 Compose 的圆角裁剪；系统从
+                                // Android 12(API 31) 起才支持按 outline 裁 SurfaceView。12 以下退回直角
+                                // 黑角（贴在本来就黑底的播放区上，可接受）。
+                                if (Build.VERSION.SDK_INT >= 31) {
+                                    sv.clipToOutline = true
+                                    sv.outlineProvider = object : ViewOutlineProvider() {
+                                        override fun getOutline(view: View, outline: Outline) {
+                                            if (view.width <= 0 || view.height <= 0) return
+                                            outline.setRoundRect(
+                                                0, 0, view.width, view.height,
+                                                14f * view.resources.displayMetrics.density,
+                                            )
+                                        }
+                                    }
+                                }
+                                // 【切后台不销毁 Surface】Android 14(API 34)+ 才有这张牌：让 Surface 跟
+                                // 「挂载/卸载」走，而不是跟「可见不可见」走 ⇒ 切后台不销毁 ⇒ 回前台不用
+                                // 重绑 ⇒ 不闪、不卡。13 及以下只能吃默认（跟着可见性），但 ExoPlayer 走
+                                // MediaCodec.setOutputSurface()（API 23+，专为「不 flush 换画面」设计，
+                                // 我们 minSdk=26 恒走此路）⇒ 最坏黑一帧，不会像当年 MediaPlayer 那样
+                                // release/重建解码器回关键帧，也就不会「重播当句」。
+                                if (Build.VERSION.SDK_INT >= 34) {
+                                    sv.setSurfaceLifecycle(SurfaceView.SURFACE_LIFECYCLE_FOLLOWS_ATTACHMENT)
+                                }
+                                // ⚠️ 绝不开 setZOrderOnTop(true)：画面会盖在所有 UI 之上，字幕条、控制排、
+                                //    顶栏全被吃掉。默认 z-order 才是对的。
+                                var cbSurface: Surface? = null
+                                sv.holder.addCallback(object : SurfaceHolder.Callback {
+                                    override fun surfaceCreated(h: SurfaceHolder) {
+                                        val sf = h.surface ?: return
+                                        // 同一个 Surface 对象（FOLLOWS_ATTACHMENT 下切后台没销毁）⇒ 绝不重绑
+                                        if (videoSurfaceRef[0] === sf) {
+                                            Log.d("XJ_VID", "SV surfaceCreated REUSE(same surface); skip rebind")
                                             return
                                         }
-                                        // 【黑屏铁律】用 TextureView【自带】的 st 建 Surface，绝不用 new SurfaceTexture(0) 兜底
-                                        videoSurfaceTexRef = st
-                                        val sf = Surface(st)
+                                        cbSurface = sf
                                         videoSurfaceRef[0] = sf
-                                        videoMpBoundSurface = null   // 换了纹理才强制重绑
-                                        bindVideoSurface(sf, "TextureAvailable")
+                                        videoMpBoundSurface = null   // 新 Surface 对象，强制重绑一次
+                                        bindVideoSurface(sf, "SV.created")
                                     }
-                                    override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
-                                        // 尺寸变化不重建 Surface（同一个 st），不重绑，避免重解关键帧
+                                    override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                        // 尺寸变化时 Surface 对象没变，不重绑（多余 setSurface 只会白折腾解码器）
                                     }
-                                    override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                                        // 【方案B 核心】返回 false = 保留 SurfaceTexture 不释放。
-                                        // 前后台切换时 Surface 不销毁 → 回前台 MediaPlayer 无需重绑 →
-                                        // 不重解关键帧 → 画面真正无缝。
-                                        // 也不再 setSurface(null)/清空 videoSurfaceRef：那正是重播的触发点。
-                                        Log.d("XJ_VID", "TEXTURE destroyed -> KEEP (surface 常驻、不摘画面、不重绑)")
-                                        return false
+                                    override fun surfaceDestroyed(h: SurfaceHolder) {
+                                        // 【关键】这里是「摘画面」而不是「让解码器重解关键帧」，两件事要分清：
+                                        //  ① 必须摘：Surface 已被系统销毁，继续往里送帧会报错/卡画面。
+                                        //     ExoPlayer 侧等价于 clearVideoSurface()，也是 media3 PlayerView 的做法。
+                                        //  ② 摘了也不会重播当句：ExoPlayer 在 API 23+ 走
+                                        //     MediaCodec.setOutputSurface()，换/摘 Surface **不 flush 解码器**，
+                                        //     回前台接上新 Surface 直接续帧。当年 MediaPlayer 没这条路，只能
+                                        //     release + 重建解码器 ⇒ 被迫回关键帧，那才是老 bug 的根因。
+                                        Log.d("XJ_VID", "SV surfaceDestroyed -> 摘画面(不 flush)；回前台 surfaceCreated 重接")
+                                        if (videoSurfaceRef[0] === cbSurface || cbSurface == null) {
+                                            videoSurfaceRef[0] = null
+                                        }
+                                        cbSurface = null
+                                        bindVideoSurface(null, "SV.destroyed")
                                     }
-                                    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
-                                }
+                                })
                             }
                         },
                         modifier = Modifier.fillMaxSize(),
@@ -1816,30 +1860,47 @@ internal fun VideoStateOverlay(
             color = Color(0xFF2A2A2E),
             modifier = Modifier
                 .padding(horizontal = 24.dp)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                // 【v123 修·按钮被压扁】这里必须让卡片按**自然高度**测量。
+                // 🔴 根因：本层是挂在 16:9 视频框里的（宽 992px 高 558px ⇒ 约 360×203dp，
+                //    v120 之前一直如此），而 Surface 原来只给了 `fillMaxWidth()` —— 高度就继承了
+                //    Box 的上限 203dp。卡片内容自然高超过它时，Column 会按顺序把**后面的子项**
+                //    硬压到 0 高度 ⇒ 实测按钮只剩 47px(17.1dp)、里面文字被裁没、TextButton「知道了」
+                //    直接被挤出面板外。`unbounded = true` = 用无限高约束测一次得到真实高度，
+                //    再在父框内居中；宁可上下被裁一点点，也绝不把按钮压成一条线。
+                .wrapContentHeight(align = Alignment.CenterVertically, unbounded = true),
         ) {
             Column(
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 if (errorText != null) {
                     // 错误状态
+                    // ⚠️ 本分支的高度预算很紧（视频框只有 203dp），改文案/加控件前先算一遍总高：
+                    //    padding 28 + 标题 24 + 6 + 错误文字2行 40 + 10 + 按钮行 40 + 2 + 知道了 36 = 186dp。
                     Text(
                         "⚠ 播放失败",
                         color = Color(0xFFFF6B6B),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(6.dp))
                     Text(
                         errorText,
                         color = Color.White,
                         style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center,
+                        // 限 2 行：视频框只有 203dp 高，长错误（如「播放失败（ERROR_CODE_…）」）
+                        // 撑成 3、4 行就会把下面那排按钮再次挤出去。
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(10.dp))
+                    // ⚠️「知道了」**必须**另起一行：实测三个键挤一行时，前两个 Button 吃掉宽度后
+                    //    它只剩 33dp ⇒ 被压成「知道 / 了」两行还贴右边框（v123 第一次实机截图）。
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Button(
                             onClick = onRetry,
@@ -1847,6 +1908,7 @@ internal fun VideoStateOverlay(
                                 containerColor = Color(0xFF4A4A4E),
                                 contentColor = Color.White,
                             ),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
                         ) { Text("重试") }
                         Button(
                             onClick = onPickVideo,
@@ -1854,12 +1916,15 @@ internal fun VideoStateOverlay(
                                 containerColor = Color(0xFF4A4A4E),
                                 contentColor = Color.White,
                             ),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
                         ) { Text("换视频") }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = onDismiss) {
-                        Text("知道了", color = Color.White.copy(alpha = 0.7f))
-                    }
+                    Spacer(Modifier.height(2.dp))
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.height(36.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                    ) { Text("知道了", color = Color.White.copy(alpha = 0.7f)) }
                 } else {
                     // 空状态（videoUri==null）
                     Text(
@@ -1868,7 +1933,7 @@ internal fun VideoStateOverlay(
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(6.dp))
                     Text(
                         "点顶部「选择视频」挑一个，\n或者把 B站 链接粘进来后台抓",
                         color = Color.White.copy(alpha = 0.85f),

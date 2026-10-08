@@ -89,7 +89,7 @@ object PlaybackSession {
      * 视频模式下的「当前句字幕文本」，专供悬浮窗读。
      *
      * 【为什么音频不用它】音频的悬浮窗可以直接读 `PlayerService.state`（同一个进程）。
-     * 而**视频的字幕只活在 MainActivity 的变量里** —— 视频是手搓 MediaPlayer、绑 TextureView，
+     * 而**视频的字幕只活在 MainActivity 的变量里** —— 视频是自建 ExoPlayer、画面绑在 View 上，
      * 搬不进 Service ⇒ 悬浮窗隔着进程拿不到。这里开一条**只放文本**的窄通道：
      * MainActivity 把当前句推上来，悬浮窗读走。
      *
