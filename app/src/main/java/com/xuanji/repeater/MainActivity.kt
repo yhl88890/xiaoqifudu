@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.net.Uri
+import android.view.WindowManager
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.Surface
@@ -178,6 +179,42 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+
+// ===== 【v124】全局亮度（阿亮拍板"方案 B"）=====
+// 来龙去脉：v124 第一版把亮度状态放在 VideoPage 里、离开页面就还原 ⇒ 阿亮实测报两个毛病：
+//   ① 视频页调完亮度，一切到音频模式，亮度"啪"地弹回系统值（音频页没设窗口亮度）；
+//   ② 切回视频页记不住刚才调的亮度（页面被卸载、状态没了）。
+// 阿亮的原话：「要么让它整个软件都记住这个亮度。要么就是让他直接调的是系统亮度。」
+// 选了前者（= 方案 B），理由：
+//   · **不碰系统设置** ⇒ 不需要 WRITE_SETTINGS 权限、不影响系统"自动亮度"、
+//     不会把用户手机里别的软件一起改亮（"直接调系统亮度"那条路的失败模式，代价太大）；
+//   · 只改**我们自己这个窗口**的亮度，离开 App（窗口不再前台）系统亮度自动接管；
+//   · 改动面小、风险低（小米播放器也是这个路子）。
+// 取值约定：**null = 跟随系统**（用户从没调过）⇒ 落到 WindowManager.BRIGHTNESS_OVERRIDE_NONE。
+// ⚠️ 它只对"我们这个窗口"生效，所以整个 App 的每个页面**统一一个亮度**，这正是阿亮要的"整体统一"。
+// 📌 阿亮观察"小米播放器调完亮度，系统亮度好像也跟着变了" —— ⚠️ **我们没实测完**（测到一半设备断线了），
+//    所以别当结论。已知事实只有两条（实测）：① 小米播放器改的是**窗口亮度**
+//    （滑动前后 `settings get system screen_brightness` 都是 163，系统设置没被写）；
+//    ② 窗口亮度在窗口前台时确实**盖住**系统亮度 ⇒ 观感上就是"系统亮度也变了"。
+//    "退出播放器后系统亮度是否回来"❓尚未验证。我们这套的**设计意图**是：退出即回系统值。
+internal var appBrightness by mutableStateOf<Float?>(null)
+
+/** 【v124】亮度存档。名字/写法照 ThemePrefs（同一个工程，别整出新花样）。
+ *  存的是 0.01~1.0 的窗口亮度；没存过 / 存的是脏值 ⇒ 返回 null（= 跟随系统）。 */
+internal object BrightnessPrefs {
+    private const val NAME = "display_prefs"
+    private const val KEY = "screen_brightness"
+
+    fun load(context: Context): Float? =
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+            .getFloat(KEY, -1f)
+            .takeIf { it in 0.01f..1f }
+
+    fun save(context: Context, value: Float) {
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+            .edit().putFloat(KEY, value).apply()
+    }
+}
 
 // ===== 视频模式 UI 状态：提升到文件级(进程内常驻),切页面/旋转不丢,回视频页自动续播 =====
 internal var videoUri by mutableStateOf<Uri?>(null)
@@ -1083,6 +1120,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** 【v124】把全局亮度 appBrightness 落到**这个窗口**上。null ⇒ BRIGHTNESS_OVERRIDE_NONE（跟随系统）。
+     *  幂等，随便多调几次没副作用。窗口亮度只在"本窗口处于前台"时生效 ⇒ 退到桌面/别的 App
+     *  系统亮度自动接管，不会把用户手机整个调暗。 */
+    private fun applyWindowBrightness() {
+        runCatching {
+            val lp = window.attributes
+            lp.screenBrightness = appBrightness
+                ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            window.attributes = lp
+        }.onFailure { Log.e("XuanjiBrightness", "applyWindowBrightness failed", it) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installCrashGuard()   // 越早装越好：之后所有主线程异常都能被兜住，而不是直接闪退
@@ -1106,8 +1155,16 @@ class MainActivity : ComponentActivity() {
         if (FloatPrefs.load(this) && Settings.canDrawOverlays(this)) {
             startService(Intent(this, FloatLyricsService::class.java))
         }
+        // 【v124】先把上次的亮度读回来并落到窗口上（放在 setContent 之前 ⇒ 首帧就是对的亮度，
+        //        不会"先亮一下系统亮度再跳成你设的"那种闪一下）。
+        //        load 返回 null = 从没调过 ⇒ 跟随系统，跟老版本行为完全一致。
+        appBrightness = BrightnessPrefs.load(this)
+        applyWindowBrightness()
         setContent {
             val context = LocalContext.current
+            // 【v124】全局亮度：appBrightness 一变就落到窗口。视频页左半屏上下滑改的就是它，
+            // 所以**任何页面**（视频/音频/阅读）调的亮度，全 App 统一生效，不会再"切页面亮度跳回去"。
+            LaunchedEffect(appBrightness) { applyWindowBrightness() }
             // 收集抓 B站 进度/完成事件（进程内 SharedFlow，规避 Android 14 隐式广播投递限制）
             // 🔴 【1003 P1】**刻意拆成两个协程分别订阅** progress / done（不能 merge 成一条，
             // 理由见 BiliImportBus 注释）—— done 那条 replay=1，抓取中 Activity 被销毁也不丢结果。
@@ -1225,6 +1282,9 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         appInBackground = false
         videoHandedToBg = false
+        // 【v124】回前台把亮度重新落一次：窗口级 override 在有些机型上（MIUI）回前台会被系统抹掉，
+        //        这里幂等补一刀，保证"出去再回来"亮度不会莫名变回系统值。
+        applyWindowBrightness()
         // 【0905 续播不重播】回前台取消后台持续落盘器（避免与前台轮询重复写 SP）
         bgPosRunnable?.let { bgPosHandler.removeCallbacks(it) }; bgPosRunnable = null
         if (videoUri != null && videoSurfaceRef[0] != null) {

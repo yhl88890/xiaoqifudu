@@ -14,7 +14,6 @@ import android.view.SurfaceView
 import android.view.Surface
 import android.view.View
 import android.view.ViewOutlineProvider
-import android.view.WindowManager
 import android.widget.Toast
 import android.graphics.Outline
 import android.media.AudioManager
@@ -482,39 +481,20 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     // 🔴 亮度**直接调窗口亮度**（`window.screenBrightness`）—— 阿亮拍板：
     //    不要"叠半透明黑遮罩"那种假变暗（遮罩会把画面压灰、掉对比度），
     //    窗口亮度是真的降背光，画面质量一点不变。
-    //    ⚠️ 代价：它是**窗口级**的，视频页整体（含字幕列表、按钮）一起变；
-    //      所以**离开视频页必须还原**（见下面两个 DisposableEffect），别污染音频页/阅读页。
+    // 🔴【方案 B，1009】亮度状态是**全局**的（`appBrightness`，见 MainActivity.kt 顶部注释）：
+    //    任何页面调的亮度全 App 统一 ⇒ 切音频/阅读模式不会跳回系统值、退出重进也记得住。
+    //    ⇒ 本页**不再**负责"离开页面还原亮度"（原先那两个 DisposableEffect 已删掉）—— 那正是 bug 的来源。
+    // 系统亮度：只在"用户从没调过亮度"（appBrightness == null）时当滑块起点，免得第一次滑动跳变。
     val sysBrightness = remember {
         runCatching {
             Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
         }.getOrDefault(0.5f).coerceIn(0.05f, 1f)
     }
-    // 当前亮度 0.01~1.0。初值 = **系统亮度** ⇒ 第一次滑动就从眼前这个亮度接着走，不跳变。
-    var videoBrightness by remember { mutableStateOf(sysBrightness) }
     // 手势提示：0=不显示 1=亮度 2=音量
     var gestureHint by remember { mutableStateOf(0) }
     var gestureHintValue by remember { mutableStateOf(0f) }
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
-    // 亮度直接落到 window 上（不做遮罩那套）
-    DisposableEffect(videoBrightness) {
-        activity?.window?.let { w ->
-            val lp = w.attributes
-            lp.screenBrightness = videoBrightness
-            w.attributes = lp
-        }
-        onDispose { }
-    }
-    // 🔴 离开视频页（切音频/阅读模式会把本页卸载）务必还原，否则那个亮度会赖在 window 上污染其他页面
-    DisposableEffect(Unit) {
-        onDispose {
-            activity?.window?.let { w ->
-                val lp = w.attributes
-                lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-                w.attributes = lp
-            }
-        }
-    }
     // 提示条显示 900ms 后自动收；滑动中数值一变就重置计时 ⇒ 表现为「松手后才开始计时」
     LaunchedEffect(gestureHint, gestureHintValue) {
         if (gestureHint != 0) {
@@ -1054,12 +1034,20 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 .pointerInput(Unit) {
                     var isBrightness = true
                     var acc = 0f
+                    // 松手写盘。拖动过程里不写（一次一次写 SharedPreferences 白费）。
+                    // 🔴 只在"确实调的是亮度"时才存；音量是**系统音量**，系统自己记着，不归我们管。
+                    // 🔴 被打断（onDragCancel）也要写 —— 否则会出现"我明明调了，重开又回去了"。
+                    val persistBrightness = {
+                        if (isBrightness) BrightnessPrefs.save(context, appBrightness ?: sysBrightness)
+                    }
                     detectVerticalDragGestures(
                         onDragStart = { offset ->
                             // 用「手指按下时」的 x 判左右（而不是滑动过程中），避免跨半屏时串台
                             isBrightness = offset.x < size.width / 2f
                             acc = if (isBrightness) {
-                                videoBrightness
+                                // 🔴 必须**直接读全局状态** appBrightness —— 不能在组合期先算成一个局部 val：
+                                //    pointerInput(Unit) 里的这个 lambda 只创建一次，局部 val 会被捕获成"永远的老值"。
+                                appBrightness ?: sysBrightness
                             } else {
                                 val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
                                 audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
@@ -1068,8 +1056,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             gestureHint = if (isBrightness) 1 else 2
                             gestureHintValue = acc
                         },
-                        onDragEnd = { },
-                        onDragCancel = { },
+                        onDragEnd = { persistBrightness() },
+                        onDragCancel = { persistBrightness() },
                         onVerticalDrag = { change, dragAmount ->
                             change.consume()
                             // 向上滑 ⇒ dragAmount 为负 ⇒ 变大。整屏高度滑一遍 = 走完整量程。
@@ -1077,7 +1065,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             // 亮度留个下限：真到 0 屏幕就全黑了，什么都看不见
                             acc = (acc - dragAmount / h).coerceIn(if (isBrightness) 0.01f else 0f, 1f)
                             if (isBrightness) {
-                                videoBrightness = acc
+                                appBrightness = acc   // 全局状态（方案 B）⇒ 全 App 统一，切页面不跳
                             } else {
                                 val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
                                 // flags = 0 ⇒ 不弹系统那条音量条，提示统一由我们自己的浮层出
