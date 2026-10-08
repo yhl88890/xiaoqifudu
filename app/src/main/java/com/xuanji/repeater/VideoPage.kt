@@ -14,8 +14,10 @@ import android.view.SurfaceView
 import android.view.Surface
 import android.view.View
 import android.view.ViewOutlineProvider
+import android.view.WindowManager
 import android.widget.Toast
 import android.graphics.Outline
+import android.media.AudioManager
 import android.media.AudioAttributes
 // 【v119】视频内核换 ExoPlayer：框架 MediaPlayer 的 MKV 解析器不认 AC3/EAC3（整条音轨静默跳过）⇒
 //   MKV+杜比必哑。ExoPlayer 自带 MatroskaExtractor，原生支持 A_AC3/A_EAC3。
@@ -60,6 +62,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -471,6 +474,52 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     LaunchedEffect(Unit) {
         if (sentences.isNotEmpty() && currentPos > 0) {
             videoSentenceIndexGlobal = computeSentence(currentPos)
+        }
+    }
+
+    // ===== 【v124】画面手势：左半屏上下滑 = 亮度，右半屏上下滑 = 音量 =====
+    // 参照小米播放器**实测**（不是猜的）：左半屏上滑冒太阳图标、右半屏上滑冒喇叭图标。
+    // 🔴 亮度**直接调窗口亮度**（`window.screenBrightness`）—— 阿亮拍板：
+    //    不要"叠半透明黑遮罩"那种假变暗（遮罩会把画面压灰、掉对比度），
+    //    窗口亮度是真的降背光，画面质量一点不变。
+    //    ⚠️ 代价：它是**窗口级**的，视频页整体（含字幕列表、按钮）一起变；
+    //      所以**离开视频页必须还原**（见下面两个 DisposableEffect），别污染音频页/阅读页。
+    val sysBrightness = remember {
+        runCatching {
+            Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
+        }.getOrDefault(0.5f).coerceIn(0.05f, 1f)
+    }
+    // 当前亮度 0.01~1.0。初值 = **系统亮度** ⇒ 第一次滑动就从眼前这个亮度接着走，不跳变。
+    var videoBrightness by remember { mutableStateOf(sysBrightness) }
+    // 手势提示：0=不显示 1=亮度 2=音量
+    var gestureHint by remember { mutableStateOf(0) }
+    var gestureHintValue by remember { mutableStateOf(0f) }
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+
+    // 亮度直接落到 window 上（不做遮罩那套）
+    DisposableEffect(videoBrightness) {
+        activity?.window?.let { w ->
+            val lp = w.attributes
+            lp.screenBrightness = videoBrightness
+            w.attributes = lp
+        }
+        onDispose { }
+    }
+    // 🔴 离开视频页（切音频/阅读模式会把本页卸载）务必还原，否则那个亮度会赖在 window 上污染其他页面
+    DisposableEffect(Unit) {
+        onDispose {
+            activity?.window?.let { w ->
+                val lp = w.attributes
+                lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                w.attributes = lp
+            }
+        }
+    }
+    // 提示条显示 900ms 后自动收；滑动中数值一变就重置计时 ⇒ 表现为「松手后才开始计时」
+    LaunchedEffect(gestureHint, gestureHintValue) {
+        if (gestureHint != 0) {
+            delay(900)
+            gestureHint = 0
         }
     }
 
@@ -999,6 +1048,49 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             color = Color.Black,
         ) {
             Box(modifier = Modifier.fillMaxSize()
+                // 【v124】画面手势：左半屏上下滑 = 亮度、右半屏上下滑 = 音量
+                // （左右分工是**实测**小米播放器得来的）。垂直拖动要先越过 touch slop 才会被
+                // detectVerticalDragGestures 接管 ⇒ 跟下面 .clickable（点一下浮出控制条）不打架。
+                .pointerInput(Unit) {
+                    var isBrightness = true
+                    var acc = 0f
+                    detectVerticalDragGestures(
+                        onDragStart = { offset ->
+                            // 用「手指按下时」的 x 判左右（而不是滑动过程中），避免跨半屏时串台
+                            isBrightness = offset.x < size.width / 2f
+                            acc = if (isBrightness) {
+                                videoBrightness
+                            } else {
+                                val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                                audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
+                            }
+                            // 1=亮度 2=音量（见 gestureHint 定义处）
+                            gestureHint = if (isBrightness) 1 else 2
+                            gestureHintValue = acc
+                        },
+                        onDragEnd = { },
+                        onDragCancel = { },
+                        onVerticalDrag = { change, dragAmount ->
+                            change.consume()
+                            // 向上滑 ⇒ dragAmount 为负 ⇒ 变大。整屏高度滑一遍 = 走完整量程。
+                            val h = size.height.toFloat().coerceAtLeast(1f)
+                            // 亮度留个下限：真到 0 屏幕就全黑了，什么都看不见
+                            acc = (acc - dragAmount / h).coerceIn(if (isBrightness) 0.01f else 0f, 1f)
+                            if (isBrightness) {
+                                videoBrightness = acc
+                            } else {
+                                val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                                // flags = 0 ⇒ 不弹系统那条音量条，提示统一由我们自己的浮层出
+                                audioManager.setStreamVolume(
+                                    AudioManager.STREAM_MUSIC,
+                                    (acc * max).roundToInt().coerceIn(0, max),
+                                    0,
+                                )
+                            }
+                            gestureHintValue = acc
+                        },
+                    )
+                }
                 .clickable { controlsVisible = !controlsVisible }) {
                 if (videoUri != null) {
                     AndroidView(
@@ -1326,6 +1418,47 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 color = overlayFg,
                                 style = MaterialTheme.typography.labelMedium,
                             )
+                        }
+                    }
+                }
+                // 【v124】手势提示：屏幕中央「图标 + 进度条 + 百分比」（样式照小米播放器）。
+                // 放在 Box 的**最后** = 压在最上层，别被画面/浮层/字幕条盖住。
+                if (gestureHint != 0) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = Color.Black.copy(alpha = 0.72f),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    if (gestureHint == 1) "🔆" else "🔊",
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                // 进度条：底槽 + 白色填充（fillMaxWidth 要 0~1，滑到底不能越界）
+                                Box(
+                                    modifier = Modifier
+                                        .width(110.dp)
+                                        .height(6.dp)
+                                        .background(Color.White.copy(alpha = 0.28f), RoundedCornerShape(3.dp))
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxHeight()
+                                            .fillMaxWidth(gestureHintValue.coerceIn(0f, 1f))
+                                            .background(Color.White, RoundedCornerShape(3.dp))
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    "${(gestureHintValue * 100).roundToInt()}%",
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
                         }
                     }
                 }
