@@ -15,8 +15,7 @@ import android.view.TextureView
 import android.view.Surface
 import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
-import android.media.MediaPlayer
-import android.media.PlaybackParams
+import androidx.media3.exoplayer.ExoPlayer
 import android.os.Build
 import android.util.Log
 import java.io.File
@@ -336,7 +335,7 @@ internal fun bindVideoSurface(sf: Surface?, whence: String) {
         Log.d("XJ_VID", "bindVideoSurface SKIP(same surface) whence=$whence")
         return
     }
-    runCatching { mp.setSurface(sf) }
+    runCatching { mp.setVideoSurface(sf) }
     videoMpBoundSurface = sf
     Log.d("XJ_VID", "bindVideoSurface whence=$whence sf=${if (sf == null) "null" else "set"} cur=${runCatching { mp.currentPosition }.getOrDefault(-1)}")
 }
@@ -947,7 +946,9 @@ private suspend fun recognizeBySegments(
 
 // 视频播放器放在文件级（进程常驻，Activity 重建/回前台不丢），
 // 配合下方 loadVideo 的「同 uri 复用」分支：回来只重新接画面，绝不重建、绝不 seek。
-internal val videoMpRef = arrayOfNulls<MediaPlayer?>(1)
+// 【v119】内核由框架 MediaPlayer 换成 **ExoPlayer**（MKV 里的 AC3/EAC3 才认得出）。
+//   ⚠️ 变量名沿用 `videoMpRef`（全工程 50+ 处调用点），但类型已是 ExoPlayer，别再按 MediaPlayer 读。
+internal val videoMpRef = arrayOfNulls<ExoPlayer?>(1)
 internal var videoMpSourceUri: Uri? = null
 
 /**

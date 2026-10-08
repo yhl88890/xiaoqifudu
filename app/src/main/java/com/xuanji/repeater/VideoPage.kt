@@ -16,8 +16,15 @@ import android.view.Surface
 import android.widget.Toast
 import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
-import android.media.MediaPlayer
-import android.media.PlaybackParams
+// 【v119】视频内核换 ExoPlayer：框架 MediaPlayer 的 MKV 解析器不认 AC3/EAC3（整条音轨静默跳过）⇒
+//   MKV+杜比必哑。ExoPlayer 自带 MatroskaExtractor，原生支持 A_AC3/A_EAC3。
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import android.os.Build
 import android.util.Log
 import java.io.File
@@ -195,7 +202,7 @@ internal fun attachVideoPlayback() {
 internal fun releaseVideoPlayer() {
         // 【0915】播放器都没了，复读任务自然作废；不清的话切回来会带着旧句尾乱跳。
         clearVideoSentenceRepeat()
-        runCatching { videoMpRef[0]?.setSurface(null) }
+        runCatching { videoMpRef[0]?.setVideoSurface(null) }
         runCatching { videoMpRef[0]?.release() }
         videoMpRef[0] = null
         videoMpSourceUri = null
@@ -212,9 +219,9 @@ internal fun releaseVideoPlayer() {
 internal fun videoTogglePlay() {
     val mp = videoMpRef[0] ?: return
     if (videoPlaying) {
-        currentPos = mp.currentPosition.toLong(); mp.pause(); videoPlaying = false
+        currentPos = mp.currentPosition; mp.pause(); videoPlaying = false
     } else {
-        mp.start(); videoPlaying = true
+        mp.play(); videoPlaying = true
         PlaybackSession.onVideoStarted()   // Phase3-步骤1：手动点播放
         // 【0903 用户反馈】系统媒体中心一直显示音频、控制音频：之前 attach 只发生在「打开视频自动播放
         // (onPrepared && videoPlaying)」一条路径；从文件夹选视频后手动点播放走的是这里 → 视频在响但
@@ -239,8 +246,10 @@ internal fun videoAutoAdvanceIfEnabled() {
     val mode = PlayerService.instance?.state?.value?.playMode ?: PlayMode.SEQUENCE
     if (mode == PlayMode.LOOP_ONE) {
         val mp = videoMpRef[0] ?: return
+        // ExoPlayer：STATE_ENDED 下 seekTo(0) 自身就会回到 READY，随后的 play() 即重播。
+        // （MediaPlayer 那套 start→pause→seek→start 四连是为了脱离 PlaybackCompleted 态，ExoPlayer 不需要。）
         runCatching {
-            mp.start(); mp.pause(); mp.seekTo(0); mp.start()
+            mp.seekTo(0); mp.play()
         }
         videoPlaying = true
         return
@@ -257,22 +266,24 @@ internal fun videoAutoAdvanceIfEnabled() {
     openVideoFromLibrary(ctx, item, videoFolderVideos)
 }
 
-/** 精确 seek（API 26+ 用 SEEK_CLOSEST 取最近关键帧） */
+/** 精确 seek（ExoPlayer 用 EXACT：字幕跳句必须落在句子开头，不能被吸到上一个关键帧） */
 internal fun videoSeek(targetMs: Long, whence: String = "?" ) {
     val mp = videoMpRef[0] ?: return
-    val cur = runCatching { mp.currentPosition.toLong() }.getOrDefault(-1L)
+    val cur = runCatching { mp.currentPosition }.getOrDefault(-1L)
     Log.d("XJ_SEEK", "videoSeek whence=$whence target=$targetMs cur=$cur dir=${if (targetMs < cur) "BACK" else "FWD"}")
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        runCatching { mp.seekTo(targetMs, MediaPlayer.SEEK_CLOSEST) }
-    } else {
-        runCatching { mp.seekTo(targetMs.toInt()) }
-    }
+    // ⚠️ SeekParameters 在 Kotlin 视图里是**只读属性**（只有 getter 可见）⇒ 必须走方法调用，
+    //    写成 `mp.seekParameters = ...` 会直接编译不过（'val' cannot be reassigned）。
+    runCatching { mp.setSeekParameters(SeekParameters.EXACT) }
+    runCatching { mp.seekTo(targetMs) }
 }
 
 internal fun videoSeekBy(delta: Int) {
     val mp = videoMpRef[0] ?: return
-    val p = (mp.currentPosition + delta).coerceIn(0, mp.duration)
-    videoSeek(p.toLong()); currentPos = p.toLong()
+    // ⚠️ ExoPlayer 在「时长还没算出来」时 duration 返回 C.TIME_UNSET（一个大负数）。
+    //    直接拿它当 coerceIn 的上界会因 min>max 抛 IllegalArgumentException ⇒ 必须先归一化。
+    val dur = mp.duration.let { if (it == C.TIME_UNSET || it <= 0L) Long.MAX_VALUE else it }
+    val p = (mp.currentPosition + delta).coerceIn(0L, dur)
+    videoSeek(p); currentPos = p
 }
 
 /** 跳到第 idx 句并高亮（与旧 VideoView 版逻辑一致：落点异步复核，避免跳到上一句中间） */
@@ -284,7 +295,7 @@ internal fun videoSeekToSentence(idx: Int) {
     val stamp = System.currentTimeMillis()
     Log.d("XJ_SEEK", "videoSeekToSentence idx=$idx target=$target")
     videoSeek(target, "sentenceJump(idx=$idx)")
-    mp.start(); videoPlaying = true
+    mp.play(); videoPlaying = true
     PlaybackSession.onVideoStarted()   // Phase3-步骤1：视频跳句
     attachVideoPlayback()   // 跳句也会发声：同步接管媒体中心/焦点
     currentPos = target
@@ -294,7 +305,7 @@ internal fun videoSeekToSentence(idx: Int) {
         for (tryNo in 0 until 5) {
             delay(150)
             if (videoLastSeekAt != stamp) return@launch
-            val p = mp.currentPosition.toLong()
+            val p = mp.currentPosition
             val ok = p >= s.startMs - 300 && p <= s.endMs + 300
             if (ok) return@launch
             val nextTarget = if (p < s.startMs) {
@@ -429,7 +440,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     DisposableEffect(Unit) {
         onDispose {
             val mp = videoMpRef[0]
-            if (mp != null) runCatching { if (mp.duration > 0) currentPos = mp.currentPosition.toLong() }
+            if (mp != null) runCatching { if (mp.duration > 0) currentPos = mp.currentPosition }
             // 【0910 根治·后台存活】仅当「前台导航离开视频页(切音频/文件夹/生词)」才释放播放器；
             // 切后台只触发 onPause(appInBackground=true)不触发 onPause 的导航离开为 false → 释放，
             // 切后台时 appInBackground=true → 不释放，播放器保留、回前台走 REUSE 零 seek（「拉回前台就接着播」）。
@@ -542,8 +553,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     // 实时快进：按住下一句时把播放速度提到 2x，画面跟着实时快放；松手由 stopFast 恢复。
     fun startFastForward() {
         val mp = videoMpRef[0] ?: return
-        if (!videoPlaying) { runCatching { mp.start() }; videoPlaying = true; PlaybackSession.onVideoStarted(); attachVideoPlayback() }
-        runCatching { mp.playbackParams = mp.playbackParams.setSpeed(FF_SPEED) }
+        if (!videoPlaying) { runCatching { mp.play() }; videoPlaying = true; PlaybackSession.onVideoStarted(); attachVideoPlayback() }
+        runCatching { mp.playbackParameters = PlaybackParameters(FF_SPEED) }
         fastScrubbing = true
     }
     // 实时快退：MediaPlayer 不支持反向播放，用「按住期间持续回拖进度」模拟，约 3 倍速回退。
@@ -561,7 +572,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     // 松手：停掉快退协程、恢复常速、隐藏进度条。
     fun stopFast() {
         rewindJob?.cancel(); rewindJob = null
-        runCatching { videoMpRef[0]?.let { mp -> mp.playbackParams = mp.playbackParams.setSpeed(videoSpeed) } }
+        runCatching { videoMpRef[0]?.let { mp -> mp.playbackParameters = PlaybackParameters(videoSpeed) } }
         fastScrubbing = false
     }
 
@@ -583,7 +594,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             // 视频刚打开时 videoMpRef[0] 尚未被 onPrepared 赋值（mp 为 null），用 continue 等其就绪，
             // 不能用 break 永久退出循环（之后 mp 就绪也不会重启，导致 currentPos 永远停留在旧值）。
             val mp = videoMpRef[0] ?: continue
-            val pos = runCatching { mp.currentPosition.toLong() }.getOrDefault(currentPos)
+            val pos = runCatching { mp.currentPosition }.getOrDefault(currentPos)
             currentPos = pos
             val now = System.currentTimeMillis()
             if (now - lastSave > 2000) { lastSave = now; saveVideoPrefs(context) }
@@ -667,12 +678,12 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         if (existingPlayer != null && videoMpSourceUri == uri) {
             Log.d("XJ_VID", "loadVideo REUSE existing player; cur=${runCatching { existingPlayer.currentPosition }.getOrDefault(-1)} playing=$videoPlaying")
             videoPrepared = true
-            videoDuration = runCatching { existingPlayer.duration.toLong() }.getOrDefault(videoDuration).coerceAtLeast(0)
+            videoDuration = runCatching { existingPlayer.duration }.getOrDefault(videoDuration).coerceAtLeast(0)
             checkSubtitleTimeline()
             // 【方案B】幂等绑定：Surface 常驻且与上次是同一个 → 不会真正 setSurface，
             // 解码器不重新出帧 → 不重解关键帧 → 回前台画面无缝（不重播当句）。
             videoSurfaceRef[0]?.let { bindVideoSurface(it, "REUSE") }
-            if (videoPlaying) runCatching { existingPlayer.start() } else runCatching { existingPlayer.pause() }
+            if (videoPlaying) runCatching { existingPlayer.play() } else runCatching { existingPlayer.pause() }
             attachVideoPlayback()
             PlayerService.instance?.notifyVideoStateChanged()
             return@LaunchedEffect
@@ -685,12 +696,21 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         Log.d("XJ_VID", "loadVideo begin: uri=$uri currentPos=$currentPos videoResumePos=$videoResumePos videoHandedToBg=$videoHandedToBg startPlaying=$startPlaying")
         val speed = videoSpeed
         val ctx = context
-        val mp = MediaPlayer()
+        // 【v119】ExoPlayer 必须在主线程创建/调用 —— 本段在 LaunchedEffect 内 = 主线程 ✅
+        val mp = ExoPlayer.Builder(ctx).build()
         try {
-            mp.setAudioAttributes(AudioAttributes.Builder()
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .setUsage(AudioAttributes.USAGE_MEDIA).build())
-            mp.setDataSource(ctx, uri)
+            // ⚠️ ExoPlayer 的 AudioAttributes 是 **androidx.media3.common.AudioAttributes**，
+            //    不是 android.media 那个同名类（这里必须用全限定名，否则撞车）。
+            //    第二参 handleAudioFocus = **false**：保持与 MediaPlayer 时代一致 —— 音频焦点/媒体中心
+            //    统一由 PlayerService 接管（attachVideoPlayback），播放器自己别抢。
+            mp.setAudioAttributes(
+                androidx.media3.common.AudioAttributes.Builder()
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .setUsage(C.USAGE_MEDIA)
+                    .build(),
+                false
+            )
+            mp.setMediaItem(MediaItem.fromUri(uri))
         } catch (e: Throwable) {
             Log.w("XJ_VID", "setDataSource failed: ${e.message}")
             videoErrorMessage = "无法打开视频：${e.message ?: "未知错误"}"
@@ -706,11 +726,20 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         // 放前面会取到 null 而静默跳过绑定 → 新建播放器永远没画面（黑屏）。
         videoMpBoundSurface = null   // 新播放器，强制绑定一次
         videoSurfaceRef[0]?.let { bindVideoSurface(it, "CREATE") }
-        mp.setOnPreparedListener { mpp ->
-            videoDuration = mpp.duration.toLong().coerceAtLeast(0)
+        // 【v119】原 `setOnPreparedListener` 的 body **原样抽成局部函数**（缩进完全不动），
+        //   改由下面的 `Player.Listener.onPlaybackStateChanged(STATE_READY)` 触发。
+        // ⚠️ 为什么要抽函数 + 加一次性闸门：STATE_READY 会**多次**触发（每次缓冲完成、每次 seek
+        //    回落再回 READY），而 onPrepared 整个生命周期只该跑一次 —— 不守闸门就会每 seek 一次
+        //    就重跑一遍续播逻辑（位置被反复拽回 target，表现成"跳句后自己又跳回来"）。
+        var readyHandled = false
+        // 「暂停态恢复」时用来抓住"这次 seek 落地了"：ExoPlayer 没有 setOnSeekCompleteListener，
+        // 对应物是 Player.Listener.onPositionDiscontinuity(reason = SEEK)。
+        var pendingPauseAfterSeek = false
+        fun onVideoPrepared() {
+            videoDuration = mp.duration.coerceAtLeast(0)
             videoPrepared = true
             checkSubtitleTimeline()
-            runCatching { mpp.playbackParams = mpp.playbackParams.setSpeed(speed) }
+            runCatching { mp.playbackParameters = PlaybackParameters(speed) }
             // 续播位置：优先权威续播位；否则用 currentPos（冷启恢复），片尾附近回开头防黑屏
             val target = if (videoResumePos > 0) videoResumePos else (if (resumePos > 0) {
                 val nearEnd = resumePos >= videoDuration - 2500 || resumePos >= (videoDuration * 98 / 100)
@@ -718,16 +747,15 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             } else 0L)
             Log.d("XJ_VID", "onPrepared target=$target resumePos=$resumePos spResumePos=$spResumePos dur=$videoDuration videoResumePos=$videoResumePos nearEnd=${(resumePos >= videoDuration - 2500 || resumePos >= (videoDuration * 98 / 100))}")
             if (target > 0) {
-            // 【0910】冷启/换片续播：用 SEEK_NEXT_SYNC（只往【前】/不动，绝不回退）。
-            // 之前用 SEEK_CLOSEST 会被吸到「离 target 最近的关键帧」——当 target 落在某句开头附近时
-            // 会回退到上一句/句首关键帧，造成「回前台重播那一句」（第一句最明显，会被吸到 0 整句重播）。
-            // 后台回前台走 REUSE 分支不会到这里（不重建不 seek），此分支仅进程被杀冷启重建时触发，
-            // 用 NEXT_SYNC 最多跳一个 GOP(0.5~2s) 前进，绝不重播已听内容。
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                runCatching { mpp.seekTo(target, MediaPlayer.SEEK_NEXT_SYNC) }
-            } else {
-                runCatching { mpp.seekTo(target.toInt()) }
-            }
+            // 【0910】冷启/换片续播：绝不能重播已听内容。
+            // MediaPlayer 时代用 SEEK_NEXT_SYNC（只往前跳一个 GOP）来绕开"被吸到上一个关键帧"；
+            // ExoPlayer 直接用 **SeekParameters.EXACT** 精确落到 target 本身 ⇒ 既不回退也不多跳，更准。
+            // （后台回前台走的是上面的 REUSE 分支，压根不会到这里。）
+            // ⚠️ pendingPauseAfterSeek 必须在 seek **之前**置位：seek 的完成回调是异步的，
+            //    晚设会漏掉这一次（见下面 onRenderedFirstFrame）。
+            pendingPauseAfterSeek = true
+            runCatching { mp.setSeekParameters(SeekParameters.EXACT) }
+            runCatching { mp.seekTo(target) }
                 currentPos = target
             }
             videoResumePos = 0                    // 消费掉，避免后续冷启误用
@@ -735,31 +763,33 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             // 从快照点(L596)到这里之间隔着「等 Surface」的挂起点（最长 500ms），期间音频焦点被抢
             // /媒体中心操作都会走 videoTogglePlay() 把状态改掉，拿旧快照决策就是拿过期意图开机关。
             if (videoPlaying) {
-                mpp.start()
+                mp.play()
                 attachVideoPlayback()
             } else {
                 if (target > 0) {
                     // 🔴【1008 黑屏根因修复】「暂停态恢复 + 有续播位置」时**不能直接 pause()**。
-                    // seekTo() 是异步的，而播放器此刻刚 prepare 完、**从没 start 过** ⇒ NuPlayer 的
-                    // renderer 处于 paused 状态，seek 落到目标帧也不会提交到 Surface ⇒ 视频窗口纯黑、
-                    // 没有任何字（真机实锤：dumpsys numFramesTotal 停在 1，播放键显示「▶️」）。
-                    // ⇒ 先让 renderer 跑起来、把目标帧渲染出来，等 seek 落定后再停住。
+                    // seek 是异步的，而播放器此刻刚 prepare 完、**从没 play 过** ⇒ 渲染器处于暂停态，
+                    // seek 落到目标帧也不会提交到 Surface ⇒ 视频窗口纯黑、没有任何字
+                    // （真机实锤：dumpsys numFramesTotal 停在 1，播放键显示「▶️」）。
+                    // ⇒ 先让渲染器跑起来、把目标帧画出来，等**第一帧真的上屏**后再停住。
                     //   起播期间静音：这一下纯粹为了出画面，绝不能漏出声音。
-                    // 注：seek 在暂停态下不渲染这件事，项目里 `videoAutoAdvanceIfEnabled` 的
-                    // LOOP_ONE 分支（start→pause→seek→start 四连）和 `videoSeekToSentence`
-                    // （seek→start）早就各自绕过一次，只有这条路径漏了。
-                    runCatching { mpp.setVolume(0f, 0f) }
-                    mpp.setOnSeekCompleteListener { m ->
-                        m.setOnSeekCompleteListener(null)
-                        // 若这几十毫秒里用户自己点了播放（videoPlaying=true），就别再把它按停。
-                        if (!videoPlaying) runCatching { mpp.pause() }
-                        runCatching { mpp.setVolume(1f, 1f) }
-                        PlayerService.instance?.notifyVideoStateChanged()
+                    runCatching { mp.volume = 0f }
+                    runCatching { mp.play() }
+                    // 收尾交给 listener 的 onRenderedFirstFrame；再挂一个超时兜底 ——
+                    // 万一那帧迟迟不来（文件损坏等），也不能让视频一直静音着播下去。
+                    pageScope.launch {
+                        delay(2500)
+                        if (pendingPauseAfterSeek) {
+                            pendingPauseAfterSeek = false
+                            Log.w("XJ_VID", "onRenderedFirstFrame 超时兜底：强制恢复音量")
+                            if (!videoPlaying) runCatching { mp.pause() }
+                            runCatching { mp.volume = 1f }
+                            PlayerService.instance?.notifyVideoStateChanged()
+                        }
                     }
-                    runCatching { mpp.start() }
                 } else {
                     // 从头开始且保持暂停：没有 seek，直接停在首帧（首帧本身就有画面，不黑）。
-                    runCatching { mpp.pause() }
+                    runCatching { mp.pause() }
                 }
                 // 即便暂停也要接管媒体中心/通知/焦点，并停掉旧音频（防幽灵双声）：
                 // 进视频模式但视频处于暂停态时，若不接管，残留的音频会继续响。
@@ -767,36 +797,71 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             }
             PlayerService.instance?.notifyVideoStateChanged()
         }
-        mp.setOnCompletionListener {
-            videoPlaying = false
-            PlayerService.instance?.notifyVideoStateChanged()
-            // 【1007 连播】按播放模式自动续播（顺序/列表循环/单曲循环，与音频共用设置）。
-            // 回调在 MediaPlayer 内部线程 ⇒ 必须先 post 回主线程再动播放器/重组状态。
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                videoAutoAdvanceIfEnabled()
+        // 【v119】ExoPlayer 用统一的 Player.Listener 承接 就绪 / 播完 / 首帧 / 出错 四类事件
+        // （原来 MediaPlayer 那一堆 setOnXxxListener 的等价物）。
+        mp.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                when (state) {
+                    // 就绪：交回上面那个一次性函数（⚠️ 必须守 readyHandled 闸门，见其定义处注释）
+                    Player.STATE_READY -> if (!readyHandled) { readyHandled = true; onVideoPrepared() }
+                    // 播完：原 setOnCompletionListener 的等价物
+                    Player.STATE_ENDED -> {
+                        videoPlaying = false
+                        PlayerService.instance?.notifyVideoStateChanged()
+                        // 【1007 连播】按播放模式自动续播（顺序/列表循环/单曲循环，与音频共用设置）。
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            videoAutoAdvanceIfEnabled()
+                        }
+                    }
+                }
             }
-        }
-        // 【0903 黑屏修复】MediaPlayer 错误回调：文件读不到/权限拒/解码失败时显示具体错误到视频窗口
-        // （替代静默黑屏）；并给「换视频 / 重试」按钮（见 VideoStateOverlay）。
-        mp.setOnErrorListener { _, what, extra ->
-            val hint = when (extra) {
-                MediaPlayer.MEDIA_ERROR_IO ->
-                    "无法读取视频文件（权限不足或文件已被删除）"
-                MediaPlayer.MEDIA_ERROR_MALFORMED ->
-                    "视频格式损坏或不被支持"
-                MediaPlayer.MEDIA_ERROR_UNSUPPORTED ->
-                    "视频编码不支持（试试转码成标准 mp4）"
-                MediaPlayer.MEDIA_ERROR_TIMED_OUT ->
-                    "读取超时，请重试"
-                else -> "播放失败（what=$what extra=$extra）"
+
+            /** 第一帧真正画到 Surface 上 —— 「暂停态恢复」的收尾时机。
+             *  它比 MediaPlayer 的 onSeekComplete 更准：要的正是「画面出来了」这个事实，
+             *  而 seek 完成不等于已上屏。 */
+            override fun onRenderedFirstFrame() {
+                if (!pendingPauseAfterSeek) return
+                pendingPauseAfterSeek = false
+                // 若这几十毫秒里用户自己点了播放（videoPlaying=true），就别再把它按停。
+                if (!videoPlaying) runCatching { mp.pause() }
+                runCatching { mp.volume = 1f }
+                PlayerService.instance?.notifyVideoStateChanged()
             }
-            Log.w("XJ_VID", "ERROR what=$what extra=$extra hint=$hint")
-            videoErrorMessage = hint
-            videoPlaying = false
-            PlayerService.instance?.notifyVideoStateChanged()
-            true  // 返回 true 表示已处理，阻止默认 onCompletion 触发
-        }
-        runCatching { mp.prepareAsync() }
+
+            // 【0903 黑屏修复】错误回调：文件读不到/权限拒/解码失败时显示具体错误到视频窗口
+            // （替代静默黑屏）；并给「换视频 / 重试」按钮（见 VideoStateOverlay）。
+            // ExoPlayer 的 errorCode 比 MediaPlayer 的 (what, extra) 细得多，逐类映射成人话。
+            override fun onPlayerError(e: PlaybackException) {
+                val hint = when (e.errorCode) {
+                    PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND ->
+                        "找不到视频文件（可能已被删除或移动）"
+                    PlaybackException.ERROR_CODE_IO_NO_PERMISSION ->
+                        "无法读取视频文件（权限不足）"
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+                    PlaybackException.ERROR_CODE_IO_UNSPECIFIED ->
+                        "无法读取视频文件（权限不足或文件已被删除）"
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ->
+                        "视频格式损坏或不被支持"
+                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+                    PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+                    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+                    PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+                    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ->
+                        "视频编码不支持（试试转码成标准 mp4）"
+                    PlaybackException.ERROR_CODE_TIMEOUT ->
+                        "读取超时，请重试"
+                    else -> "播放失败（${e.errorCodeName}）"
+                }
+                Log.w("XJ_VID", "ERROR code=${e.errorCode}(${e.errorCodeName}) hint=$hint cause=${e.cause}")
+                videoErrorMessage = hint
+                videoPlaying = false
+                PlayerService.instance?.notifyVideoStateChanged()
+            }
+        })
+        runCatching { mp.prepare() }
     }
 
     // 字幕列表自动滚动到当前句
