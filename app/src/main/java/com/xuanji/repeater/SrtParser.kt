@@ -60,8 +60,19 @@ object SrtParser {
      * 沿父目录枚举子文档，而 Photo Picker 的 Uri 根本不在文档树体系里，必然查不到。
      * 现在视频改成从媒体库列表里选，有真实 [videoPath]，直接列目录即可。
      *
-     * 匹配优先级：<基名>.srt → 同目录下第一个 .srt（应对 clip.720p.mp4 配 clip.srt 这类不同名情况）。
+     * 匹配优先级（**已弃用，见下**）：<基名>.srt → 同目录下第一个 .srt。
+     *
+     * 🔴【1008 弃用，别再调用】只认 `.srt`，而且**找不到同名就取同目录第一个 `.srt`** —— 一个目录里放多个
+     * 视频时会把**别的视频的字幕**加载进来（张冠李戴，界面上还看不出来）。
+     *
+     * 请改用 [SubtitleParser.findBestSubtitle]：支持 SRT/ASS/SSA、去掉版本尾巴(`.chs`/`.1080p`/`.WEB-DL`…)
+     * 再匹配、编码自适应（GBK 老字幕），且四级都不中时返回 null（**不猜**）。
+     * 本函数已无调用点，留着只为少一次大改动。
      */
+    @Deprecated(
+        "改用 SubtitleParser.findBestSubtitle：支持 ASS/SSA，且不会张冠李戴",
+        ReplaceWith("SubtitleParser.findBestSubtitle(videoPath)"),
+    )
     fun findBestSrtFile(videoPath: String): java.io.File? {
         return try {
             val dir = java.io.File(videoPath).parentFile ?: return null

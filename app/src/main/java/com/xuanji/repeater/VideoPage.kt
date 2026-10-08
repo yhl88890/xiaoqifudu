@@ -13,6 +13,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.TextureView
 import android.view.Surface
+import android.widget.Toast
 import android.graphics.SurfaceTexture
 import android.media.AudioAttributes
 import android.media.MediaPlayer
@@ -125,6 +126,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -304,6 +306,36 @@ internal fun videoSeekToSentence(idx: Int) {
     }
 }
 
+/**
+ * 【1008 · 第7步】字幕时间轴轻量自检：末句结束时间跟视频时长**差得太远**就提示一句。
+ *
+ * 为什么需要：网上下的字幕往往是**另一个发布版本**的（DVD 版字幕配 BluRay 版片源），
+ * 片头长度、「前情提要」有没有、剪辑快慢都可能差几十秒 —— **配对成功 ≠ 时间轴对得上**。
+ * 阿亮下的老友记正是这个情况（S01 的 DVDRip 字幕 + 2160p BluRay 片源，两处下的）。
+ * 我们**不做**自动对齐（那是下一步、另开功能），先如实告诉他一句，
+ * 免得他以为软件坏了、或者以为字幕本身是乱的。
+ *
+ * 判据：`|视频时长 − 末句结束| > 30 秒` **且** `差值 > 视频时长的 5%`，两条同时满足才算 ——
+ * 短视频里 30 秒是极大的比例，长片里 5% 是极大的绝对值，两条一起卡住两头的误报。
+ * 只在「时长已知 + 有句子」时判；读的是当前状态（换片/重新识别都会重判），
+ * 走 [asrMsg] 那颗画面正中的胶囊 —— 它是视频页所有状态提示的唯一出口。
+ */
+internal fun checkSubtitleTimeline() {
+    val total = videoDuration
+    val list = sentences
+    if (total <= 0L || list.isEmpty()) return
+    val last = list.last().endMs
+    if (last <= 0L) return
+    val gap = kotlin.math.abs(total - last)
+    if (gap <= 30_000L || gap * 20 <= total) return
+    asrMsg = "⚠️ 字幕时间轴可能对不上：字幕到 ${formatDuration(last)}，视频 ${formatDuration(total)}"
+}
+
+private fun formatDuration(ms: Long): String {
+    val totalSec = (ms / 1000).coerceAtLeast(0)
+    return "%d:%02d".format(totalSec / 60, totalSec % 60)
+}
+
 internal fun videoJumpSentence(step: Int) {
     // 【0915】「上一句」要先落到目标句、再交出复读任务。
     // 关键：videoSeekToSentence 里的落点异步复核协程一失败就会再叫一次 videoSeek（改 videoLastSeekAt），
@@ -441,6 +473,61 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     val FF_SPEED = 2.0f        // 快进倍速（MediaPlayer 倍速上限 2.0，超过抛异常）
     val REWIND_STEP_MS = 250L  // 快退：每次回拖的时长
     val REWIND_TICK_MS = 80L   // 快退：回拖间隔（约 3 倍速回退）
+
+    // ===== 【1008】字幕入口：手动选一份 / 把当前字幕导成 SRT =====
+    // 阿亮的场景："我下了《老友记》一集的视频，又下了它的字幕，放一起、或者不放在一起，
+    // 反正都能在咱们软件上点播。" —— 自动匹配（[SubtitleParser]）覆盖"放一起且名字对得上"，
+    // 剩下"分开放 / 名字对不上"就靠这里手动指定。
+    // 选中后**复制进 App 私有目录并记住**（见 [ManualSubtitle]）：原文件不动、不改名、不搬走。
+    // ⚠️ 位置要求：必须放在上面那些 `by remember` 状态声明**之后** —— 下面这个局部函数要写
+    //    `expandedVideoIndex`，而局部函数捕获的局部属性只在其声明点之后可见（编译期就报 Unresolved）。
+    var subMenuOpen by remember { mutableStateOf(false) }
+
+    /**
+     * 选中一份字幕后立刻用上。
+     * ⚠️ 纪律：**先重置 UI 状态、再换数据** —— 反了的话新字幕会有一帧带着旧高亮/旧展开项（等于答案泄露）。
+     */
+    fun applyPickedSubtitle(ctx: Context, uri: Uri) {
+        val path = videoPath
+        if (path.isBlank()) {
+            Toast.makeText(ctx, "先选一个视频", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val copied = ManualSubtitle.put(ctx, path, uri)
+        if (copied == null) {
+            Toast.makeText(ctx, "这份字幕读不出来（只认 SRT / ASS / SSA）", Toast.LENGTH_LONG).show()
+            return
+        }
+        val src = ManualSubtitle.displayName(ctx, path).ifBlank { copied.name }
+        val parsed = SubtitleParser.parseFile(copied)
+        if (parsed.isEmpty()) {
+            // 复制时已验过一次，这里是第二道闸：任何原因导致空，就当没选（别留个哑状态）
+            ManualSubtitle.clear(ctx, path)
+            Toast.makeText(ctx, "这份字幕里没有内容，换一份试试", Toast.LENGTH_LONG).show()
+            return
+        }
+        clearVideoSentenceRepeat()      // 换字幕 = 换整套时间轴，复读任务和高亮钉子都要撤
+        expandedVideoIndex = -1
+        videoSentenceIndexGlobal = 0
+        currentPos = parsed.first().startMs
+        sentences = parsed
+        srtName = src
+        asrMsg = ""
+        videoSeek(parsed.first().startMs)
+        SubtitleLibrary.saveVideo(ctx, videoName, parsed, path)
+        saveVideoPrefs(ctx)
+        Toast.makeText(ctx, "已用这份字幕：$src", Toast.LENGTH_LONG).show()
+    }
+
+    val pickSubtitleFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) applyPickedSubtitle(context, uri)
+    }
+
+    /** 把当前字幕写成 SRT 放到视频旁边（同名位置被占就退让成 `<基名>-识别.srt`，**绝不覆盖**）。 */
+    fun exportSubtitleNow() {
+        val r = SubtitleExport.writeBeside(videoPath, sentences)
+        Toast.makeText(context, r.message, Toast.LENGTH_LONG).show()
+    }
 
     // 同级视频列表里当前位置（上一曲/下一曲用）
     val curFolderIdx = videoFolderVideos.indexOfFirst { it.path == videoPath }
@@ -581,6 +668,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             Log.d("XJ_VID", "loadVideo REUSE existing player; cur=${runCatching { existingPlayer.currentPosition }.getOrDefault(-1)} playing=$videoPlaying")
             videoPrepared = true
             videoDuration = runCatching { existingPlayer.duration.toLong() }.getOrDefault(videoDuration).coerceAtLeast(0)
+            checkSubtitleTimeline()
             // 【方案B】幂等绑定：Surface 常驻且与上次是同一个 → 不会真正 setSurface，
             // 解码器不重新出帧 → 不重解关键帧 → 回前台画面无缝（不重播当句）。
             videoSurfaceRef[0]?.let { bindVideoSurface(it, "REUSE") }
@@ -621,6 +709,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         mp.setOnPreparedListener { mpp ->
             videoDuration = mpp.duration.toLong().coerceAtLeast(0)
             videoPrepared = true
+            checkSubtitleTimeline()
             runCatching { mpp.playbackParams = mpp.playbackParams.setSpeed(speed) }
             // 续播位置：优先权威续播位；否则用 currentPos（冷启恢复），片尾附近回开头防黑屏
             val target = if (videoResumePos > 0) videoResumePos else (if (resumePos > 0) {
@@ -864,11 +953,38 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 // 非全屏：右上角全屏按钮，跟随「点画面浮出的底部控制条」一起显隐（controlsVisible），
                 // 点一下视频窗口：全屏按钮与底部功能键同时出现 / 同时隐藏。
                 if (!readingMode && !videoFullscreen && controlsVisible && videoUri != null) {
-                    IconButton(
-                        onClick = { videoFullscreen = true; controlsVisible = false },
+                    Row(
                         modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Filled.Fullscreen, contentDescription = "全屏", tint = Color.White)
+                        // 【1008】字幕菜单：手动指定一份字幕 / 把当前字幕导成 SRT。
+                        // 塞在"点画面才浮出的控制层"里（跟右边全屏键同一时机出现）：不常驻、不占布局高度，
+                        // 也不动字幕列表和 5 键控制排 —— 那两处阿亮调过很多轮，不碰。
+                        Box {
+                            IconButton(onClick = { subMenuOpen = true }) {
+                                Icon(Icons.Filled.Subtitles, contentDescription = "字幕", tint = Color.White)
+                            }
+                            AppDropdownMenu(expanded = subMenuOpen, onDismissRequest = { subMenuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("选字幕…") },
+                                    onClick = {
+                                        subMenuOpen = false
+                                        // mime 一律给 */*：各家文件管理器给 .srt/.ass 报的 mime 五花八门
+                                        // （text/plain、application/octet-stream…），按 mime 过滤会让用户
+                                        // "在选文件界面里根本看不见自己那份字幕"。选完再按内容判定。
+                                        pickSubtitleFile.launch(arrayOf("*/*"))
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("导出字幕") },
+                                    onClick = { subMenuOpen = false; exportSubtitleNow() },
+                                )
+                            }
+                        }
+                        IconButton(onClick = { videoFullscreen = true; controlsVisible = false }) {
+                            Icon(Icons.Filled.Fullscreen, contentDescription = "全屏", tint = Color.White)
+                        }
                     }
                 }
                 // 全屏：顶部右侧 字幕开关 + 退出全屏（避开状态栏，避免被挡）
@@ -1355,6 +1471,23 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                         WordCardDialog(word = selectedWord!!, source = videoName, onDismiss = { selectedWord = null })
                                     }
                                 }
+                            }
+                        } else if (videoUri != null) {
+                            // 【1008】没字幕时的空态。原来这块是**一片空白** —— 用户分不清"这视频本来就没字幕"
+                            // 和"软件坏了"。给一个能直接点的入口，省掉"先点画面、再找右上角菜单"两步。
+                            // 只在有视频时出现（没视频时不提字幕这回事）。
+                            Box(
+                                modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 10.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    "没有字幕，点这里选一份",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .clickable { pickSubtitleFile.launch(arrayOf("*/*")) }
+                                        .padding(12.dp),
+                                )
                             }
                         }
                     }

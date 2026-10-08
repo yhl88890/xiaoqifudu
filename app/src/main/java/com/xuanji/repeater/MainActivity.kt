@@ -203,7 +203,9 @@ internal var videoPlaying by mutableStateOf(false)
 private var sessionPage: Page = Page.PLAYER
 internal var currentPos by mutableStateOf(0L)
 internal var sentences by mutableStateOf<List<Sentence>>(emptyList())
-private var srtName by mutableStateOf("")
+// 当前字幕的来源名（同名字幕文件名 / 手动选的那份的原名 / "生成字幕"）。
+// 【1008】原为 private：视频页「选字幕」选完要立刻把它换成新来源名，故放开成 internal（只读用它，别在别处乱写）。
+internal var srtName by mutableStateOf("")
 internal var loopSentence by mutableStateOf(false)
 internal var recognizing by mutableStateOf(false)
 internal var asrMsg by mutableStateOf("")
@@ -365,6 +367,33 @@ internal val videoAsrScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 internal const val PREFS_VIDEO = "xuanji_video"
 private const val CRASH_WINDOW_MS = 3000L      // 兜底计数窗口
 private const val CRASH_MAX_IN_WINDOW = 5      // 窗口内崩这么多次就说明救不回来，交还系统
+/**
+ * 把「当前页」归一化成**主模式**，再写进 [saveVideoPrefs] 的 `mode`。
+ *
+ * 🔴【1008 阿亮报的 bug：每次打开 App 都进音频模式】根因就在这一行判定上。
+ *
+ * 文件夹页 [Page.FOLDER] / 音频选集页 [Page.TRACK] / 生词本 [Page.VOCAB] / 复习 [Page.REVIEW]
+ * 都是**子页面**，不属于三种主模式（音频播放 / 视频 / 阅读）。原先把 `page` 原样存进 `mode`：
+ * 在「视频选集」那一页退出，SP 里就写着 `mode=FOLDER`；下次启动的恢复逻辑只认 `VIDEO` / `READING`，
+ * 其余一律落 `else`（什么都不做）⇒ `page` 停在初值 [Page.PLAYER] = **音频模式**。
+ *
+ * 更坑的是它是**自我固化**的：这一轮启动的 `LaunchedEffect(page)` 又立刻把 `mode` 改写成 `PLAYER`
+ * ⇒ 一次踩中，之后每次启动都是音频模式，再也回不来（真机 100% 复现：进视频选集 → 杀进程 → 重开）。
+ *
+ * ⇒ 子页面必须回到「它是从哪个模式点开的」：
+ * - [Page.FOLDER] / [Page.TRACK]：进页时已经把来源模式记在 `folderReturnPage` 里（两处入口都写了）；
+ * - [Page.VOCAB] / [Page.REVIEW]：都是阅读模式的下级页面（返回键链路 REVIEW→VOCAB→READING）⇒ 回阅读。
+ */
+private fun mainModeOf(page: Page, folderReturnPage: Page): Page = when (page) {
+    Page.FOLDER, Page.TRACK -> when (folderReturnPage) {
+        // 来源本身就是子页面（理论上不会发生，来源模式初值就是 PLAYER）⇒ 退回音频
+        Page.FOLDER, Page.TRACK -> Page.PLAYER
+        else -> folderReturnPage
+    }
+    Page.VOCAB, Page.REVIEW -> Page.READING
+    else -> page
+}
+
 // 进程级幂等：Activity 重建（旋转/配置变更）会重走 onCreate，兜底只能装一次，
 // 否则每重建一次就多嵌套一层 Looper，装多了会出问题
 private var crashGuardInstalled = false
@@ -501,16 +530,24 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
     // 打开/切换视频默认自动播放（暂停状态由返回时的续播逻辑尊重，不会在这里被误触发）
     videoPlaying = true
     PlaybackSession.onVideoStarted()   // Phase3-步骤1：记「当前播放源=视频」（只记录，不参与判定）
-    // 同目录字幕：优先 <基名>.srt，没有就退而取同目录第一个 .srt
-    SrtParser.findBestSrtFile(item.path)?.let { f ->
-        runCatching {
-            val parsed = SrtParser.parse(f.readText())
-            if (parsed.isNotEmpty()) {
-                sentences = parsed
-                srtName = f.name
-                // 同目录 .srt 也算「播过的字幕」→ 归档字幕库（视频来源）
-                SubtitleLibrary.saveVideo(context, videoName, parsed, item.path)
+    // 字幕来源优先级：① 手动选过的（用户显式指定，最高）② 同名/近名的字幕文件（下面那段）③ 以前识别的结果
+    // 🔴【1008】原来调 SrtParser.findBestSrtFile —— 它只认 .srt，而且找不到同名就"取同目录第一个"，
+    //   一个目录里放多个视频时会把**别的视频的字幕**加载进来（张冠李戴且界面看不出来）。
+    //   现在统一走 [SubtitleParser] 四级匹配（SRT/ASS/SSA + 去版本尾巴 + 编码自适应），
+    //   四级都不中一律**不自动加载**（返回 null，交给右上角「选字幕」）。
+    val manualSub = ManualSubtitle.saved(context, item.path)
+    val subFile = manualSub ?: SubtitleParser.findBestSubtitle(item.path)
+    if (subFile != null) runCatching {
+        val parsed = SubtitleParser.parseFile(subFile)
+        if (parsed.isNotEmpty()) {
+            sentences = parsed
+            srtName = if (manualSub != null) {
+                ManualSubtitle.displayName(context, item.path).ifBlank { subFile.name }
+            } else {
+                subFile.name
             }
+            // 同目录 / 手动选的字幕也算「播过的字幕」→ 归档字幕库（视频来源）
+            SubtitleLibrary.saveVideo(context, videoName, parsed, item.path)
         }
     }
     // 无同目录 .srt 时，回退读取之前 ASR 生成的字幕（按视频名从字幕库取），
@@ -548,14 +585,19 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
     videoFolderVideos = siblings
     videoPlaying = true
     PlaybackSession.onVideoStarted()   // Phase3-步骤1：本地文件视频（B站导入）同样记账
-    SrtParser.findBestSrtFile(file.path)?.let { f ->
-        runCatching {
-            val parsed = SrtParser.parse(f.readText())
-            if (parsed.isNotEmpty()) {
-                sentences = parsed
-                srtName = f.name
-                SubtitleLibrary.saveVideo(context, videoName, parsed, file.path)
+    // 字幕来源优先级：同 openVideoFromLibrary（见那里的【1008】说明）—— 手动选的 > 同目录文件 > 识别结果
+    val manualSub = ManualSubtitle.saved(context, file.path)
+    val subFile = manualSub ?: SubtitleParser.findBestSubtitle(file.path)
+    if (subFile != null) runCatching {
+        val parsed = SubtitleParser.parseFile(subFile)
+        if (parsed.isNotEmpty()) {
+            sentences = parsed
+            srtName = if (manualSub != null) {
+                ManualSubtitle.displayName(context, file.path).ifBlank { subFile.name }
+            } else {
+                subFile.name
             }
+            SubtitleLibrary.saveVideo(context, videoName, parsed, file.path)
         }
     }
     if (sentences.isEmpty()) {
@@ -1378,8 +1420,10 @@ class MainActivity : ComponentActivity() {
         }
 
         // 退出状态实时落盘：页面或播放状态一变就存，进程被杀(划掉后台)后冷启也能恢复上次模式/暂停播放。
+        // 🔴 存的是 mainModeOf(page)：**子页面不能原样存**，否则下次启动认不出来（见 mainModeOf 的说明）。
         LaunchedEffect(page) {
-            sessionPage = page; saveVideoPrefs(context)
+            sessionPage = mainModeOf(page, folderReturnPage)
+            saveVideoPrefs(context)
             // 【0913】离开阅读页时清掉「阅读选集」请求：残留的请求会让下次进阅读直接停在选集视图。
             if (page != Page.READING) readingLibraryReq.value = false
         }

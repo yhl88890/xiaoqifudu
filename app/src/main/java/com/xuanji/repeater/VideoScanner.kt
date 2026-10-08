@@ -28,6 +28,12 @@ object VideoScanner {
             MediaStore.Video.Media.DURATION,
         )
         val sortOrder = "${MediaStore.Video.Media.TITLE} COLLATE NOCASE ASC"
+        // 【1008】目录 → 该目录下的字幕文件。**一次列目录、批量为多个视频判「有没有字幕」**，
+        // 避免每个视频都 listFiles 一遍（视频一多就是 O(n²) 次目录 IO）。
+        val subCache = java.util.HashMap<String, List<java.io.File>>()
+        fun subsOf(dir: java.io.File?): List<java.io.File> =
+            if (dir == null) emptyList()
+            else subCache.getOrPut(dir.absolutePath) { SubtitleParser.listSubtitles(dir) }
         var cursor: Cursor? = null
         try {
             cursor = context.contentResolver.query(
@@ -40,7 +46,8 @@ object VideoScanner {
                 val durCol = c.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
                 while (c.moveToNext()) {
                     val path = c.getString(dataCol) ?: continue
-                    if (!java.io.File(path).exists()) continue
+                    val vf = java.io.File(path)
+                    if (!vf.exists()) continue
                     val id = c.getLong(idCol)
                     val title = c.getString(titleCol) ?: path.substringAfterLast('/')
                     val duration = c.getLong(durCol)
@@ -50,7 +57,9 @@ object VideoScanner {
                             path = path,
                             title = title,
                             durationMs = duration,
-                            hasSrt = java.io.File(SrtParser.srtPathFor(path)).exists(),
+                            // 【1008】角标改成和「实际自动加载」同一套判据（SRT/ASS/SSA + 去版本尾巴匹配）：
+                            // 原来只判 `<基名>.srt` 存不存在 ⇒ 字幕放的是 .ass 时，明明有字幕却显示没字幕。
+                            hasSrt = SubtitleParser.pickBest(vf.name, subsOf(vf.parentFile)) != null,
                         )
                     )
                 }
