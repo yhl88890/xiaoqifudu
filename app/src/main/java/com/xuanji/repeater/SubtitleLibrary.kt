@@ -19,6 +19,13 @@ data class SubtitleEntry(
      * 🔴 老数据没这个字段 ⇒ optBoolean 默认 false，兼容，不用迁移。
      */
     val incomplete: Boolean = false,
+    /**
+     * 🔴🔴【1010 阿亮定】这份字幕是不是**我们自己 ASR 生成**的（中英混杂、不是双语对照）。
+     *   用途：读出来时不重排行序、显示时不按档位裁 —— 阿亮：「只要是我们生成的就都不管」。
+     *   抓来的现成字幕（手动/.srt/内封轨/B站CC）为 false。
+     *   🔴 老数据没这个字段 ⇒ optBoolean 默认 false（当"抓来的"处理），兼容不用迁移。
+     */
+    val fromAsr: Boolean = false,
 )
 
 /**
@@ -44,11 +51,12 @@ object SubtitleLibrary {
         sentences: List<Sentence>,
         path: String? = null,
         incomplete: Boolean = false,
+        fromAsr: Boolean = false,
     ) {
         if (title.isBlank() || sentences.isEmpty()) return
         val all = loadAll(context).toMutableList()
         all.removeAll { it.source == source && it.title == title }
-        all.add(0, SubtitleEntry(source, title, sentences, System.currentTimeMillis(), path, incomplete))
+        all.add(0, SubtitleEntry(source, title, sentences, System.currentTimeMillis(), path, incomplete, fromAsr))
         val trimmed = if (all.size > MAX_ENTRIES) all.take(MAX_ENTRIES) else all
         val arr = JSONArray()
         for (e in trimmed) {
@@ -58,6 +66,7 @@ object SubtitleLibrary {
                 put("updatedAt", e.updatedAt)
                 put("path", e.path ?: "")
                 put("incomplete", e.incomplete)
+                put("fromAsr", e.fromAsr)
                 put("sentences", encodeSentences(e.sentences))
             })
         }
@@ -73,7 +82,8 @@ object SubtitleLibrary {
         sentences: List<Sentence>,
         path: String? = null,
         incomplete: Boolean = false,
-    ) = save(context, SOURCE_VIDEO, title, sentences, path, incomplete)
+        fromAsr: Boolean = false,
+    ) = save(context, SOURCE_VIDEO, title, sentences, path, incomplete, fromAsr)
 
     /** 读出全部归档（按入库时间倒序：最新在前） */
     fun loadAll(context: Context): List<SubtitleEntry> {
@@ -89,12 +99,23 @@ object SubtitleLibrary {
                 val ts = o.optLong("updatedAt", 0L)
                 val p = o.optString("path", "").ifBlank { null }
                 val inc = o.optBoolean("incomplete", false)   // 老数据没这字段 ⇒ false
-                val sents = decodeSentences(o.optString("sentences", ""))
-                if (title.isNotBlank() && sents.isNotEmpty()) out.add(SubtitleEntry(src, title, sents, ts, p, inc))
+                val asr = o.optBoolean("fromAsr", false)       // 【1010】老数据没这字段 ⇒ false（当抓来的处理）
+                // 【1010】ASR 生成的那份**不重排**（中英混杂 ≠ 双语对照，重排会挪错行）；
+                //   其余照旧英文提上。
+                val sents = if (asr) decodeSentences(o.optString("sentences", ""), reorderBilingual = false)
+                            else unifyOrder(decodeSentences(o.optString("sentences", "")))
+                if (title.isNotBlank() && sents.isNotEmpty()) out.add(SubtitleEntry(src, title, sents, ts, p, inc, asr))
             }
             out
         }.getOrDefault(emptyList())
     }
+
+    /** 🔴【1010】读出来时统一双语行序（英文在上）。判据与 SP 快照共用 [orderBilingual]。 */
+    private fun unifyOrder(list: List<Sentence>): List<Sentence> =
+        list.map { s ->
+            val t = orderBilingual(s.text)
+            if (t == s.text) s else s.copy(text = t)
+        }
 
     /** 仅取某来源（source）的归档，供「音频 / 视频」标签页回退展示 */
     fun loadBySource(context: Context, source: String): List<SubtitleEntry> =

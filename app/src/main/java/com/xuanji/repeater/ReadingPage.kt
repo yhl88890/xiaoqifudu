@@ -226,6 +226,9 @@ fun ReadingPage(
                         hasLyrics = hasLyrics,
                         expanded = expandedIndex == index,
                         source = source,
+                        // 【1010】只有"读视频字幕"这一路才谈得上 ASR 豁免（音频那路本来就是单语、
+                        //   档位天然不裁）。`videoSource != null` 时全局 `subtitlesFromAsr` 是准的。
+                        fromAsr = videoSource != null && subtitlesFromAsr,
                         onPlay = if (readingFromVideo) {
                             { videoSource?.onPlaySentence?.invoke(index, sentence.startMs) }
                         } else {
@@ -344,11 +347,24 @@ private fun ReadingSentenceRow(
     hasLyrics: Boolean,
     expanded: Boolean,
     source: String,
+    fromAsr: Boolean,
     onPlay: () -> Unit,
     onToggleExpand: () -> Unit,
 ) {
     val context = LocalContext.current
     val text = sentence.text
+    // 🔴🔴【1010 阿亮定】阅读模式**跟随全局字幕档位**（`subtitleMode`，见 MainActivity.kt）。
+    //   这一段字幕是从视频带过来的**同一份双语数据**，视频那边选了"只看英文"，
+    //   这里也必须是只看英文 —— 否则就是"视频全显英文、阅读模式中英都摆着"。
+    //   规则与视频模式**完全一致**（都走 SentenceCodec 里同一套）：
+    //     收起态 = 按档位裁（`filterByMode`）；展开态 = 给**全量**（长按把藏起来那行亮出来）。
+    //   ⚠️ 判据用全局的 `subtitleMode`，**不要在这里另存一份**（副本 = 两边各说各话）。
+    //   🔴🔴【1010】`fromAsr` = 这份字幕是**我们自己 ASR 生成的** ⇒ **一律不裁、不重排**，
+    //     长按照旧翻译（见 VideoPage.displayTextOf 里同一段说明）。与视频模式同一条纪律。
+    val bilingual = !fromAsr && isBilingual(text)
+    val shownText = if (fromAsr) text else filterByMode(text, subtitleMode)
+    val expandedText = text
+    val wordSource = if (fromAsr) text else englishOnly(text)
 
     // 翻译状态：先取内存缓存，未命中在展开时联网拉取
     var translation by remember(text) { mutableStateOf(Translator.cached(text)) }
@@ -358,8 +374,10 @@ private fun ReadingSentenceRow(
     // 点句中单词弹出的单词卡当前选中词（null = 不显示）
     var selectedWord by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(expanded, text) {
-        if (expanded && translation == null && !translating) {
+    LaunchedEffect(expanded, text, bilingual) {
+        // 🔴【1010】双语字幕**不做整句翻译**（它本来中英两行都有了）——
+        //   与视频模式同一条规则：双语 ⇒ 长按直接进选词，不调翻译接口。
+        if (expanded && !bilingual && translation == null && !translating) {
             translating = true
             failed = false
             val t = Translator.translate(text)
@@ -385,49 +403,55 @@ private fun ReadingSentenceRow(
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             // 长按展开后整句变为可点单词（点单词弹卡片）；未展开显示普通文本。
             // 正文渲染（有文本/无文本有歌词/纯波形断句三种规则）与播放器列表共用同一份实现。
-            if (expanded && text.isNotEmpty()) {
-                ClickableWordsRow(text = text, onWordClick = { selectedWord = it })
+            if (expanded && expandedText.isNotEmpty()) {
+                // 【1010】展开 = **全量**（只看英文/只看中文档下把藏起来那行补回来）；
+                //   点词/生词本只认英文（`ClickableWordsRow` 内部只对英文分词）。
+                ClickableWordsRow(text = expandedText, onWordClick = { selectedWord = it })
             } else {
                 SentenceTextBody(
                     index = index,
-                    text = text,
+                    // 【1010】收起态按**全局档位**裁（跟视频模式同一套）。
+                    text = shownText,
                     active = active,
                     hasLyrics = hasLyrics,
                     emptyLyricText = "（前奏/无文本）",
                 )
             }
-            if (expanded && text.isNotEmpty()) {
+            if (expanded && expandedText.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Spacer(modifier = Modifier.height(8.dp))
-                // 整句翻译
-                when {
-                    translating -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(14.dp),
-                            strokeWidth = 2.dp,
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            "正在翻译…",
+                // 🔴【1010】双语字幕**不显示翻译块**（本来就有中文）—— 与视频模式同规则。
+                //   只有**纯英文**字幕才走整句翻译。
+                if (!bilingual) {
+                    when {
+                        translating -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "正在翻译…",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        failed -> Text(
+                            "翻译失败，请检查网络后长按重试",
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        else -> Text(
+                            translation ?: "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
                         )
                     }
-                    failed -> Text(
-                        "翻译失败，请检查网络后长按重试",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                    else -> Text(
-                        translation ?: "",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                    Spacer(modifier = Modifier.height(10.dp))
                 }
-                Spacer(modifier = Modifier.height(10.dp))
-                // 整句加入生词本
-                AddSentenceButton(context = context, text = text, source = source)
+                // 整句加入生词本：双语只加**英文**部分（阿亮：只加英文不加中文）
+                AddSentenceButton(context = context, text = wordSource, source = source)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     "再长按可收起",
@@ -495,28 +519,40 @@ fun splitIntoTokens(text: String): List<Pair<Boolean, String>> {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ClickableWordsRow(text: String, onWordClick: (String) -> Unit) {
-    val tokens = remember(text) { splitIntoTokens(text) }
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        tokens.forEach { (isWord, t) ->
-            if (isWord) {
-                Text(
-                    text = t,
-                    modifier = Modifier
-                        .clickable { onWordClick(t) }
-                        .padding(horizontal = 2.dp, vertical = 1.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            } else {
-                Text(
-                    text = t,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
+    // 🔴🔴【1010 阿亮报】双语字幕展开后**中文贴到右半边**，不从行首开始。
+    //   根因：整个文本只丢给**一个** FlowRow ⇒ 分词正则把「\n中文…」整块当成**一个不可拆 token**
+    //   （`[^A-Za-z]+` 一吃到底），FlowRow 见当前行右侧还有空位就**直接塞进去**；
+    //   而 token 内部的 `\n` 对 FlowRow 无效（FlowRow 只在「排不下」时换行，不认 `\n`）。
+    //   ⇒ 改法：**自己按 `\n` 拆段，一段一个 FlowRow**，段与段之间纵向排列 ⇒ 中文自然从行首起。
+    //   ✅ 单行文本（阅读模式、纯英文/纯中文单语字幕）拆出来只有 1 段 ⇒ 与改动前**行为完全一致**。
+    val lines = remember(text) { text.split('\n').filter { it.isNotEmpty() } }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        lines.forEach { line ->
+            val tokens = remember(line) { splitIntoTokens(line) }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                tokens.forEach { (isWord, t) ->
+                    if (isWord) {
+                        Text(
+                            text = t,
+                            modifier = Modifier
+                                .clickable { onWordClick(t) }
+                                .padding(horizontal = 2.dp, vertical = 1.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    } else {
+                        Text(
+                            text = t,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
             }
         }
     }

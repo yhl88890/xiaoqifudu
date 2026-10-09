@@ -524,6 +524,21 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     //    `expandedVideoIndex`，而局部函数捕获的局部属性只在其声明点之后可见（编译期就报 Unresolved）。
     var subMenuOpen by remember { mutableStateOf(false) }
 
+    // 🔴【1010】字幕显示模式：双语 / 只看英文 / 只看中文。**默认「只看英文」**（阿亮定）。
+    //   只对**双语字幕**起效；单语字幕任何档位都原样显示（挑不出对面那行，硬挑就变空）。
+    //   🔴🔴【1010 阿亮定】**档位是全局的**（`subtitleMode` 见 MainActivity.kt）——
+    //     阅读模式里的字幕是同一份双语数据带过去的，它**也要跟这个档**，否则"视频全显英文、
+    //     阅读模式却中英都摆着"。⇒ 这里只读全局状态、切换走 `setSubtitleModeGlobal`，
+    //     **不要再定义页面级副本**（副本 = 两边各说各话）。
+    /** 某一句当前该显示成什么样（画面浮层 + 字幕列表都走这里，保证一致）。 */
+    //   🔴🔴【1010 阿亮定】`subtitlesFromAsr` = **我们自己 ASR 生成的** ⇒ **一律不裁**。
+    //     理由（阿亮原话「ASR 都不管，只要是我们生成的就都不管」）：ASR 出来的是**中英混杂**
+    //     （语气词是中文、正文是英文），它**不是双语字幕**。按档位裁会把"含汉字的那一行"整行删掉，
+    //     连英文正文一起丢 —— 学习要看的是英文，裁错方向了。
+    //   ⇒ 只有**抓来的现成字幕**（手动选的 / 同名 .srt / 内封轨 / B站 CC）才跟档位。
+    fun displayTextOf(s: Sentence): String =
+        if (subtitlesFromAsr) s.text else filterByMode(s.text, subtitleMode)
+
     // 【v120】视频**内封**字幕轨（阿亮："往手机里一丢就自动出字幕"）。
     //   打开菜单时才去读一次轨道列表（IO，大文件要几秒），读到几条就列几条。
     //   ⚠️ 多条轨**不能同时显示**（会重叠打架）⇒ 菜单是"切换"入口，一次只用一条。
@@ -560,6 +575,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         currentPos = parsed.first().startMs
         sentences = parsed
         srtName = src
+        subtitlesFromAsr = false   // 【1010】手动选的现成字幕 ⇒ 要跟档位/行序（不是我们生成的）
         asrMsg = ""
         videoSeek(parsed.first().startMs)
         SubtitleLibrary.saveVideo(ctx, videoName, parsed, path)
@@ -610,6 +626,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             currentPos = r.second.first().startMs
             sentences = r.second
             srtName = r.first
+            subtitlesFromAsr = false   // 【1010】内封轨 = 片方压进去的现成字幕（跟 B站CC 同性质）⇒ 要跟档
             asrMsg = ""
             videoSeek(r.second.first().startMs)
             SubtitleLibrary.saveVideo(context, videoName, r.second, path)
@@ -791,6 +808,24 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         //   ⇒ 这类 MKV（P帧仅38字节、块极碎）永远灌不满判定 ⇒ 全文件进堆。
         //   ⇒ 修法 = 自定义 LoadControl：**字节上限硬生效**（48MB ≈ 100s@3.8Mbps）+ 常规时长参数。
         //   （另：manifest 已加 largeHeap 兜底 UI/字幕内存，见 AndroidManifest.xml。）
+        // 【v129 修·stuck buffering 的根源】字节上限改成「按堆算」的自适应值。
+        //   🔴 为什么必须改：v126 的 48MB 是**拍脑袋定的**（当时按「≈100s@3.8Mbps」估），毫无依据。
+        //      而这条 4K DV MKV 实测 ≈4.1MB/s ⇒ 只要 12 秒的残留数据就能把 48MB 占满。
+        //   🔴 死锁机制（字节码 + 真机双证）：
+        //      `setPrioritizeTimeOverSizeThresholds(false)` 会把**本地播放那个字段也一起改成 false**
+        //      （Builder 里是连续两个 putfield，不是只改流媒体那个），于是 shouldContinueLoading 里
+        //          isLoading = (prioritize && heapOk) || !targetBufferSizeReached
+        //                    = !targetBufferSizeReached            ← prioritize=false 之后
+        //      而 targetBufferSizeReached = allocatedCounts×分块长 >= targetBufferBytes
+        //      （DefaultLoadControl$PlayerIdFilteringAllocatorImpl 在 allocate() 时 +1、release() 时 -1）
+        //      ⇒ 门一占满，加载器立刻停摆；此刻前向缓冲只剩 21ms ⇒ 播放推不动 ⇒ 旧数据 release 不掉
+        //      ⇒ 门永远满 = **永久死锁**，4 秒后被 media3 硬编码判死（ERROR_CODE_FAILED_RUNTIME_CHECK）。
+        //   🔴 硬字节门**必须保留**：它是 v126 修「720p 低码率长 MKV 灌满堆导致黑屏」的唯一依据。
+        //      要改的只是这个数的**来源** —— 从「拍脑袋」改成「按机器堆上限算」。
+        //   参考量级：media3 自己算上限时的约束是 200.5MB；本机 largeHeap 512MB ⇒ 128MB（实测峰值仅 95MB）。
+        val heapMaxMb = (Runtime.getRuntime().maxMemory() / 1048576L).toInt()
+        val targetMb = (heapMaxMb * 25 / 100).coerceIn(128, 256)
+        Log.d("XJ_VID", "LoadControl targetBufferBytes=${targetMb}MB (heapMax=${heapMaxMb}MB)")
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 15000,   // minBufferMs
@@ -798,7 +833,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 2500,    // bufferForPlaybackMs
                 5000,    // bufferForPlaybackAfterRebufferMs
             )
-            .setTargetBufferBytes(48 * 1024 * 1024)   // 硬顶 48MB，不随码率放大
+            .setTargetBufferBytes(targetMb * 1024 * 1024)   // v129：按堆自适应（512MB 堆 ⇒ 128MB）
             .setPrioritizeTimeOverSizeThresholds(false) // 大小上限必须硬生效（默认 true = 无视字节上限）
             .build()
         val mp = ExoPlayer.Builder(ctx)
@@ -1208,7 +1243,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             .padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 56.dp),
                     ) {
                         Text(
-                            sentences[videoSentenceIndexGlobal].text,
+                            // 【1010】按显示模式裁行（双语字幕只看英文/只看中文）；单语字幕原样
+                            displayTextOf(sentences[videoSentenceIndexGlobal]),
                             color = Color.White,
                             style = MaterialTheme.typography.bodyLarge,
                             fontWeight = FontWeight.SemiBold,
@@ -1232,16 +1268,26 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 Icon(Icons.Filled.Subtitles, contentDescription = "字幕", tint = Color.White)
                             }
                             AppDropdownMenu(expanded = subMenuOpen, onDismissRequest = { subMenuOpen = false }) {
+                                // 🔴【1010】字幕显示模式：双语 / 只看英文 / 只看中文（默认只看英文）。
+                                //   只对**双语字幕**起效 —— 单语字幕任何档位都原样显示，不会变空。
+                                //   放在菜单最上面（最常用），「选字幕…」按阿亮要求挪到最后。
                                 DropdownMenuItem(
-                                    text = { Text("选字幕…") },
-                                    onClick = {
-                                        subMenuOpen = false
-                                        // mime 一律给 */*：各家文件管理器给 .srt/.ass 报的 mime 五花八门
-                                        // （text/plain、application/octet-stream…），按 mime 过滤会让用户
-                                        // "在选文件界面里根本看不见自己那份字幕"。选完再按内容判定。
-                                        pickSubtitleFile.launch(arrayOf("*/*"))
-                                    },
+                                    text = { Text("字幕显示") },
+                                    enabled = false,
+                                    onClick = {},
                                 )
+                                listOf(
+                                    SubtitleMode.EN_ONLY to "只看英文",
+                                    SubtitleMode.CN_ONLY to "只看中文",
+                                    SubtitleMode.BILINGUAL to "双语",
+                                ).forEach { (m, label) ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(if (subtitleMode == m) "✓ $label" else "     $label")
+                                        },
+                                        onClick = { subMenuOpen = false; setSubtitleModeGlobal(context, m) },
+                                    )
+                                }
                                 // 【v120】视频**自带**的字幕轨（内封软字幕）。有几条列几条，当前在用的打勾。
                                 // ⚠️ 多条轨不能同时叠加（会重叠打架）⇒ 这里是"切换"入口，一次只用一条。
                                 // 自动挑的那条 = 简英双语 > 中上英下 > 简体中字 > 繁中 > 纯英文（见 EmbeddedSubtitle.score）。
@@ -1269,6 +1315,19 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 DropdownMenuItem(
                                     text = { Text("导出字幕") },
                                     onClick = { subMenuOpen = false; exportSubtitleNow() },
+                                )
+                                // 🔴【1010 阿亮定】「选字幕…」挪到**菜单最后**：
+                                //   现在内封轨能自动抓到、时间轴 100% 对得上，手动选字幕已降级为最后兜底
+                                //   （只有"抓不出来"或"自己生成的不准"时才用）。
+                                DropdownMenuItem(
+                                    text = { Text("选字幕…") },
+                                    onClick = {
+                                        subMenuOpen = false
+                                        // mime 一律给 */*：各家文件管理器给 .srt/.ass 报的 mime 五花八门
+                                        // （text/plain、application/octet-stream…），按 mime 过滤会让用户
+                                        // "在选文件界面里根本看不见自己那份字幕"。选完再按内容判定。
+                                        pickSubtitleFile.launch(arrayOf("*/*"))
+                                    },
                                 )
                             }
                         }
@@ -1738,12 +1797,29 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 itemsIndexed(sentences) { index, sentence ->
                                     val active = index == videoSentenceIndexGlobal
                                     val expanded = expandedVideoIndex == index
-                                    var translation by remember(sentence.text) { mutableStateOf(Translator.cached(sentence.text)) }
-                                    var translating by remember(sentence.text) { mutableStateOf(false) }
-                                    var failed by remember(sentence.text) { mutableStateOf(false) }
+                                    // 🔴【1010】双语字幕**不做整句翻译** —— 它本来中英两行都有了，翻它没意义
+                                    //   （旧行为：整条丢给翻译接口，中文被翻成英文 ⇒ 中英夹杂 + 白费一次调用）。
+                                    //   双语长按 = 直接进选词；只有**纯英文**字幕才走整句翻译。
+                                    // 🔴【1010 阿亮定】ASR 生成的 ⇒ **当普通字幕**：长按照旧翻译、不搞"双语不翻译"
+                                    //   那一套（它只是中英混杂，不是"中英对照的双语字幕"）。
+                                    val bilingual = !subtitlesFromAsr && isBilingual(sentence.text)
+                                    // 当前档位下这句显示成什么样（跟画面浮层同一套规则）
+                                    val shown = displayTextOf(sentence)
+                                    // 🔴【1010 阿亮定】长按 = **把藏起来的那行亮出来**：
+                                    //   只看英文/只看中文档下，长按展开要显示**完整双语**（对面那行补回来）；
+                                    //   双语档本来就全都有，长按就是进选词。
+                                    //   ⇒ 展开态统一用原文本 `sentence.text`，收起态才用 `shown`。
+                                    val expandedText = sentence.text
+                                    // 点词/加生词本只认英文行（阿亮：中文一律不管）
+                                    // 【1010】ASR 生成的**原样给**（混杂字幕里那几个中文语气词不该把它整句改样）
+                                    val wordSource = if (subtitlesFromAsr) sentence.text else englishOnly(sentence.text)
+                                    var translation by remember(sentence.text, bilingual) { mutableStateOf(Translator.cached(sentence.text)) }
+                                    var translating by remember(sentence.text, bilingual) { mutableStateOf(false) }
+                                    var failed by remember(sentence.text, bilingual) { mutableStateOf(false) }
                                     var selectedWord by remember { mutableStateOf<String?>(null) }
-                                    LaunchedEffect(expanded, sentence.text) {
-                                        if (expanded && translation == null && !translating) {
+                                    LaunchedEffect(expanded, sentence.text, bilingual) {
+                                        // 双语 ⇒ 不调翻译（下面展开区也不显示翻译那一块）
+                                        if (expanded && !bilingual && translation == null && !translating) {
                                             translating = true; failed = false
                                             val t = Translator.translate(sentence.text)
                                             translation = t; failed = t == null; translating = false
@@ -1767,32 +1843,39 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                             ),
                                     ) {
                                         Column(modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp)) {
-                                            if (expanded && sentence.text.isNotEmpty()) {
-                                                ClickableWordsRow(text = sentence.text, onWordClick = { selectedWord = it })
+                                            if (expanded && expandedText.isNotEmpty()) {
+                                                // 【1010】展开 = 亮出**完整**那句（只看英文/只看中文档下把对面那行补回来）；
+                                                //   **只认英文词**（中文行原样显示、不可点）。
+                                                ClickableWordsRow(text = expandedText, onWordClick = { selectedWord = it })
                                             } else {
                                                 Text(
-                                                    sentence.text,
+                                                    shown,
                                                     style = MaterialTheme.typography.bodyMedium,
                                                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                                                     color = MaterialTheme.colorScheme.onSurface,
                                                     modifier = Modifier.fillMaxWidth(),
                                                 )
                                             }
-                                            if (expanded && sentence.text.isNotEmpty()) {
+                                            if (expanded && expandedText.isNotEmpty()) {
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                                                 Spacer(modifier = Modifier.height(8.dp))
-                                                when {
-                                                    translating -> Row(verticalAlignment = Alignment.CenterVertically) {
-                                                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                                                        Spacer(modifier = Modifier.width(8.dp))
-                                                        Text("正在翻译…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                // 🔴【1010】双语字幕：**不显示翻译那一块**（本来就有中文），
+                                                //   展开就是纯选词。纯英文字幕才照旧走翻译。
+                                                if (!bilingual) {
+                                                    when {
+                                                        translating -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                                            Spacer(modifier = Modifier.width(8.dp))
+                                                            Text("正在翻译…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                        }
+                                                        failed -> Text("翻译失败，请检查网络后长按重试", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                                                        else -> Text(translation ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
                                                     }
-                                                    failed -> Text("翻译失败，请检查网络后长按重试", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
-                                                    else -> Text(translation ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                                                    Spacer(modifier = Modifier.height(10.dp))
                                                 }
-                                                Spacer(modifier = Modifier.height(10.dp))
-                                                AddSentenceButton(context = context, text = sentence.text, source = videoName)
+                                                // 整句加生词本：双语只加**英文**部分（阿亮：只加英文不加中文）
+                                                AddSentenceButton(context = context, text = wordSource, source = videoName)
                                                 Spacer(modifier = Modifier.height(4.dp))
                                                 Text("再长按可收起", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                             }

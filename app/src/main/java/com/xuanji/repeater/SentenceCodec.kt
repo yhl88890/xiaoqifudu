@@ -14,13 +14,120 @@ package com.xuanji.repeater
  */
 fun encodeSentences(list: List<Sentence>): String =
     list.joinToString("\n") { "${it.startMs}\t${it.endMs}\t${escapeText(it.text)}" }
-fun decodeSentences(s: String): List<Sentence> =
+
+/**
+ * @param reorderBilingual 读出来的双语行序要不要归一（英文提上）。
+ *   🔴【1010 阿亮定】**我们自己 ASR 生成的**字幕一律传 `false` —— 它是中英**混杂**、
+ *   不是双语对照，重排会把"含汉字的那行"整行挪走，位置就不对了（阿亮：ASR 都不管）。
+ *   抓来的现成字幕（手动/.srt/内封轨/B站CC）保持默认 `true`。
+ */
+fun decodeSentences(s: String, reorderBilingual: Boolean = true): List<Sentence> =
     if (s.isBlank()) emptyList() else s.lines().mapNotNull { line ->
         val p = line.split("\t")
         if (p.size == 3) runCatching {
-            Sentence(p[0].toLong(), p[1].toLong(), unescapeText(p[2]))
+            val t = p[2]
+            // 🔴🔴【1010】**就地**把双语行序纠正成「英文在上」。
+            // 为什么非在这里不可（这一版是第三次尝试，前两次都没治住，原因记下来）：
+            //   前两版分别改在 `SubtitleParser`（解析侧）和 `SubtitleLibrary`（字幕库侧），
+            //   实测都没用 —— 因为 **App 冷启动根本不走那两条路**：它直接读
+            //   `xuanji_video.xml` 里的 `sentences` **快照**，而那份快照是上次退出时原样存下来的，
+            //   解析器和字幕库都不参与。改代码当然不生效。
+            //   实测铁证：字幕库里 E03 条目已是英文在上，SP 快照里还是中文在上 ⇒ 界面显示的是快照。
+            // ⚠️ 顺带一个坑：`LaunchedEffect(page)` 里那次 saveVideoPrefs 看着能"顺手纠正"SP，
+            //   但它在 `page` **没变化时根本不会跑**（冷启时 page 原本就是 VIDEO）⇒ 指望不上。
+            // ⇒ 唯一可靠的收口点就是这里：**读出来就纠正**，不管谁读、读哪份。
+            //   ⚠️【1010】但 ASR 生成的那份除外（`reorderBilingual = false`）—— 见上面参数说明。
+            val raw = unescapeText(t)
+            Sentence(p[0].toLong(), p[1].toLong(), if (reorderBilingual) orderBilingual(raw) else raw)
         }.getOrNull() else null
     }
+
+/**
+ * 🔴🔴【1010 双语行序归一】把一句里**多行文本**统一成「英文在上、中文在下」。
+ *
+ * **放在这里 = 唯一的收口点**（就是这次白折腾一轮换来的教训）：
+ *   `decodeSentences` 是 **SP 快照（xuanji_video.xml）/ 字幕库（xuanji_subtitles.xml）/
+ *   播放服务** 共用的读取口。中文在上的存量数据从哪条路进来都会经过它 ——
+ *   只改解析侧 `SubtitleParser` 治不了存量快照（App 冷启动**直接复用快照、不过解析器**），
+ *   上一版就是这么失败的：代码没错、但那条路根本不走它。
+ *
+ * 规则（**只重排，绝不删任何一行、绝不改文本**）：
+ *   - 含汉字（`\u4e00-\u9fff`）的算**中文行**，其余算**英文行**；
+ *   - 英文行整体在前、中文行整体在后，各自保持**原相对顺序**；
+ *   - 有效行不足 2 行、或中文/英文缺一（纯单语字幕）⇒ **原样返回**，一个字都不动。
+ *
+ * 幂等：已经是英文在上的、单语的，跑多少次结果都一样。
+ */
+internal fun orderBilingual(text: String): String {
+    if (text.isEmpty()) return text
+    val valid = text.split('\n').filter { it.isNotBlank() }
+    if (valid.size <= 1) return text
+    val cn = ArrayList<String>(valid.size)
+    val en = ArrayList<String>(valid.size)
+    for (l in valid) {
+        var hasHan = false
+        for (c in l) if (c in '\u4e00'..'\u9fff') { hasHan = true; break }
+        if (hasHan) cn.add(l) else en.add(l)
+    }
+    if (cn.isEmpty() || en.isEmpty()) return text
+    return (en + cn).joinToString("\n")
+}
+
+/** 这一行是不是中文行（含汉字即算）—— 「只看中文/只看英文」和"点词选词只认英文"共用此判据。 */
+internal fun hasHan(s: String): Boolean {
+    for (c in s) if (c in '\u4e00'..'\u9fff') return true
+    return false
+}
+
+/**
+ * 🔴【1010】字幕显示模式 —— 「双语 / 只看英文 / 只看中文」。
+ *
+ * 只作用于**双语字幕**（一句里既有中文行又有英文行）。单语字幕任何档位都原样显示：
+ * 因为挑不出对面那一行，硬挑就会把整条字幕变空。
+ */
+enum class SubtitleMode { BILINGUAL, EN_ONLY, CN_ONLY }
+
+/**
+ * 按显示模式裁一句字幕（**只减行、不改字**）。
+ *
+ * 规则：
+ * - 单语（全中文 或 全英文）⇒ **任何档位都原样返回**（没得挑，别弄空）；
+ * - [SubtitleMode.BILINGUAL] ⇒ 原样返回；
+ * - [SubtitleMode.EN_ONLY] ⇒ 只留英文行；[SubtitleMode.CN_ONLY] ⇒ 只留中文行；
+ * - 多行时保留满足条件的**全部**行（三行以上也不丢）。
+ * - 换行丢失的空行原样跳过 —— 输出只由有效行拼成。
+ */
+internal fun filterByMode(text: String, mode: SubtitleMode): String {
+    if (mode == SubtitleMode.BILINGUAL || text.isEmpty()) return text
+    val valid = text.split('\n').filter { it.isNotBlank() }
+    if (valid.size <= 1) return text          // 单行 ⇒ 没得挑
+    val cn = valid.filter { hasHan(it) }
+    val en = valid.filterNot { hasHan(it) }
+    if (cn.isEmpty() || en.isEmpty()) return text   // 单语字幕 ⇒ 任何档位都原样
+    val keep = if (mode == SubtitleMode.EN_ONLY) en else cn
+    return keep.joinToString("\n")
+}
+
+/** 这句是**双语**吗（中文行、英文行都存在）—— 决定"长按要不要调翻译"。 */
+internal fun isBilingual(text: String): Boolean {
+    val valid = text.split('\n').filter { it.isNotBlank() }
+    if (valid.size <= 1) return false
+    var hasCn = false
+    var hasEn = false
+    for (l in valid) if (hasHan(l)) hasCn = true else hasEn = true
+    return hasCn && hasEn
+}
+
+/**
+ * 取这句的**英文部分**（给"整句加生词本"用）。
+ * 双语 ⇒ 只返回英文行（阿亮：只加英文不加中文）；本来就没中文 ⇒ 原样返回。
+ */
+internal fun englishOnly(text: String): String {
+    val valid = text.split('\n').filter { it.isNotBlank() }
+    if (valid.size <= 1) return text
+    val en = valid.filterNot { hasHan(it) }
+    return if (en.isEmpty()) text else en.joinToString(" ")
+}
 
 /** 存前转义：反斜杠**先**自己转义，再把换行/制表符变成 `\n`/`\t` 两个字面字符。顺序反了会双重转义。 */
 private fun escapeText(t: String): String = t

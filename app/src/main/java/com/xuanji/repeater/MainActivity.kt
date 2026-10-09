@@ -199,6 +199,30 @@ import kotlinx.coroutines.isActive
 //    "退出播放器后系统亮度是否回来"❓尚未验证。我们这套的**设计意图**是：退出即回系统值。
 internal var appBrightness by mutableStateOf<Float?>(null)
 
+// 🔴🔴【1010 阿亮定】字幕显示档位（双语 / 只看英文 / 只看中文）是**全局**的，**阅读模式一起跟随**。
+//   由来：这档位原来只是 `VideoPage` 的**页面级局部状态** ⇒ 从视频进阅读模式时
+//   （字幕是同一份双语数据带过去的）阅读模式**拿不到档位**、永远显示全量双语 ⇒
+//   "视频模式现在全显英文，我阅读模式根本就没进去过"，说的就是这件事。
+//   ⇒ 提升成全局 `mutableStateOf`：VideoPage 的菜单读写它、ReadingPage 的列表也读它，
+//     **一处切换、两处同步**。落 SP（`subtitle_prefs`）记住个人习惯，重开不丢。
+//   ⚠️ 语义仍受 `filterByMode` 约束：**单语字幕任何档位原样显示**（挑不出对面那行）。
+internal var subtitleMode by mutableStateOf(SubtitleMode.EN_ONLY)
+
+/** 读回存档的档位（App 启动时调一次）。值不认识 / 读挂了 ⇒ 回默认「只看英文」。 */
+internal fun loadSubtitleMode(context: Context): SubtitleMode = runCatching {
+    SubtitleMode.valueOf(
+        context.getSharedPreferences("subtitle_prefs", Context.MODE_PRIVATE)
+            .getString("mode", SubtitleMode.EN_ONLY.name) ?: SubtitleMode.EN_ONLY.name
+    )
+}.getOrDefault(SubtitleMode.EN_ONLY)
+
+/** 切换档位：**改全局状态 + 落 SP**（两件事一起做，别只做一半）。 */
+internal fun setSubtitleModeGlobal(context: Context, m: SubtitleMode) {
+    subtitleMode = m
+    context.getSharedPreferences("subtitle_prefs", Context.MODE_PRIVATE)
+        .edit().putString("mode", m.name).apply()
+}
+
 /** 【v124】亮度存档。名字/写法照 ThemePrefs（同一个工程，别整出新花样）。
  *  存的是 0.01~1.0 的窗口亮度；没存过 / 存的是脏值 ⇒ 返回 null（= 跟随系统）。 */
 internal object BrightnessPrefs {
@@ -240,6 +264,26 @@ internal var sentences by mutableStateOf<List<Sentence>>(emptyList())
 // 当前字幕的来源名（同名字幕文件名 / 手动选的那份的原名 / "生成字幕"）。
 // 【1008】原为 private：视频页「选字幕」选完要立刻把它换成新来源名，故放开成 internal（只读用它，别在别处乱写）。
 internal var srtName by mutableStateOf("")
+
+/**
+ * 🔴🔴【1010 阿亮定】这份字幕是不是**我们自己 ASR 生成**的。
+ *
+ * 判据：阿亮原话「**ASR 都不管，只要是我们生成的就都不管**」——
+ *   我们 ASR 出来的字幕是**中英混杂**的（语气词/助词是中文，正文是英文），
+ *   它**不是双语字幕**，只是碰巧两样都有 ⇒ **任何"按语言分行"的处理都不许碰它**：
+ *     · 字幕档位（只看英文/只看中文）不裁它 —— 裁了会把英文正文连中文一起丢掉；
+ *     · 行序归一（英文提上）不调它 —— 那行"含汉字"会被误判成中文行、整行挪到下面。
+ *   ⇒ 只对**抓来的现成字幕**（手动选的 / 同名 .srt / 内封轨 / B站 CC）生效那两道处理。
+ *
+ * ⚠️ 为什么用一个显式布尔、不去认 `srtName == "生成字幕"` 这个字符串：
+ *   字符串判据改个文案就静默失效，而且 `srtName` 别处也会被改写（选字幕/切轨）。
+ *   这个标志只在【三处 ASR 出字幕的地方】置 true、【其余所有换字幕的地方】置 false。
+ *   （唯一的例外：冷启从 SP 恢复时按 [ASR_SUBTITLE_NAME] 还原一次，见 `loadVideoPrefs`。）
+ */
+internal var subtitlesFromAsr by mutableStateOf(false)
+
+/** ASR 自动生成的字幕在 [srtName] 里的固定名字（「写」和「冷启还原」两处共用，别各写一份字面量）。 */
+internal const val ASR_SUBTITLE_NAME = "生成字幕"
 internal var loopSentence by mutableStateOf(false)
 internal var recognizing by mutableStateOf(false)
 internal var asrMsg by mutableStateOf("")
@@ -507,7 +551,15 @@ internal fun loadVideoPrefs(context: Context) {
     videoName = sp.getString("name", "") ?: ""
     currentPos = sp.getLong("pos", 0L)
     srtName = sp.getString("srt", "") ?: ""
-    sentences = decodeSentences(sp.getString("sentences", "") ?: "")
+    // 【1010】冷启恢复时也要把"是不是 ASR 生成的"这件事**一起恢复** —— 否则重启一次就丢标志，
+    //   同一份混杂字幕前一秒不裁、重启后又被裁了。这里只认 srtName 这一处（唯一存了来源的地方），
+    //   因为是**读回自己写下的固定值**，不是"拿文案当判据"：下面 saveVideoPrefs 存的就是 srtName。
+    subtitlesFromAsr = srtName == ASR_SUBTITLE_NAME
+    sentences = decodeSentences(
+        sp.getString("sentences", "") ?: "",
+        // 【1010】ASR 生成的那份**不重排**（中英混杂不等于双语对照），其余照旧英文提上
+        reorderBilingual = !subtitlesFromAsr,
+    )
     // 【0915 修】冷启恢复同级视频列表：上一曲/下一曲靠 videoFolderVideos 定位当前视频的序号
     // （curFolderIdx = indexOfFirst { it.path == videoPath }），不恢复这个列表 → idx = -1 →
     // hasPrev/hasNext 全 false → 两个按钮全灰，"只能重新进视频选集再选一遍"才活。
@@ -565,6 +617,7 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
     sentences = emptyList()
     srtName = ""
     asrMsg = ""
+    subtitlesFromAsr = false   // 【1010】换视频 ⇒ 来源作废，先按"非 ASR"（抓到现成字幕就一直是 false）
     videoFolderVideos = siblings
     // 打开/切换视频默认自动播放（暂停状态由返回时的续播逻辑尊重，不会在这里被误触发）
     videoPlaying = true
@@ -589,23 +642,12 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
             SubtitleLibrary.saveVideo(context, videoName, parsed, item.path)
         }
     }
-    // 无同目录 .srt 时，回退读取之前 ASR 生成的字幕（按视频名从字幕库取），
-    // 避免「这次识别完有字幕，下次再播又没了」。
-    if (sentences.isEmpty()) {
-        SubtitleLibrary.loadBySource(context, SubtitleLibrary.SOURCE_VIDEO)
-            .firstOrNull { it.title == videoName && it.sentences.isNotEmpty() }
-            ?.let {
-                sentences = it.sentences
-                srtName = "生成字幕"
-                // 🔴【0929】这份字幕是残缺的（上次识别中途断了/有段被跳过）⇒ 打开时就明说，
-                //   否则界面只显示"生成字幕"，用户会一直以为字幕是全的，用到一半才发现少了。
-                //   提示带动作：重新点「生成字幕」会整段重跑并覆盖，就能补全。
-                if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
-            }
-    }
-    // 【v120】前三级都没有 ⇒ 最后试「视频**内封**的字幕轨」（阿亮：往手机里一丢就自动出字幕）。
-    //   🔴 优先级**故意放最低**：同目录 .srt / 以前识别过的结果，一个字都不许被它改掉。
-    //   🔴 扒不到就**静默退回** —— 不提示、不占位，界面跟以前完全一样（别为加功能搞坏存量场景）。
+    // 【v120 / 1010 调序】没有同名 .srt ⇒ 先试「视频**内封**的字幕轨」（阿亮：往手机里一丢就自动出字幕）。
+    //   🔴【1010 阿亮定】优先级**提到 ASR 生成结果之前**：
+    //     内封轨是片方压进去的，时间轴 100% 对得上；ASR 生成的不准。
+    //     "既然内封有字幕，ASR 基本也不用跑、跑它干嘛"（阿亮原话）。
+    //   ⚠️ 仍然**低于**手动选的 / 同名 .srt 文件 —— 那两级不动。
+    //   🔴 扒不到就**静默退回** —— 不提示、不占位，界面跟以前完全一样。
     //   ⚠️ 扒一条轨要顺着文件扫一遍（大 MKV 几秒），所以走后台；回来时可能已经换视频了 ⇒ 用路径对上号再写回。
     if (sentences.isEmpty()) {
         val vp = item.path
@@ -623,6 +665,23 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
             SubtitleLibrary.saveVideo(context, videoName, list, vp)
             saveVideoPrefs(context)
         }
+    }
+    // 【1010 降级】最后才回退读「之前 ASR 生成的字幕」（按视频名从字幕库取），
+    // 避免「这次识别完有字幕，下次再播又没了」。⚠️ 排在内封轨之后。
+    if (sentences.isEmpty()) {
+        SubtitleLibrary.loadBySource(context, SubtitleLibrary.SOURCE_VIDEO)
+            .firstOrNull { it.title == videoName && it.sentences.isNotEmpty() }
+            ?.let {
+                sentences = it.sentences
+                srtName = ASR_SUBTITLE_NAME
+                // 【1010】据库里存的标记判定（这条回退路径取的是"该视频最后归档的字幕"，
+                //   它**本身可能就不是 ASR 的**）。老数据没这字段 ⇒ false ⇒ 当抓来的处理，安全。
+                subtitlesFromAsr = it.fromAsr
+                // 🔴【0929】这份字幕是残缺的（上次识别中途断了/有段被跳过）⇒ 打开时就明说，
+                //   否则界面只显示"生成字幕"，用户会一直以为字幕是全的，用到一半才发现少了。
+                //   提示带动作：重新点「生成字幕」会整段重跑并覆盖，就能补全。
+                if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
+            }
     }
     saveVideoPrefs(context)
 }
@@ -642,6 +701,7 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
     sentences = emptyList()
     srtName = ""
     asrMsg = ""
+    subtitlesFromAsr = false   // 【1010】换视频 ⇒ 来源作废（同上）
     videoFolderVideos = siblings
     videoPlaying = true
     PlaybackSession.onVideoStarted()   // Phase3-步骤1：本地文件视频（B站导入）同样记账
@@ -660,17 +720,9 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
             SubtitleLibrary.saveVideo(context, videoName, parsed, file.path)
         }
     }
-    if (sentences.isEmpty()) {
-        SubtitleLibrary.loadBySource(context, SubtitleLibrary.SOURCE_VIDEO)
-            .firstOrNull { it.title == videoName && it.sentences.isNotEmpty() }
-            ?.let {
-                sentences = it.sentences
-                srtName = "生成字幕"
-                // 残缺标记同样要提示（与 openVideoFromLibrary 一致）
-                if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
-            }
-    }
-    // 【v120】内封字幕轨：与 openVideoFromLibrary 完全同款（优先级最低 + 扒不到静默退回）。
+    // 【v120 / 1010 调序】内封字幕轨：与 openVideoFromLibrary 完全同款。
+    //   🔴【1010 阿亮定】优先级**提到 ASR 生成结果之前**（内封轨时间轴 100% 对得上，ASR 不准）；
+    //     仍低于手动选的 / 同名 .srt 文件。扒不到静默退回。
     //   B站 导入的视频也走这条路 —— 下载工具把字幕封进 MKV 的情况，以后就不用另外配一份 .srt 了。
     if (sentences.isEmpty()) {
         val vp = file.path
@@ -685,6 +737,18 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
             SubtitleLibrary.saveVideo(context, videoName, list, vp)
             saveVideoPrefs(context)
         }
+    }
+    // 【1010 降级】最后才回退读「之前 ASR 生成的字幕」。⚠️ 排在内封轨之后。
+    if (sentences.isEmpty()) {
+        SubtitleLibrary.loadBySource(context, SubtitleLibrary.SOURCE_VIDEO)
+            .firstOrNull { it.title == videoName && it.sentences.isNotEmpty() }
+            ?.let {
+                sentences = it.sentences
+                srtName = ASR_SUBTITLE_NAME
+                subtitlesFromAsr = it.fromAsr   // 【1010】同上：据库里的标记判定
+                // 残缺标记同样要提示（与 openVideoFromLibrary 一致）
+                if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
+            }
     }
     saveVideoPrefs(context)
 }
@@ -783,11 +847,14 @@ private fun videoGenerateLyrics(context: Context) {
             asrStage = null   // 【1003】真识别结束，清掉阶段名
             if (finalSentences.isNotEmpty()) {
                 sentences = finalSentences
-                srtName = "生成字幕"
+                srtName = ASR_SUBTITLE_NAME
+                subtitlesFromAsr = true   // 【1010】当场 ASR 生成 ⇒ 两道处理都跳过（阿亮：我们生成的一律不管）
                 // 识别生成的视频字幕 → 归档字幕库（视频来源）
                 // 🔴 残缺标记随字幕一起存：下次打开视频靠它提示「字幕缺失」（见 openVideoFromLibrary 的回填）
                 SubtitleLibrary.saveVideo(
-                    context, videoName, finalSentences, videoPath, incomplete = res.incomplete,
+                    context, videoName, finalSentences, videoPath,
+                    incomplete = res.incomplete,
+                    fromAsr = true,   // 【1010】这份是我们自己 ASR 生成的 ⇒ 库里也标上，读回来不重排、不裁
                 )
                 // 🔴【0929】残缺的字幕必须**明说**：这次的字幕照常显示（用户马上能用），
                 //   但提示里要点出"字幕缺失"，别让他以为识别干净了。
@@ -1160,6 +1227,9 @@ class MainActivity : ComponentActivity() {
         //        load 返回 null = 从没调过 ⇒ 跟随系统，跟老版本行为完全一致。
         appBrightness = BrightnessPrefs.load(this)
         applyWindowBrightness()
+        // 【1010】字幕档位同理：**启动就读回来**，视频页和阅读模式两边一进来就是上次选的档，
+        //        不会"先按默认英文渲染一帧、再跳成中文"那种闪一下。
+        subtitleMode = loadSubtitleMode(this)
         setContent {
             val context = LocalContext.current
             // 【v124】全局亮度：appBrightness 一变就落到窗口。视频页左半屏上下滑改的就是它，

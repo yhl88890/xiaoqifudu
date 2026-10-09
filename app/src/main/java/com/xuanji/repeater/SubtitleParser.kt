@@ -93,7 +93,8 @@ internal object SubtitleParser {
         if (text.isBlank()) emptyList()
         else when (f.extension.lowercase()) {
             "ass", "ssa" -> parseAss(text)
-            "srt" -> SrtParser.parse(text)
+            // SRT 原样保留文件行序 ⇒ 这里补一道「双语统一英文在上」（见 orderBilingual）
+            "srt" -> unify(SrtParser.parse(text))
             // 扩展名认不出（手动选进来的副本可能后缀不可用、或用户把 .txt 改成了字幕）
             // ⇒ 看内容猜一次，别让一份好字幕因为"后缀不对"就用不了
             else -> parseByContent(text)
@@ -101,6 +102,18 @@ internal object SubtitleParser {
     } catch (_: Throwable) {
         emptyList()
     }
+
+    /**
+     * 把一批句子的文本统一成「英文在上、中文在下」。
+     *
+     * ASS 侧已在 [parseAss] 内部处理；SRT 侧原样保留文件行序 ⇒ 这里补一道。
+     * `parseAss` 的结果再进一次也是**幂等**的（已经是英文在上就原样返回）。
+     */
+    private fun unify(list: List<Sentence>): List<Sentence> =
+        list.map { s ->
+            val t = orderBilingual(s.text)
+            if (t == s.text) s else s.copy(text = t)
+        }
 
     /**
      * 按**内容**判定格式：ASS 有 `[Events]`/`Dialogue:`；SRT 有时间轴箭头 `-->`。
@@ -111,8 +124,8 @@ internal object SubtitleParser {
         if (head.contains("[Events]", ignoreCase = true) ||
             head.contains("Dialogue:", ignoreCase = true)
         ) return parseAss(text)
-        if (head.contains("-->")) return SrtParser.parse(text)
-        val srt = SrtParser.parse(text)
+        if (head.contains("-->")) return unify(SrtParser.parse(text))
+        val srt = unify(SrtParser.parse(text))
         val ass = parseAss(text)
         return if (ass.size > srt.size) ass else srt
     }
@@ -208,11 +221,13 @@ internal object SubtitleParser {
                     .take(2)
                     .toList()
             }
-            val joined = texts.filter { it.isNotBlank() }.joinToString("\n")
+            val joined = orderBilingual(texts.filter { it.isNotBlank() }.joinToString("\n"))
             if (joined.isNotBlank()) out.add(Sentence(key.first, key.second, joined))
         }
         return out.sortedBy { it.startMs }
     }
+
+    // 双语行序统一：`orderBilingual` / `hasHan` 已挪到 [SentenceCodec]（与 SP 快照/字幕库共用同一个收口点）。
 
     /** `H:MM:SS.cc`（cc = 百分秒）→ 毫秒。两位小数当百分秒；写三位就按毫秒。 */
     private fun parseAssTime(s: String): Long? {
