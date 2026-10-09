@@ -6,13 +6,13 @@ plugins {
 
 android {
     namespace = "com.xuanji.repeater"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.xuanji.repeater"
         minSdk = 26
         targetSdk = 35
-        versionCode = 125
+        versionCode = 126
         // 🔴 版本名**跟着 versionCode 走**（0919 阿亮要求）：
         //    他手机上「应用信息 → 版本」显示的就是这一行。以前这里写死 "1.2"
         //    ⇒ 装哪一版都显示 1.2，他在对话里说的 v49 / v50 根本对不上号。
@@ -73,8 +73,8 @@ dependencies {
     //   不报错）⇒ MKV+杜比必哑。ExoPlayer 自带 MatroskaExtractor，原生支持 A_AC3/A_EAC3，
     //   且能读内封字幕轨（阶段2）。详见 HANDBOOK「视频没声音」。
     //   ⚠️ 界面是自己画的 ⇒ **不引 media3-ui**（省 ~190KB）。
-    implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-extractor:1.4.1")
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-extractor:1.11.1")
     // 【v75】B站 扫码登录：本地生成二维码（不上传第三方服务）
     implementation("com.google.zxing:core:3.5.3")
     debugImplementation("androidx.compose.ui:ui-tooling")

@@ -25,6 +25,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import android.os.Build
@@ -782,8 +783,27 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         Log.d("XJ_VID", "loadVideo begin: uri=$uri currentPos=$currentPos videoResumePos=$videoResumePos videoHandedToBg=$videoHandedToBg startPlaying=$startPlaying")
         val speed = videoSpeed
         val ctx = context
-        // 【v119】ExoPlayer 必须在主线程创建/调用 —— 本段在 LaunchedEffect 内 = 主线程 ✅
-        val mp = ExoPlayer.Builder(ctx).build()
+        // 【v126 修·720p长MKV黑屏】v119 换 media3 后，720p 低码率长 MKV 播不了：
+        //   实测（1009）根因 = **默认 LoadControl 把整部片子往 Java 堆里灌**：
+        //   播 481MB 切片时堆涨到 480MB（≈整个文件），645MB 的片子超过 512MB(largeHeap) 上限
+        //   ⇒ DefaultLoadControl 无限刷"Target buffer size reached with less than 500ms"⇒ 断粮黑屏。
+        //   默认 prioritizeTimeOverSizeThresholds=true：缓冲时长没到 maxBuffer(50s) 就**无视字节上限**继续装
+        //   ⇒ 这类 MKV（P帧仅38字节、块极碎）永远灌不满判定 ⇒ 全文件进堆。
+        //   ⇒ 修法 = 自定义 LoadControl：**字节上限硬生效**（48MB ≈ 100s@3.8Mbps）+ 常规时长参数。
+        //   （另：manifest 已加 largeHeap 兜底 UI/字幕内存，见 AndroidManifest.xml。）
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                15000,   // minBufferMs
+                30000,   // maxBufferMs
+                2500,    // bufferForPlaybackMs
+                5000,    // bufferForPlaybackAfterRebufferMs
+            )
+            .setTargetBufferBytes(48 * 1024 * 1024)   // 硬顶 48MB，不随码率放大
+            .setPrioritizeTimeOverSizeThresholds(false) // 大小上限必须硬生效（默认 true = 无视字节上限）
+            .build()
+        val mp = ExoPlayer.Builder(ctx)
+            .setLoadControl(loadControl)
+            .build()
         try {
             // ⚠️ ExoPlayer 的 AudioAttributes 是 **androidx.media3.common.AudioAttributes**，
             //    不是 android.media 那个同名类（这里必须用全限定名，否则撞车）。
