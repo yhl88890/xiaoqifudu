@@ -106,7 +106,14 @@ class SentenceSplitterTest {
         return out
     }
 
-    /** 抽取前 `split()` 里"由边界生成句子（长度约束）"的原文。 */
+    /**
+     * 抽取前 `split()` 里"由边界生成句子（长度约束）"的原文。
+     *
+     * ⚠️【2026-10-10 起】**它不再对新实现整体成立**：这段原逻辑在「段长 ≥ 16500ms」时会整块漏掉
+     *   15000ms（见 `句子_超长段_每块都有人认领_不许漏`），修复后新实现**有意**不再与它一致。
+     *   ⇒ 本函数现在只当「**不触发超长强制切分**的输入」的标准答案：用来证明修复没有误伤普通判定。
+     *   🔴 别为了让对比测试变绿去改这个函数 —— 它存在的全部意义就是"和修复前的线上行为一模一样"。
+     */
     private fun refSentences(boundaries: List<Long>, totalMs: Long): List<Sentence> {
         val sentences = mutableListOf<Sentence>()
         var segStart = 0L
@@ -205,6 +212,24 @@ class SentenceSplitterTest {
         return out
     }
 
+    /**
+     * 这批边界会不会走到「超长强制切分」那条分支（某段 > 最长句长 15000）？
+     *
+     * 用途：那条分支是 2026-10-10 的**修复点**，新旧实现**有意不同** ⇒ 等价性对比要把它排除，
+     * 否则"证明没误伤"的测试会一直红。它自己的行为由 `句子_超长段_*` 三条测试单独盯着。
+     */
+    private fun triggersForcedSplit(boundaries: List<Long>): Boolean {
+        var segStart = 0L
+        for (b in boundaries) {
+            val len = b - segStart
+            when {
+                len >= 1500L && len <= 15000L -> segStart = b
+                len > 15000L -> return true
+            }
+        }
+        return false
+    }
+
     // ==================================================================
     // ① 等价性验证 —— 证明"抽取 = 纯搬家"，一行判定都没走样
     // ==================================================================
@@ -248,13 +273,12 @@ class SentenceSplitterTest {
     }
 
     @Test
-    fun `等价_句子生成_新实现与抽取前split版完全一致`() {
+    fun `等价_句子生成_不触发超长切分时_与抽取前split版完全一致`() {
         val rnd = Random(777)
         val cases = listOf(
             emptyList<Long>() to 60000L,
             listOf(10000L) to 20000L,
             listOf(1000L, 12000L) to 20000L,
-            listOf(45000L) to 60000L,
             listOf(8000L, 17000L, 26000L, 35000L) to 40000L,
             listOf(0L) to 0L,
             listOf(15000L) to 16500L,
@@ -264,14 +288,18 @@ class SentenceSplitterTest {
             listOf(1500L) to 3000L,
             listOf(1500L) to 1500L,
             listOf(15000L) to 30000L,
-            listOf(16500L) to 18000L,
+            // ⚠️ 原来这里还有 `45000L to 60000L`、`16500L to 18000L` 两组 —— 它们会走到
+            //    2026-10-10 的**修复点**（超长强制切分），新旧实现**有意不同** ⇒ 已移到
+            //    `句子_超长段_*` 那两条测试，标准答案换成**期望行为**而不是历史实现。
         )
         for ((bs, total) in cases) {
+            assertTrue("这个用例本身就不该触发超长切分：$bs", !triggersForcedSplit(bs))
             assertEquals("边界 $bs / 总长 $total", refSentences(bs, total), sentencesFromBoundaries(bs, total))
         }
         repeat(300) {
             val total = rnd.nextLong(0, 90000)
             val bs = randomBoundaries(rnd, total)
+            if (triggersForcedSplit(bs)) return@repeat   // 修复点，另有三条测试专门盯
             assertEquals("随机边界 $bs / 总长 $total", refSentences(bs, total), sentencesFromBoundaries(bs, total))
         }
     }
@@ -452,44 +480,113 @@ class SentenceSplitterTest {
     }
 
     /**
-     * 🔴 **记录现有行为，不是期望行为** —— 一个**系统性**的覆盖漏洞（写这组测试时发现的）。
+     * 🔴🔴 **2026-10-10 修复**：原实现的「超长强制切分」会**整块漏掉 15000ms**（段长 ≥ 16500ms 时）。
      *
-     * 段长 ≥ **16500ms**（= 最长句长 15000 + 最短句长 1500）时，强制切分会**整块漏掉 15000ms**：
-     *
-     * | 段长 | 切出来的 | 漏掉的 |
+     * | 段长 | 修复前切出来的 | 漏掉的 |
      * |---|---|---|
-     * | 45000ms | `(0,15000)` `(30000,45000)` | `(15000,30000)` |
+     * | 45000ms | `(0,15000)` `(30000,45000)` `(45000,60000)` | `(15000,30000)` |
      * | 75000ms | `(0,15000)` `(15000,30000)` `(30000,45000)` `(60000,75000)` | `(45000,60000)` |
      *
-     * 根因：切块循环每轮把 `cut` 推进 15s，退出后再补一块 `(cut, b)` ——
-     * 于是**倒数第二块永远没人认领**。不是"余数不巧"的偶发，是凡超 16.5 秒必漏。
+     * 根因：切块 `while` 每轮把 `cut` 推进 15s，退出后只补尾巴 `(cut, b)` ——
+     * 于是**倒数第二块 `(cut-15s, cut)` 永远没人认领**，而 `segStart` 又被推到 `b` ⇒ 那 15 秒彻底消失。
+     * 不是"余数不巧"的偶发，是**凡超 16.5 秒必漏**。
      *
-     * 后果：漏掉的那 15 秒在跟读列表里**点不到**（`Sentence` 列表里没有对应项）。
+     * 后果：漏掉的 15 秒在跟读列表里**点不到**、也听不到（`Sentence` 里根本没有对应项）。
      *
-     * 对照组见 `原始段_超15秒强制切_完整覆盖无空洞`：`rawSegments` 那条分支用的是**无条件推进**的
-     * `while`，覆盖是完整的 —— 所以这确实是 `sentences` 这条分支自己的问题，不是"超长段本来就只能这样"。
+     * 修法：`segStart` 要推进到 `b` 之前，**先把最后一个整块 `(cut-15s, cut)` 补上**。
      *
-     * ⚠️ 这是**现状快照**、不代表"应该有洞"。真要修属于**改断句判定**（要实机验收），没批就不动；
-     *   先把它钉在这儿，免得以后谁又踩进去还不知道。
-     * 💡 触发条件不算常见：需要有 ≥16.5 秒完全不带 350ms 以上停顿的连续音频（慢速教学素材里少见，
-     *   连续朗读/音乐里可能）。
+     * 对照组：`原始段_超15秒强制切_完整覆盖无空洞` —— `rawSegments` 那条分支用的是**无条件推进**的
+     * `while`，覆盖一直是完整的 ⇒ 证明这确实是 `sentences` 这条分支自己的毛病，不是"超长段只能这样"。
      */
     @Test
-    fun `句子_超长段_记录现有行为_每超15秒会漏掉一整块`() {
-        val out1 = sentencesFromBoundaries(listOf(45000L), 60000L)
+    fun `句子_超长段_每块都有人认领_不许漏`() {
+        // 45000ms：三块 15s 一个不少
         assertEquals(
-            listOf(Sentence(0, 15000), Sentence(30000, 45000), Sentence(45000, 60000)),
-            out1,
+            listOf(Sentence(0, 15000), Sentence(15000, 30000), Sentence(30000, 45000), Sentence(45000, 60000)),
+            sentencesFromBoundaries(listOf(45000L), 60000L),
         )
-        assertEquals("漏掉的正是 15 秒", 15000L, out1[1].startMs - out1[0].endMs)
+        // 75000ms：五块
+        assertEquals(
+            listOf(
+                Sentence(0, 15000), Sentence(15000, 30000), Sentence(30000, 45000),
+                Sentence(45000, 60000), Sentence(60000, 75000),
+            ),
+            sentencesFromBoundaries(listOf(75000L), 75000L),
+        )
+        // 🔴 端点值：正好 16500（= 最长句长 15000 + 最短句长 1500）—— 修复前这里会整个丢掉 (0,15000)
+        assertEquals(
+            listOf(Sentence(0, 15000), Sentence(15000, 16500)),
+            sentencesFromBoundaries(listOf(16500L), 16500L),
+        )
+        // 20000：尾巴 5000 ≥ 最短句长 ⇒ 独立成句
+        assertEquals(
+            listOf(Sentence(0, 15000), Sentence(15000, 20000)),
+            sentencesFromBoundaries(listOf(20000L), 20000L),
+        )
+        // 🔴 两个边界、第一段超长的情形（修复前同样会漏掉前 15 秒）
+        assertEquals(
+            listOf(Sentence(0, 15000), Sentence(15000, 20000), Sentence(20000, 30000)),
+            sentencesFromBoundaries(listOf(20000L, 30000L), 30000L),
+        )
+    }
 
-        val out2 = sentencesFromBoundaries(listOf(75000L), 75000L)
+    /**
+     * 尾巴不足最短句长（< 1500ms）时：**并进刚切出的整块**，不能把 `segStart` 留在原地。
+     *
+     * 修复前的行为：`while` 切出 `(0,15000)`，尾巴 1000 < 1500 ⇒ 不推进 `segStart` ⇒
+     * 收尾时又补一句 `(0, 31000)` ⇒ 两句**整体重叠**（听感上开头 15 秒会被复读两遍）。
+     */
+    @Test
+    fun `句子_超长段_尾巴不足最短句长时并进整块_不许与已切出的块重叠`() {
+        // 31000 = 15000 整块 + 16000（又是 15000 整块 + 1000 尾巴）
         assertEquals(
-            listOf(Sentence(0, 15000), Sentence(15000, 30000), Sentence(30000, 45000), Sentence(60000, 75000)),
-            out2,
+            listOf(Sentence(0, 15000), Sentence(15000, 31000)),
+            sentencesFromBoundaries(listOf(31000L), 31000L),
         )
-        assertEquals("同样漏 15 秒", 15000L, out2[3].startMs - out2[2].endMs)
-        assertEquals("覆盖总时长 = 段长 − 15000", 75000L - 15000L, out2.sumOf { it.endMs - it.startMs })
+        // 正好 16000 = 15000 + 1000 ⇒ 切不动，整段一句（不许留半截给下一句）
+        assertEquals(
+            listOf(Sentence(0, 16000)),
+            sentencesFromBoundaries(listOf(16000L), 16000L),
+        )
+    }
+
+    /**
+     * **普适不变量**：不管边界怎么给，句子表都必须**从 0 开始、到总时长结束、逐句首尾相接、长度为正**。
+     *
+     * 这是比"和历史实现对比"更强的保护 —— 它不关心实现怎么写，只盯"覆盖必须完整"这一条。
+     * 上面那个漏块 bug 就是被这条抓出来的（修复前 `first().startMs` 会是 15000 而不是 0）。
+     */
+    @Test
+    fun `句子_任何边界输入_都完整覆盖且无缝无叠`() {
+        val rnd = Random(10102026)
+        val cases = mutableListOf(
+            listOf(16500L) to 16500L,
+            listOf(20000L) to 20000L,
+            listOf(31000L) to 31000L,
+            listOf(45000L) to 60000L,
+            listOf(75000L) to 75000L,
+            listOf(15000L) to 30000L,
+            listOf(16000L) to 16000L,
+            listOf(30000L) to 30000L,
+            listOf(16000L, 20000L) to 40000L,
+            listOf(16500L, 33000L) to 50000L,
+            emptyList<Long>() to 60000L,
+        )
+        repeat(500) {
+            val total = rnd.nextLong(1, 120000)
+            cases.add(randomBoundaries(rnd, total) to total)
+        }
+        for ((bs, total) in cases) {
+            val out = sentencesFromBoundaries(bs, total)
+            val tag = "边界 $bs / 总长 $total"
+            assertTrue("$tag：句子表不能为空", out.isNotEmpty())
+            assertEquals("$tag：必须从 0 开始（漏块就是这里红）", 0L, out.first().startMs)
+            assertEquals("$tag：必须覆盖到总时长", total, out.last().endMs)
+            for (k in out.indices) {
+                assertTrue("$tag：第 $k 句长度必须为正", out[k].endMs > out[k].startMs)
+                if (k > 0) assertEquals("$tag：第 $k 句没接上上一句的尾巴", out[k - 1].endMs, out[k].startMs)
+            }
+        }
     }
 
     @Test
@@ -533,9 +630,9 @@ class SentenceSplitterTest {
     fun `句子_超长段切完余数正好等于最短句长_要保留`() {
         // 🔴 端点值：16500 = 最长句长 15000 + 最短句长 1500，正好卡在端点
         //   ⇒ 尾部那 1500ms 要**独立成句**、不能被丢。
-        // ⚠️ 前 15 秒仍然没人认领（见上面"记录现有行为"那条），这里只钉端点判定本身。
+        //   2026-10-10 修复前：这里只有后两句，前面 `(0,15000)` 整块消失。
         assertEquals(
-            listOf(Sentence(15000, 16500), Sentence(16500, 18000)),
+            listOf(Sentence(0, 15000), Sentence(15000, 16500), Sentence(16500, 18000)),
             sentencesFromBoundaries(listOf(16500L), 18000L),
         )
     }

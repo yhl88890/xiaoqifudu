@@ -118,7 +118,9 @@ object SentenceSplitter {
      *
      * - 段长 ∈ [MIN_SENTENCE_MS, MAX_SENTENCE_MS] ⇒ 成句；
      * - 段长 < MIN ⇒ **忽略该断点**（并入下一句）—— 静音门槛已滤过一道，这里再兜一层，别切碎；
-     * - 段长 > MAX ⇒ 强制按 15s 切，尾部不足 MIN 的那段并进下一句；
+     * - 段长 > MAX ⇒ 强制按 15s 一块一块地切，**每一块都要有人认领**；
+     *   尾巴 ≥ MIN 就独立成句，不足 MIN 就并进**刚切出的那一块**
+     *   （🔴 2026-10-10 修复：原来的写法尾巴不足 MIN 时不推进 segStart ⇒ 既漏块又和已切出的块重叠）；
      * - 收尾：末段 ≥ MIN 独立成句；不足则并进上一句末尾；一段都没切出来时整段一句。
      */
     internal fun sentencesFromBoundaries(boundaries: List<Long>, totalMs: Long): List<Sentence> {
@@ -130,14 +132,24 @@ object SentenceSplitter {
                 sentences.add(Sentence(segStart, b))
                 segStart = b
             } else if (len > MAX_SENTENCE_MS) {
-                // 超长强制切分
+                // 超长强制切分：从 segStart 起每 MAX_SENTENCE_MS 切一整块
                 var cut = segStart + MAX_SENTENCE_MS
                 while (b - cut > MAX_SENTENCE_MS) {
                     sentences.add(Sentence(cut - MAX_SENTENCE_MS, cut))
                     cut += MAX_SENTENCE_MS
                 }
                 if (b - cut >= MIN_SENTENCE_MS) {
+                    // 🔴【1010 修复】进这个分支 ⇒ segStart 要被推到 b ⇒ **必须先把最后一个整块补上**。
+                    //   原来的写法只补尾巴 (cut, b)，于是 (cut − MAX, cut) 那块**永远没人认领** ——
+                    //   段长 ≥ 16500ms（= MAX + MIN）时整块 15 秒消失：跟读列表里点不到、也听不到。
+                    sentences.add(Sentence(cut - MAX_SENTENCE_MS, cut))
                     sentences.add(Sentence(cut, b))
+                    segStart = b
+                } else {
+                    // 尾巴不足最短句长 ⇒ 不能独立成句 ⇒ 并进刚切出的整块，一起成一句。
+                    // 🔴【1010 修复】这里也**必须**推进 segStart：不推进的话，收尾时还会再补一句
+                    //   (segStart, totalMs)，与上面已经切出的块**整体重叠**（开头那段会被复读两遍）。
+                    sentences.add(Sentence(cut - MAX_SENTENCE_MS, b))
                     segStart = b
                 }
             }
