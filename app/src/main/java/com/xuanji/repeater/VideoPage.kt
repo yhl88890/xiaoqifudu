@@ -1253,15 +1253,18 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 // 用 `in sentences.indices` 一个条件把两头都判掉。
                 if (!readingMode && videoFullscreen && videoSubOn && videoSentenceIndexGlobal in sentences.indices) {
                     Box(
-                        // 🔴【1011 阿亮】外层**只留位、不画背景**：给下面那条控制条空出它的**真实高度**。
-                        //   背景挪到内层 Text 上 ⇒ 字幕条底边正好接上控制条顶边，两块紧邻成一整块、
-                        //   **不再叠加**（以前背景画在整块 Box 上，把留位也盖了 ⇒ 底部叠两层、更深，
-                        //   看着就是"两块不一样高、颜色也不一样"）。
-                        //   ⚠️ 这里必须用**全屏**控制条的高（96dp）；用竖屏的 58dp 会少留 38dp、
-                        //   被控制条压上来又叠一层（1011 实测踩过）。
+                        // 🔴🔴【1011 阿亮】字幕条是**独立模块**，跟下面那条控制条是**两套操作逻辑**
+                        //   （字幕 = 字幕开关常驻；控制条 = 点画面才浮出、过会儿自己藏回去）
+                        //   ⇒ 留位必须**跟着控制条走**：
+                        //     控制条没出来 ⇒ 字幕**贴着屏幕底**单独显示一行；
+                        //     控制条出来   ⇒ 字幕被顶上去，**字幕在上、控制条在下，上下拼接**。
+                        //   ⚠️ 绝不能提前先留位（v144 就是固定留 96dp ⇒ 字幕永远吊在半空、下面一条亮视频，
+                        //      被当场否掉——**别再这么搞**）。
+                        //   ⚠️ 留位值必须用**全屏**控制条的真实高（96dp，大号按钮 72dp）；竖屏那条只有 58dp，
+                        //      混用会被控制条压上来又叠一层（1011 实测踩过）。
                         modifier = Modifier.align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .padding(bottom = FULLSCREEN_CTRL_BAND_H),
+                            .padding(bottom = if (controlsVisible) FULLSCREEN_CTRL_BAND_H else 0.dp),
                     ) {
                         Text(
                             // 【1010】按显示模式裁行（双语字幕只看英文/只看中文）；单语字幕原样
