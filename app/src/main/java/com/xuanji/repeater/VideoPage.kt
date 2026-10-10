@@ -1876,8 +1876,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                                 }
                                                 // 整句加生词本：双语只加**英文**部分（阿亮：只加英文不加中文）
                                                 AddSentenceButton(context = context, text = wordSource, source = videoName)
-                                                Spacer(modifier = Modifier.height(4.dp))
-                                                Text("再长按可收起", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                // 【1010 阿亮】原来下面还有一行「再长按可收起」——**删掉**（与阅读模式同步）：
+                                                //   纯提醒、零信息量，却单独占一整行、灰字发闷。行为没动。
                                             }
                                         }
                                     }

@@ -452,12 +452,9 @@ private fun ReadingSentenceRow(
                 }
                 // 整句加入生词本：双语只加**英文**部分（阿亮：只加英文不加中文）
                 AddSentenceButton(context = context, text = wordSource, source = source)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "再长按可收起",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                // 【1010 阿亮】原来这里还有一行「再长按可收起」——**删掉**：
+                //   纯提醒、零信息量（打开的东西再按一下就收，是通用直觉，不用教），
+                //   却**单独占一整行**、灰字还发闷，白撑高卡片。行为一个字没动，只是少一行字。
             }
         }
     }
