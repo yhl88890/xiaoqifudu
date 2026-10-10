@@ -2220,9 +2220,12 @@ internal fun VideoTransportRow(
             if (en) Color.White else Color.White.copy(alpha = 0.4f)
         }
         // compact：点视频窗口浮出的那条半透明控制条，整体再缩一档（约 -15%）少挡画面
-        val szTrack = if (compact) 34.dp else 48.dp
-        val szSent = if (compact) 38.dp else 52.dp
-        val szPlay = if (compact) 52.dp else 72.dp
+        // 🔴【1010 阿亮】"进度条和按钮中间空着一块" —— 病根是按钮条里图标**垂直居中**，
+        //   szPlay=52dp 而图标只 28dp ⇒ 图标上方空 12dp。把按钮触摸区压到接近图标大小，
+        //   图标就往上顶、中间空白消失。**图标大小、圆点、功能全不动**。
+        val szTrack = if (compact) 28.dp else 48.dp
+        val szSent = if (compact) 30.dp else 52.dp
+        val szPlay = if (compact) 34.dp else 72.dp
         val icTrack = if (compact) 21.dp else 28.dp
         val icSent = if (compact) 24.dp else 32.dp
         val icPlay = if (compact) 28.dp else 38.dp
