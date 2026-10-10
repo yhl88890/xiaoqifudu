@@ -1,5 +1,6 @@
 package com.xuanji.repeater
 
+import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -72,6 +73,39 @@ object SubtitleState {
      *   `beginAsrRun` 与各装载函数都只负责把它清空，真正的结果文案由 ASR 任务出口自己写。
      */
     var asrMsg by mutableStateOf("")
+
+    // ==================== 字幕显示档位（全局唯一，别再建页面级副本）====================
+
+    /**
+     * 🔴🔴【1010 阿亮定】字幕显示档位：只看英文 / 只看中文 / 双语。
+     *
+     * **视频页和阅读模式读写的是同一份** —— 谁都不许在页面里另存一份副本
+     * （副本 = 两边各说各话，就是从视频进阅读发现档位没跟过来那个 bug 的成因）。
+     * ⚠️ 只对**抓来的现成字幕**生效：我们自己 ASR 生成的字幕不受档位影响
+     * （理由见 [subtitlesFromAsr]）。
+     *
+     * 加载/保存见同名的 [loadSubtitleMode] / [setSubtitleMode]。
+     */
+    var subtitleMode by mutableStateOf(SubtitleMode.EN_ONLY)
+
+    /** 档位的存档位置。⚠️ 库名/键名字面量**只此一处**，别在别处再写一遍。 */
+    private const val PREFS = "subtitle_prefs"
+    private const val KEY_MODE = "mode"
+
+    /** 读回存档的档位（App 启动时调一次）。值不认识 / 读挂了 ⇒ 回默认「只看英文」。 */
+    fun loadSubtitleMode(context: Context): SubtitleMode = runCatching {
+        SubtitleMode.valueOf(
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_MODE, SubtitleMode.EN_ONLY.name) ?: SubtitleMode.EN_ONLY.name
+        )
+    }.getOrDefault(SubtitleMode.EN_ONLY)
+
+    /** 切换档位：**改全局状态 + 落 SP**（两件事一起做，别只做一半）。 */
+    fun setSubtitleMode(context: Context, m: SubtitleMode) {
+        subtitleMode = m
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_MODE, m.name).apply()
+    }
 
     // ==================== 🔴🔴 字幕装载的唯一入口（1010 收口，别绕过去直接赋值）====================
     //

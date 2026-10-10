@@ -5,6 +5,8 @@ import com.xuanji.repeater.SubtitleState.loadReadySubtitles
 import com.xuanji.repeater.SubtitleState.sentences
 import com.xuanji.repeater.SubtitleState.srtName
 import com.xuanji.repeater.SubtitleState.subtitlesFromAsr
+import com.xuanji.repeater.SubtitleState.subtitleMode
+import com.xuanji.repeater.SubtitleState.setSubtitleMode
 import android.Manifest
 import android.content.ComponentName
 import android.content.Context
@@ -531,9 +533,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
 
     // 🔴【1010】字幕显示模式：双语 / 只看英文 / 只看中文。**默认「只看英文」**（阿亮定）。
     //   只对**双语字幕**起效；单语字幕任何档位都原样显示（挑不出对面那行，硬挑就变空）。
-    //   🔴🔴【1010 阿亮定】**档位是全局的**（`subtitleMode` 见 MainActivity.kt）——
+    //   🔴🔴【1010 阿亮定】**档位是全局的**（`subtitleMode` 见 SubtitleState.kt）——
     //     阅读模式里的字幕是同一份双语数据带过去的，它**也要跟这个档**，否则"视频全显英文、
-    //     阅读模式却中英都摆着"。⇒ 这里只读全局状态、切换走 `setSubtitleModeGlobal`，
+    //     阅读模式却中英都摆着"。⇒ 这里只读全局状态、切换走 `setSubtitleMode`，
     //     **不要再定义页面级副本**（副本 = 两边各说各话）。
     /** 某一句当前该显示成什么样（画面浮层 + 字幕列表都走这里，保证一致）。 */
     //   🔴🔴【1010 阿亮定】`subtitlesFromAsr` = **我们自己 ASR 生成的** ⇒ **一律不裁**。
@@ -1286,7 +1288,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                         text = {
                                             Text(if (subtitleMode == m) "✓ $label" else "     $label")
                                         },
-                                        onClick = { subMenuOpen = false; setSubtitleModeGlobal(context, m) },
+                                        onClick = { subMenuOpen = false; setSubtitleMode(context, m) },
                                     )
                                 }
                                 // 【v120】视频**自带**的字幕轨（内封软字幕）。有几条列几条，当前在用的打勾。

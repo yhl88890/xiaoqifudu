@@ -1,5 +1,6 @@
 package com.xuanji.repeater
 
+import com.xuanji.repeater.SubtitleState.subtitleMode
 import com.xuanji.repeater.SubtitleState.subtitlesFromAsr
 import android.content.Context
 import android.widget.Toast
@@ -354,7 +355,7 @@ private fun ReadingSentenceRow(
 ) {
     val context = LocalContext.current
     val text = sentence.text
-    // 🔴🔴【1010 阿亮定】阅读模式**跟随全局字幕档位**（`subtitleMode`，见 MainActivity.kt）。
+    // 🔴🔴【1010 阿亮定】阅读模式**跟随全局字幕档位**（`subtitleMode`，见 SubtitleState.kt）。
     //   这一段字幕是从视频带过来的**同一份双语数据**，视频那边选了"只看英文"，
     //   这里也必须是只看英文 —— 否则就是"视频全显英文、阅读模式中英都摆着"。
     //   规则与视频模式**完全一致**（都走 SentenceCodec 里同一套）：

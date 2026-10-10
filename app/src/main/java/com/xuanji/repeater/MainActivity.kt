@@ -159,6 +159,10 @@ import com.xuanji.repeater.SubtitleState.loadReadySubtitles
 import com.xuanji.repeater.SubtitleState.loadAsrSubtitles
 import com.xuanji.repeater.SubtitleState.loadArchivedSubtitles
 import com.xuanji.repeater.SubtitleState.restoreSubtitles
+// 【P3 · 1010】字幕档位三件套也一起收进去了（域一致：它就是"字幕怎么显示"，属字幕域）
+import com.xuanji.repeater.SubtitleState.subtitleMode
+import com.xuanji.repeater.SubtitleState.loadSubtitleMode
+import com.xuanji.repeater.SubtitleState.setSubtitleMode
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -217,25 +221,17 @@ internal var appBrightness by mutableStateOf<Float?>(null)
 //   由来：这档位原来只是 `VideoPage` 的**页面级局部状态** ⇒ 从视频进阅读模式时
 //   （字幕是同一份双语数据带过去的）阅读模式**拿不到档位**、永远显示全量双语 ⇒
 //   "视频模式现在全显英文，我阅读模式根本就没进去过"，说的就是这件事。
-//   ⇒ 提升成全局 `mutableStateOf`：VideoPage 的菜单读写它、ReadingPage 的列表也读它，
+//   ⇒ 提升成全局状态：VideoPage 的菜单读写它、ReadingPage 的列表也读它，
 //     **一处切换、两处同步**。落 SP（`subtitle_prefs`）记住个人习惯，重开不丢。
 //   ⚠️ 语义仍受 `filterByMode` 约束：**单语字幕任何档位原样显示**（挑不出对面那行）。
-internal var subtitleMode by mutableStateOf(SubtitleMode.EN_ONLY)
-
-/** 读回存档的档位（App 启动时调一次）。值不认识 / 读挂了 ⇒ 回默认「只看英文」。 */
-internal fun loadSubtitleMode(context: Context): SubtitleMode = runCatching {
-    SubtitleMode.valueOf(
-        context.getSharedPreferences("subtitle_prefs", Context.MODE_PRIVATE)
-            .getString("mode", SubtitleMode.EN_ONLY.name) ?: SubtitleMode.EN_ONLY.name
-    )
-}.getOrDefault(SubtitleMode.EN_ONLY)
-
-/** 切换档位：**改全局状态 + 落 SP**（两件事一起做，别只做一半）。 */
-internal fun setSubtitleModeGlobal(context: Context, m: SubtitleMode) {
-    subtitleMode = m
-    context.getSharedPreferences("subtitle_prefs", Context.MODE_PRIVATE)
-        .edit().putString("mode", m.name).apply()
-}
+//
+// 【P3 · 1010 收口】它和读写它的那两个函数**已经搬进 `SubtitleState`**（见该类注释）。
+//   搬家的理由不是"不好看" —— 是**字幕档位属于字幕域**，而字幕域在 P2-b 已经整体
+//   收进 `SubtitleState` 了（sentences / srtName / subtitlesFromAsr / asrMsg 都在那儿）
+//   ⇒ 档位留在 `MainActivity` 顶层就成了**域割裂**：同一个域的东西分住两个文件。
+//   顺带把这库/键的字面量（`"subtitle_prefs"` / `"mode"`）从"散在两个函数里各写一遍"
+//   收成一处常量 —— 它也是全工程**唯一**没走 Prefs 类、库名裸写字面量的 SP 库。
+//   🔴 库名、键名、默认值**一个字都没动** ⇒ 老装机读到的还是原来那份存档。
 
 /** 【v124】亮度存档。名字/写法照 ThemePrefs（同一个工程，别整出新花样）。
  *  存的是 0.01~1.0 的窗口亮度；没存过 / 存的是脏值 ⇒ 返回 null（= 跟随系统）。 */
