@@ -55,6 +55,15 @@ android {
     buildFeatures {
         compose = true
     }
+    // 【1010】JVM 单测里 `android.*` 的桩方法默认会抛 "Method ... not mocked"。
+    //   我们只测纯逻辑，但 `SubtitleParser.rx()` 的**异常分支**里有一句 `android.util.Log.e`
+    //   （只有正则编译失败才走到）—— 让桩返回默认值，免得"平时全绿、一跑到异常路径就炸"。
+    //   ⚠️ 这是 JVM 单测的标准配置，不影响 APK 的任何行为。
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
