@@ -78,4 +78,11 @@ dependencies {
     // 【v75】B站 扫码登录：本地生成二维码（不上传第三方服务）
     implementation("com.google.zxing:core:3.5.3")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // 【1010】纯逻辑单元测试 —— **跑在电脑上、不需要手机**（这是本工程第一个测试依赖）。
+    //   为什么只加 junit、不加 androidx.test：要测的 `SentenceCodec` / `SubtitleParser` /
+    //   `SentenceSplitter` 全是**纯 Kotlin 函数**（一个 Android API 都不碰）⇒ JVM 单测足够，
+    //   不需要仿真器、不需要真机。加了 androidx.test 反而会把测试绑到设备上、跑得慢。
+    //   ⚠️ 这是**唯一**新增的依赖；现有依赖与构建配置一行没动。已实测 mavenCentral 可达。
+    testImplementation("junit:junit:4.13.2")
 }
