@@ -1447,6 +1447,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 plain = true,
                                 compact = true,
                             )
+                            // 🔴【1010 阿亮】按钮别贴视频底边：往上浮，居中在「进度条」和「视频底边」之间。
+                            //   轨道线到视频底边 45dp ⇒ 中点 22.5dp，按钮中心本在 19dp ⇒ 浮 7dp 居中。
+                            Spacer(modifier = Modifier.height(7.dp))
                         }
                     }
                 }
