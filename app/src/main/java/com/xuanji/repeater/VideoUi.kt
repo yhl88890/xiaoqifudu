@@ -37,10 +37,17 @@ internal fun VideoProgressSlider(
     val trackH = 4.dp
     val thumbR = 6.dp
     val inert = Color.White.copy(alpha = 0.4f)
+    // 🔴【1010 阿亮】"进度条和下面几个功能键之间空得太多" —— 根因就是这个 Box 的高度：
+    //   轨道/小圆点画在**正中**（上面那条"不再偏上"的规矩要保住，所以**不能**把轨道往下挪），
+    //   于是 Box 有多高、上下就各空多少：原 28dp ⇒ 轨道到 Box 底整整 **14dp**，
+    //   加上按键行自己的 padding，肉眼看到"轨道离按键那条"能有 **42dp**。
+    //   ⇒ 把高度收下来，距离就近了，底下那块半透明黑区也跟着变窄。
+    // ⚠️ 下限别再往下压：`thumb` 直径是 12dp，Box 至少要 > 12dp，否则小圆点会顶出上下边。
+    //   18dp 是「明显靠近」和「还按得准」之间的折中；触摸区从 28 变 18，点轨道/拖圆点仍然够用。
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(28.dp)
+            .height(18.dp)
             .padding(horizontal = 8.dp)
             // 点击轨道 → 跳转
             .pointerInput(totalMs) {
