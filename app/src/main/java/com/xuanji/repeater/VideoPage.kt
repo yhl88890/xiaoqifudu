@@ -1432,8 +1432,15 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         }
                         if (controlsVisible) {
                             VideoTransportRow(
+                                // 🔴【1010 阿亮】按钮图标居中在「轨道线」和「视频底边」之间 —— **不联动**：
+                                //   黑条高度钉死（szPlay34 + padding 上下各 2 = 38dp），轨道线距视频底固定 45dp，
+                                //   中点 = 22.5dp，图标中心原在 19dp ⇒ 用 `offset` 把图标**视觉上移 3.5dp**。
+                                //   offset 只做 place 位移、不参与测量 ⇒ 黑条/进度条纹丝不动，图标单独往上浮。
+                                //   （之前用 padding 撑高黑条，黑条一变高进度条就跟着被顶，才一直"联动"绕圈。）
                                 modifier = Modifier.fillMaxWidth()
-                                    .background(Color.Black.copy(alpha = 0.5f)).padding(vertical = 2.dp),
+                                    .background(Color.Black.copy(alpha = 0.5f))
+                                    .padding(vertical = 2.dp)
+                                    .offset(y = (-3.5).dp),
                                 onPrevTrack = { prevVideo() },
                                 onPrevSentence = { videoJumpSentence(-1) },
                                 onPrevSentenceHoldChange = { held -> if (held) startRewind() else stopFast() },
@@ -1447,9 +1454,6 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 plain = true,
                                 compact = true,
                             )
-                            // 🔴【1010 阿亮】按钮别贴视频底边：往上浮，居中在「进度条」和「视频底边」之间。
-                            //   轨道线到视频底边 45dp ⇒ 中点 22.5dp，按钮中心本在 19dp ⇒ 浮 7dp 居中。
-                            Spacer(modifier = Modifier.height(7.dp))
                         }
                     }
                 }
