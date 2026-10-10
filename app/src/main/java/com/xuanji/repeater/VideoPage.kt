@@ -1362,10 +1362,21 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
+                            // 🔴🔴【1010 阿亮】**背景高度与进度条高度必须解耦**（原来没解耦，
+                            //   害得"只想压缩轨道↔按键那段"却把整块灰区也压矮了）。
+                            // 病根：`background` 挂在这个 Box 上、而 Box 高度**由子节点 Slider 决定**
+                            //   ⇒ 改 Slider 高度 = 同时改「触摸区」+「灰区总高」+「上半空隙」，三者绑死。
+                            // 现在：`height(PROGRESS_BAND_H)` 把灰区总高钉死、Slider 16dp 并**贴底**
+                            //   ⇒ 上半 = BAND_H − 16dp、下半 = 8dp，两段互不牵连。
+                            // ⚠️ 唯一需求（1010 反复强调）：只缩小"轨道↔按钮"，上半灰区保持 6dp 不动。
+                            //   上半 = PROGRESS_BAND_H − PROGRESS_SLIDER_H，下半 = PROGRESS_SLIDER_H ÷ 2。
+                            // ⇒ 以后「上半」调 PROGRESS_BAND_H、「下半」调 PROGRESS_SLIDER_H。
                             Box(
                                 modifier = Modifier.fillMaxWidth()
+                                    .height(PROGRESS_BAND_H)
                                     .background(Color.Black.copy(alpha = 0.45f))
                                     .padding(horizontal = 14.dp, vertical = 0.dp),
+                                contentAlignment = Alignment.BottomCenter,
                             ) {
                                 VideoProgressSlider(
                                     currentMs = currentPos,
@@ -1401,10 +1412,13 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
+                        // 🔴 v139 同上：底板高固定 22dp、Slider 贴底 ⇒ 只压轨道↔按键，上半灰区不动
                         Box(
                             modifier = Modifier.fillMaxWidth()
+                                .height(PROGRESS_BAND_H)
                                 .background(Color.Black.copy(alpha = 0.45f))
                                 .padding(horizontal = 14.dp, vertical = 0.dp),
+                            contentAlignment = Alignment.BottomCenter,
                         ) {
                             VideoProgressSlider(
                                 currentMs = currentPos,
