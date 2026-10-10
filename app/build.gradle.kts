@@ -12,13 +12,17 @@ android {
         applicationId = "com.xuanji.repeater"
         minSdk = 26
         targetSdk = 35
-        versionCode = 139
+        // bump 版本只改这一个数即可（versionName 由它算出来）
+        val code = 139
+        versionCode = code
         // 🔴 版本名**跟着 versionCode 走**（0919 阿亮要求）：
         //    他手机上「应用信息 → 版本」显示的就是这一行。以前这里写死 "1.2"
         //    ⇒ 装哪一版都显示 1.2，他在对话里说的 v49 / v50 根本对不上号。
-        //    现在第三段 = versionCode ⇒ 显示 "1.2.51"。
-        //    ⇒ 以后 bump versionCode 即可，**不用再单独改这一行**。
-        versionName = "1.2.$versionCode"
+        // 🔴🔴【1011 阿亮】**过百进位**：第三段永远只留两位，百位进到中间那段，看着简洁。
+        //    v99 → "1.2.99"；v139 → "1.3.39"；v205 → "1.4.5"；v300 → "1.5.0"。
+        //    公式 = "1.${2 + code/100}.${code%100}"（<100 时与旧规则完全一致）。
+        //    ⇒ 以后照样只 bump versionCode，**不用再单独改这一行**。
+        versionName = "1.${2 + code / 100}.${code % 100}"
     }
 
     signingConfigs {
