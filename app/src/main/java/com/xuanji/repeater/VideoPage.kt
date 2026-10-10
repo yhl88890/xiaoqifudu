@@ -1247,7 +1247,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     Box(
                         modifier = Modifier.align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .background(Color.Black.copy(alpha = 0.55f))
+                            // 🔴【1011 阿亮】字幕底色调淡（0.55 → 0.4），跟下面那条控制条**用同一个色**
+                            //   ⇒ 字幕条和控制条不再一深一浅两块。
+                            .background(CTRL_BAND_COLOR)
                             .padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 56.dp),
                     ) {
                         Text(
@@ -1256,6 +1258,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             color = Color.White,
                             style = MaterialTheme.typography.bodyLarge,
                             fontWeight = FontWeight.SemiBold,
+                            // 🔴【1011 阿亮】全屏字幕**居中**（原来没设 textAlign ⇒ 默认靠左）。
+                            textAlign = TextAlign.Center,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
