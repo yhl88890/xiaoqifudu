@@ -34,7 +34,10 @@ import org.junit.Test
  *    （`Uri.parse` 走桩返回 null）⇒ 这里只能钉"能接受 null 并原样存下"。
  *    真机上"新视频画面出不来"这类问题请走真机验收。
  * ⚠️ `videoBgResumePos` / `videoBgWasPlaying` 是 `private`，测试读不到 ⇒ 不在覆盖范围内
- *    （它们目前只有媒体库那条入口清，见 [switchToVideo] 的注释）。
+ *    （这两个字段全仓库**只写不读**，清不清都没有可观察差异；见 [switchToVideo] 的注释）。
+ * ⚠️ `switchToVideo` 里新加的 `PlayerService.stopAudioForVideo()` 也测不到 ——
+ *    单测里 `PlayerService.instance` 是 null，`?.` 直接跳过 ⇒
+ *    「B站导入那条不再双声」必须**真机验**（从音频模式导一个 B站 视频听一下）。
  *
  * ⚠️ 这些测试直接读写 App 的全局 Compose 状态，所以每个用例都要自己摆好前置状态，
  *    不能依赖执行顺序（[makeDirty] 就是干这个的）。

@@ -363,20 +363,18 @@ internal fun restoreSubtitles(sentencesRaw: String, name: String) {
 
 // ===== 换视频来源：跟「当前放的是哪条视频」绑定的状态，统一在这里重置 =====
 // 【为什么要收口】原来「媒体库选视频」[openVideoFromLibrary] 和「本地文件视频」[openVideoFileByPath]
-//   两条入口**各抄了一遍**同一组字段重置（十几行 × 2）。改一处忘一处 ⇒ 两个入口行为不一致，
-//   而且这种分叉单测抓不到、只能真机撞见。
-//
-// 🔴【刻意只放"两条入口真的一样"的字段】—— 没把差异拉平，因为拉平就是改行为：
-//   · `PlayerService.stopAudioForVideo()`：只有媒体库那条调（避免视频与后台音频双声）。
-//     ⚠️ B站导入的调用点上游**没调** ⇒ 从音频模式直接导 B站 视频理论上可能双声（待确认是否算漏）。
-//   · `videoBgResumePos` / `videoBgWasPlaying`：只有媒体库那条清。
-//   以上两点**留在各自入口里、一眼能看见**，别偷偷合并进来。
+//   两条入口**各抄了一遍**同一组字段重置（十几行 × 2），而且已经分叉了：
+//   媒体库那条会停后台音频、会清后台交接残留，B站导入那条**两样都不做**。
+//   ⇒ 2026-10-10 收成一个入口；两处分叉已按阿亮批准**统一**（B站导入现在也停音频、也清残留）。
 //
 // ⚠️ 这组字段里 currentPos / videoPlaying / videoUri 等被 [PlayerService]（后台 Service）读写
 //   ⇒ P2-b 分域时走**进程级单例**，别塞进 UI holder（UI 概念泄漏进 Service 会编不过）。
 //
 // 🔴 新增任何「打开/切换视频」的路径，都要走这个函数，别再散着给这些字段赋值。
 internal fun switchToVideo(uri: Uri?, path: String, siblings: List<VideoItem>) {
+    // 打开/切换视频：先停掉后台音频服务的旧音频（冷启动自动续播的幽灵音），避免与视频双声。
+    // ⚠️ 幂等，重复调无害 —— 有的调用点上游自己也调过一次（如「字幕库点视频播放」，先调后进本函数）。
+    PlayerService.instance?.stopAudioForVideo()
     // 【1003 加保险】用户主动选了新视频 ⇒ 上一轮"恢复失败"作废，恢复正常存盘
     videoRestoreFailed = false
     videoUri = uri
@@ -388,6 +386,12 @@ internal fun switchToVideo(uri: Uri?, path: String, siblings: List<VideoItem>) {
     // 带着上次后台的位置（如 33246）泄漏进来，CREATE 续播会跳到旧位置而非从 0 开始。
     videoHandedToBg = false
     videoResumePos = 0L
+    // ⚠️ 这两个和上面那句是同一族（切后台续播的残留态）。**目前全仓库只写不读**：
+    //   只被 saveVideoPrefs 存进 SP、loadVideoPrefs 读回来、onPause 处写入 —— **没有任何判定消费它**。
+    //   ⇒ 以前"B站导入那条不清"其实**没有可观察的影响**。这里统一清是为了两条路径一致，
+    //     也防止将来真有人去读它们时踩到脏值。要删这两个字段得连 SP 键一起动，属另一件事。
+    videoBgResumePos = 0L
+    videoBgWasPlaying = false
     // 【1010】换视频 ⇒ 字幕来源作废，4 个字段一起归零（唯一入口）
     clearSubtitles()
     videoFolderVideos = siblings
@@ -703,14 +707,8 @@ private fun clearVideoHandoffPrefs(context: Context) {
  *      对 PhotoPicker 的 Uri 根本不适用，所以同名字幕一直没生效。
  */
 internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: List<VideoItem> = emptyList()) {
-    // 打开/切换视频：先停掉后台音频服务的旧音频（冷启动自动续播的幽灵音），避免与视频双声
-    // ⚠️ 这句**只有本条路径有**（B站导入那条 openVideoFileByPath 没有）—— 历史分岔，别顺手合并
-    PlayerService.instance?.stopAudioForVideo()
-    // 【P2 收口】换视频的状态重置统一走 [switchToVideo]（原来两条入口各抄一遍，已分叉）
+    // 【P2 收口】换视频的状态重置（含停后台音频、清后台交接残留）统一走 [switchToVideo]
     switchToVideo(VideoScanner.uriFor(item.id), item.path, siblings)
-    // ⚠️ 同上：这两项也只有本条路径清（openVideoFileByPath 不清）⇒ 别顺手合并，属改行为、待确认
-    videoBgResumePos = 0L
-    videoBgWasPlaying = false
     // 字幕来源优先级：① 手动选过的（用户显式指定，最高）② 同名/近名的字幕文件（下面那段）③ 以前识别的结果
     // 🔴【1008】原来调 SrtParser.findBestSrtFile —— 它只认 .srt，而且找不到同名就"取同目录第一个"，
     //   一个目录里放多个视频时会把**别的视频的字幕**加载进来（张冠李戴且界面看不出来）。
@@ -781,10 +779,9 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
 /** 打开本地文件视频（B站导入等：文件已落 Download/XuanjiBili，无 MediaStore id，直接用 file Uri 打开）
  *  与 openVideoFromLibrary 同款：设置 URI/路径 + 自动载入同目录 .srt。 */
 private fun openVideoFileByPath(context: Context, file: File, siblings: List<VideoItem> = emptyList()) {
-    // 【P2 收口】换视频的状态重置统一走 [switchToVideo]。
-    // ⚠️ 本条路径**不调 `stopAudioForVideo()`、不清 `videoBgResumePos`/`videoBgWasPlaying`** ——
-    //   与媒体库那条不一致，是历史遗留。补上属改行为（可能顺带修掉"从音频模式导 B站 视频双声"），
-    //   没经确认**不擅自合并**。
+    // 【P2 收口】换视频的状态重置（含停后台音频、清后台交接残留）统一走 [switchToVideo]。
+    // ✅ 2026-10-10：本条路径原来**不停后台音频**（⇒ 从音频模式直接导 B站 视频可能双声），
+    //   已按阿亮批准统一 —— 现在和媒体库那条行为一致。
     switchToVideo(Uri.fromFile(file), file.path, siblings)
     // 字幕来源优先级：同 openVideoFromLibrary（见那里的【1008】说明）—— 手动选的 > 同目录文件 > 识别结果
     val manualSub = ManualSubtitle.saved(context, file.path)
