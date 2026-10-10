@@ -1362,21 +1362,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            // 🔴🔴【1010 阿亮】**背景高度与进度条高度必须解耦**（原来没解耦，
-                            //   害得"只想压缩轨道↔按键那段"却把整块灰区也压矮了）。
-                            // 病根：`background` 挂在这个 Box 上、而 Box 高度**由子节点 Slider 决定**
-                            //   ⇒ 改 Slider 高度 = 同时改「触摸区」+「灰区总高」+「上半空隙」，三者绑死。
-                            // 现在：`height(PROGRESS_BAND_H)` 把灰区总高钉死、Slider 16dp 并**贴底**
-                            //   ⇒ 上半 = BAND_H − 16dp、下半 = 8dp，两段互不牵连。
-                            // ⚠️ 唯一需求（1010 反复强调）：只缩小"轨道↔按钮"，上半灰区保持 6dp 不动。
-                            //   上半 = PROGRESS_BAND_H − PROGRESS_SLIDER_H，下半 = PROGRESS_SLIDER_H ÷ 2。
-                            // ⇒ 以后「上半」调 PROGRESS_BAND_H、「下半」调 PROGRESS_SLIDER_H。
                             Box(
                                 modifier = Modifier.fillMaxWidth()
-                                    .height(PROGRESS_BAND_H)
                                     .background(Color.Black.copy(alpha = 0.45f))
                                     .padding(horizontal = 14.dp, vertical = 0.dp),
-                                contentAlignment = Alignment.BottomCenter,
                             ) {
                                 VideoProgressSlider(
                                     currentMs = currentPos,
@@ -1412,13 +1401,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        // 🔴 v139 同上：底板高固定 22dp、Slider 贴底 ⇒ 只压轨道↔按键，上半灰区不动
                         Box(
                             modifier = Modifier.fillMaxWidth()
-                                .height(PROGRESS_BAND_H)
                                 .background(Color.Black.copy(alpha = 0.45f))
                                 .padding(horizontal = 14.dp, vertical = 0.dp),
-                            contentAlignment = Alignment.BottomCenter,
                         ) {
                             VideoProgressSlider(
                                 currentMs = currentPos,
@@ -1432,15 +1418,14 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         }
                         if (controlsVisible) {
                             VideoTransportRow(
-                                // 🔴【1010 阿亮】按钮图标居中在「轨道线」和「视频底边」之间 —— **不联动**：
-                                //   黑条高度钉死（szPlay34 + padding 上下各 2 = 38dp），轨道线距视频底固定 45dp，
-                                //   中点 = 22.5dp，图标中心原在 19dp ⇒ 用 `offset` 把图标**视觉上移 3.5dp**。
-                                //   offset 只做 place 位移、不参与测量 ⇒ 黑条/进度条纹丝不动，图标单独往上浮。
-                                //   （之前用 padding 撑高黑条，黑条一变高进度条就跟着被顶，才一直"联动"绕圈。）
+                                // 🔴【1010 阿亮】按钮居中在「进度条轨道线」和「视频底边」的正中间。
+                                //   黑条 38dp + 轨道线离黑条顶 8dp ⇒ 轨道线到视频底 46dp，中点 23dp；
+                                //   图标中心本来在离底 19dp ⇒ 用 offset 把图标**整体往上挪 4dp**就正居中。
+                                //   offset 只是"把图标挪个位置"，黑条高度、进度条位置一律不动。
                                 modifier = Modifier.fillMaxWidth()
                                     .background(Color.Black.copy(alpha = 0.5f))
                                     .padding(vertical = 2.dp)
-                                    .offset(y = (-3.5).dp),
+                                    .offset(y = (-4).dp),
                                 onPrevTrack = { prevVideo() },
                                 onPrevSentence = { videoJumpSentence(-1) },
                                 onPrevSentenceHoldChange = { held -> if (held) startRewind() else stopFast() },
@@ -2227,9 +2212,9 @@ internal fun VideoTransportRow(
             if (en) Color.White else Color.White.copy(alpha = 0.4f)
         }
         // compact：点视频窗口浮出的那条半透明控制条，整体再缩一档（约 -15%）少挡画面
-        // 🔴【1010 阿亮】"进度条和按钮中间空着一块" —— 病根是按钮条里图标**垂直居中**，
-        //   szPlay=52dp 而图标只 28dp ⇒ 图标上方空 12dp。把按钮触摸区压到接近图标大小，
-        //   图标就往上顶、中间空白消失。**图标大小、圆点、功能全不动**。
+        // 🔴【1010 阿亮】"进度条跟按钮中间空着一块" —— 病根是图标在按钮条里**垂直居中**：
+        //   szPlay=52dp 而图标只 28dp ⇒ 图标头顶空 12dp。把触摸区压到贴着图标，
+        //   空白就没了。**图标大小、圆点、功能全不动**，改的只是那圈不可见的点击区。
         val szTrack = if (compact) 28.dp else 48.dp
         val szSent = if (compact) 30.dp else 52.dp
         val szPlay = if (compact) 34.dp else 72.dp
