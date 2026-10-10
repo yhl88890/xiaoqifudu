@@ -399,6 +399,14 @@ internal fun videoJumpSentence(step: Int) {
  *  两个子项都不再各画各的 ⇒ 一整条。取值比原来两块（0.45 / 0.5）**略浅一点**。 */
 internal val CTRL_BAND_COLOR = Color.Black.copy(alpha = 0.4f)
 
+/** 🔴🔴【1011 阿亮】**全屏（横屏）**那条控制条的总高。
+ *  ⚠️ 全屏那条用的是**大号按钮**（`plain=true` 不带 `compact` ⇒ szPlay 72dp），
+ *  所以它 = padding top 4 + Slider 16 + Row(72 + 上下各 2) = **96dp**，
+ *  **比竖屏那条（58dp）高 38dp** —— 两条控制条高度本来就不同，别混用同一个数。
+ *  全屏字幕浮层用这个数"留位" ⇒ 字幕条底边正好接上控制条顶边，两块**紧邻成一整块、不叠加**
+ *  （留少了就会被控制条压上来叠两层 ⇒ 底部更深，看着像"两块不一样高、颜色也不一样"）。 */
+internal val FULLSCREEN_CTRL_BAND_H = 96.dp
+
 /** 视频模式页：本地视频播放（框架 VideoView，0903 回退修复黑屏）。字幕导入 / ASR 自动断句已接入。
  *  控制条与音频模式统一：上一曲 / 上一句(长按快退) / 播放 / 下一句(长按快进) / 下一曲。
  *  全屏模式（需求6）：视频填满页面，仅在全屏时把字幕叠在画面上，并提供字幕开关。 */
@@ -1245,12 +1253,15 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 // 用 `in sentences.indices` 一个条件把两头都判掉。
                 if (!readingMode && videoFullscreen && videoSubOn && videoSentenceIndexGlobal in sentences.indices) {
                     Box(
+                        // 🔴【1011 阿亮】外层**只留位、不画背景**：给下面那条控制条空出它的**真实高度**。
+                        //   背景挪到内层 Text 上 ⇒ 字幕条底边正好接上控制条顶边，两块紧邻成一整块、
+                        //   **不再叠加**（以前背景画在整块 Box 上，把留位也盖了 ⇒ 底部叠两层、更深，
+                        //   看着就是"两块不一样高、颜色也不一样"）。
+                        //   ⚠️ 这里必须用**全屏**控制条的高（96dp）；用竖屏的 58dp 会少留 38dp、
+                        //   被控制条压上来又叠一层（1011 实测踩过）。
                         modifier = Modifier.align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            // 🔴【1011 阿亮】字幕底色调淡（0.55 → 0.4），跟下面那条控制条**用同一个色**
-                            //   ⇒ 字幕条和控制条不再一深一浅两块。
-                            .background(CTRL_BAND_COLOR)
-                            .padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 56.dp),
+                            .padding(bottom = FULLSCREEN_CTRL_BAND_H),
                     ) {
                         Text(
                             // 【1010】按显示模式裁行（双语字幕只看英文/只看中文）；单语字幕原样
@@ -1260,7 +1271,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             fontWeight = FontWeight.SemiBold,
                             // 🔴【1011 阿亮】全屏字幕**居中**（原来没设 textAlign ⇒ 默认靠左）。
                             textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth()
+                                .background(CTRL_BAND_COLOR)
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
                         )
                     }
                 }
