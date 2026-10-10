@@ -45,30 +45,83 @@ object SentenceSplitter {
         val peak = rms.max()
         if (peak <= 0f) return SplitResult(emptyList(), rms, totalMs)
 
-        // 真实帧长：双声道音频帧数翻倍（25ms/帧），单声道 50ms/帧。
-        // 用总时长/帧数校准，断句边界时间才与实际音频对齐
-        val frameMsReal = if (rms.size > 0) (totalMs.toDouble() / rms.size).coerceIn(20.0, 60.0) else FRAME_MS.toDouble()
-        val threshold = peak * SILENCE_RATIO
-        val silent = BooleanArray(rms.size) { rms[it] < threshold }
+        // 解码出 RMS 之后的部分全是纯算术 ⇒ 已拆成 3 个纯函数（见下方"纯算法"），
+        // 好处是能在电脑上直接断言，不用装机听（这一层原来只能靠真机验证）。
+        val boundaries = silenceRuns(rms, totalMs, MIN_SILENCE_MS, SILENCE_RATIO).map { it.first }
+        val sentences = sentencesFromBoundaries(boundaries, totalMs)
+        // 波形归一化（供绘制）
+        val waveform = FloatArray(rms.size) { (rms[it] / peak).coerceIn(0f, 1f) }
+        val rawSegments = rawSegmentsFromBoundaries(boundaries, totalMs)
+        return SplitResult(sentences, waveform, totalMs, rawSegments)
+    }
 
-        // 收集静音段（≥300ms）的中心点作为候选边界
-        val boundaries = mutableListOf<Long>()
+    // ======================= 纯算法（不碰任何 Android API ⇒ 可 JVM 单测） =======================
+    //
+    // 【1010 抽出来】这几段原来全挤在 split() 里、和 MediaCodec 解码缠在一起 ⇒ 只能"装机听一遍"，
+    // 改一次靠猜、错一次重来 —— 断句规则本来就是"改一次错一次"的重灾区。
+    // 它们的入参只有 `FloatArray + Long`、不含任何 Android 依赖 ⇒ 抽出来就能在电脑上跑断言。
+    //
+    // 🔴 抽取时**判定逻辑一个字没改**（阈值 / 门槛 / 长度约束 / 边界吸附全部保持原样）；
+    //    这一步只做"换位置"、不改行为。特别是 MIN_SILENCE_MS=350ms（慢速教学基线）**别动**。
+
+    /** 真实帧长：双声道音频帧数翻倍（25ms/帧）、单声道 50ms/帧 ⇒ 用总时长 ÷ 帧数校准，边界时间才和音频对齐。 */
+    private fun frameMsRealOf(frameCount: Int, totalMs: Long): Double =
+        if (frameCount > 0) (totalMs.toDouble() / frameCount).coerceIn(20.0, 60.0)
+        else FRAME_MS.toDouble()
+
+    /**
+     * 找连续静音段 ⇒ `(中心时间ms, 该段静音时长ms)`。
+     *
+     * 🔴 为什么必须收成**一份**实现：这段逻辑原来在 [split] 和 [silenceValleysWithLen] 里
+     * **各写了一遍、逐行一样**。两份拷贝的真实风险 = 改一处忘另一处 ⇒
+     * 断句链路与"长句静音吸附"链路的行为悄悄分岔，而且只有真机上才看得出来。
+     *
+     * @param rms 每帧 RMS 能量（解码侧产出）
+     * @param totalMs 音频总时长，仅用来换算真实帧长
+     * @param minSilenceMs 连续静音达到该长度才算一段
+     *   （断句用 350ms；视频「生成字幕」传 180ms —— 快语速素材句间停顿只有 150~300ms）
+     * @param ratio 静音阈值 = 峰值 × 该比例。**相对阈值**：整体音量小的素材照样能断。
+     */
+    internal fun silenceRuns(
+        rms: FloatArray,
+        totalMs: Long,
+        minSilenceMs: Long,
+        ratio: Float = SILENCE_RATIO,
+    ): List<Pair<Long, Long>> {
+        if (rms.isEmpty()) return emptyList()
+        val peak = rms.max()
+        if (peak <= 0f) return emptyList()
+        val frameMsReal = frameMsRealOf(rms.size, totalMs)
+        val threshold = peak * ratio
+        val silent = BooleanArray(rms.size) { rms[it] < threshold }
+        val out = mutableListOf<Pair<Long, Long>>()
         var i = 0
         val n = rms.size
         while (i < n) {
             if (silent[i]) {
                 var j = i
                 while (j < n && silent[j]) j++
-                if ((j - i) * frameMsReal >= MIN_SILENCE_MS) {
-                    boundaries.add(((i + j) / 2 * frameMsReal).toLong())
+                val lenMs = ((j - i) * frameMsReal).toLong()
+                if (lenMs >= minSilenceMs) {
+                    out.add(((i + j) / 2 * frameMsReal).toLong() to lenMs)
                 }
                 i = j
             } else {
                 i++
             }
         }
+        return out
+    }
 
-        // 由边界生成句子（长度约束）
+    /**
+     * 由断点生成句子（长度约束）。
+     *
+     * - 段长 ∈ [MIN_SENTENCE_MS, MAX_SENTENCE_MS] ⇒ 成句；
+     * - 段长 < MIN ⇒ **忽略该断点**（并入下一句）—— 静音门槛已滤过一道，这里再兜一层，别切碎；
+     * - 段长 > MAX ⇒ 强制按 15s 切，尾部不足 MIN 的那段并进下一句；
+     * - 收尾：末段 ≥ MIN 独立成句；不足则并进上一句末尾；一段都没切出来时整段一句。
+     */
+    internal fun sentencesFromBoundaries(boundaries: List<Long>, totalMs: Long): List<Sentence> {
         val sentences = mutableListOf<Sentence>()
         var segStart = 0L
         for (b in boundaries) {
@@ -99,11 +152,14 @@ object SentenceSplitter {
         } else {
             sentences.add(Sentence(0L, totalMs))
         }
+        return sentences
+    }
 
-        // 波形归一化（供绘制）
-        val waveform = FloatArray(rms.size) { (rms[it] / peak).coerceIn(0f, 1f) }
-
-        // 原始边界段：相邻边界间的段（超 15s 强制切分，与上面一致；过短边界段并入下一段）
+    /**
+     * 原始边界段：只按真实停顿切、**不做"最短句长"合并**（超 15s 仍强制切）。
+     * 供**无时间戳 ASR 文本对齐**用 —— 短句（如 "Hi."）被最短句长规则并进下一段就会导致文本对不齐。
+     */
+    internal fun rawSegmentsFromBoundaries(boundaries: List<Long>, totalMs: Long): List<Sentence> {
         val rawSegments = mutableListOf<Sentence>()
         var rs = 0L
         for (b in boundaries) {
@@ -124,8 +180,7 @@ object SentenceSplitter {
             }
         }
         if (rawSegments.isEmpty()) rawSegments.add(Sentence(0L, totalMs))
-
-        return SplitResult(sentences, waveform, totalMs, rawSegments)
+        return rawSegments
     }
 
     /** 解码音频并按帧计算 RMS，返回 (帧能量序列, 总时长ms)
@@ -412,32 +467,13 @@ object SentenceSplitter {
     }
 
     /** 【v96】带静音长度的静音谷：(中心ms, 该段静音的时长ms)。
-     *  长度信息供边界吸附用：句间停顿（长）与句中换气（短）要区别对待。 */
+     *  长度信息供边界吸附用：句间停顿（长）与句中换气（短）要区别对待。
+     *  ✅ 实现已收到 [silenceRuns]：原来这里是 [split] 内那段逻辑的**第二份拷贝**（逐行一样），
+     *     两份并存时"改一处忘另一处"会让两条链路悄悄不一致 ⇒ 现在只有一份。 */
     fun silenceValleysWithLen(path: String, minSilenceMs: Long, ratio: Float = SILENCE_RATIO): List<Pair<Long, Long>> {
         val (rms, totalMs) = decodeRmsFrames(path) { }
         if (rms.isEmpty() || totalMs <= 0) return emptyList()
-        val peak = rms.max()
-        if (peak <= 0f) return emptyList()
-        val frameMsReal = (totalMs.toDouble() / rms.size).coerceIn(20.0, 60.0)
-        val threshold = peak * ratio
-        val silent = BooleanArray(rms.size) { rms[it] < threshold }
-        val out = mutableListOf<Pair<Long, Long>>()
-        var i = 0
-        val n = rms.size
-        while (i < n) {
-            if (silent[i]) {
-                var j = i
-                while (j < n && silent[j]) j++
-                val lenMs = ((j - i) * frameMsReal).toLong()
-                if (lenMs >= minSilenceMs) {
-                    out.add(Pair(((i + j) / 2 * frameMsReal).toLong(), lenMs))
-                }
-                i = j
-            } else {
-                i++
-            }
-        }
-        return out
+        return silenceRuns(rms, totalMs, minSilenceMs, ratio)
     }
 
     /** 取音频中的静音段中心点（ms）：供视频模式长句切分当真实停顿点。
