@@ -1,5 +1,15 @@
 package com.xuanji.repeater
 
+import com.xuanji.repeater.SubtitleState.ASR_SUBTITLE_NAME
+import com.xuanji.repeater.SubtitleState.asrMsg
+import com.xuanji.repeater.SubtitleState.clearSubtitles
+import com.xuanji.repeater.SubtitleState.loadArchivedSubtitles
+import com.xuanji.repeater.SubtitleState.loadAsrSubtitles
+import com.xuanji.repeater.SubtitleState.loadReadySubtitles
+import com.xuanji.repeater.SubtitleState.restoreSubtitles
+import com.xuanji.repeater.SubtitleState.sentences
+import com.xuanji.repeater.SubtitleState.srtName
+import com.xuanji.repeater.SubtitleState.subtitlesFromAsr
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

@@ -1,5 +1,10 @@
 package com.xuanji.repeater
 
+import com.xuanji.repeater.SubtitleState.asrMsg
+import com.xuanji.repeater.SubtitleState.loadReadySubtitles
+import com.xuanji.repeater.SubtitleState.sentences
+import com.xuanji.repeater.SubtitleState.srtName
+import com.xuanji.repeater.SubtitleState.subtitlesFromAsr
 import android.Manifest
 import android.content.ComponentName
 import android.content.Context

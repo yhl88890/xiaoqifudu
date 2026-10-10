@@ -145,6 +145,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+// 【P2-b 第一批 · 1010】字幕域状态搬进 `SubtitleState`。
+// ⚠️ Kotlin **不允许 `import com.xxx.SomeObject.*`**（编译报 `Cannot import on demand from object`）
+// ⇒ 只能这样**逐个成员**导。加了这 10 行之后，本文件原来所有 `sentences` / `srtName` /
+// `clearSubtitles()` 之类的写法**一字不用改**（同包的顶层声明才不需要 import）。
+import com.xuanji.repeater.SubtitleState.sentences
+import com.xuanji.repeater.SubtitleState.srtName
+import com.xuanji.repeater.SubtitleState.subtitlesFromAsr
+import com.xuanji.repeater.SubtitleState.asrMsg
+import com.xuanji.repeater.SubtitleState.ASR_SUBTITLE_NAME
+import com.xuanji.repeater.SubtitleState.clearSubtitles
+import com.xuanji.repeater.SubtitleState.loadReadySubtitles
+import com.xuanji.repeater.SubtitleState.loadAsrSubtitles
+import com.xuanji.repeater.SubtitleState.loadArchivedSubtitles
+import com.xuanji.repeater.SubtitleState.restoreSubtitles
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -260,106 +274,12 @@ internal var videoPlaying by mutableStateOf(false)
 // 普通 var（不驱动 UI），仅作为持久化的桥梁：AppRoot 的 page 是组合局部，文件级 save/load 通过它读写。
 private var sessionPage: Page = Page.PLAYER
 internal var currentPos by mutableStateOf(0L)
-internal var sentences by mutableStateOf<List<Sentence>>(emptyList())
-// 当前字幕的来源名（同名字幕文件名 / 手动选的那份的原名 / "生成字幕"）。
-// 【1008】原为 private：视频页「选字幕」选完要立刻把它换成新来源名，故放开成 internal（只读用它，别在别处乱写）。
-internal var srtName by mutableStateOf("")
-
-/**
- * 🔴🔴【1010 阿亮定】这份字幕是不是**我们自己 ASR 生成**的。
- *
- * 判据：阿亮原话「**ASR 都不管，只要是我们生成的就都不管**」——
- *   我们 ASR 出来的字幕是**中英混杂**的（语气词/助词是中文，正文是英文），
- *   它**不是双语字幕**，只是碰巧两样都有 ⇒ **任何"按语言分行"的处理都不许碰它**：
- *     · 字幕档位（只看英文/只看中文）不裁它 —— 裁了会把英文正文连中文一起丢掉；
- *     · 行序归一（英文提上）不调它 —— 那行"含汉字"会被误判成中文行、整行挪到下面。
- *   ⇒ 只对**抓来的现成字幕**（手动选的 / 同名 .srt / 内封轨 / B站 CC）生效那两道处理。
- *
- * ⚠️ 为什么用一个显式布尔、不去认 `srtName == "生成字幕"` 这个字符串：
- *   字符串判据改个文案就静默失效，而且 `srtName` 别处也会被改写（选字幕/切轨）。
- *   这个标志只在【三处 ASR 出字幕的地方】置 true、【其余所有换字幕的地方】置 false。
- *   （唯一的例外：冷启从 SP 恢复时按 [ASR_SUBTITLE_NAME] 还原一次，见 `loadVideoPrefs`。）
- */
-internal var subtitlesFromAsr by mutableStateOf(false)
-
-/** ASR 自动生成的字幕在 [srtName] 里的固定名字（「写」和「冷启还原」两处共用，别各写一份字面量）。 */
-internal const val ASR_SUBTITLE_NAME = "生成字幕"
-
-// ==================== 🔴🔴 字幕装载的唯一入口（1010 收口，别绕过去直接赋值）====================
-//
-// 【为什么非收不可 —— 这是 P2 立项的真实理由，不是"代码不好看"】
-//
-// `sentences` + `srtName` + `subtitlesFromAsr` 这三个字段**永远是一起变的** ——
-// 它们共同描述同一件事：「当前装的是哪一份字幕、它是从哪来的」。
-// 可它们原来散在 **12 处**各自赋值，而且分两种毛病：
-//   · **有几处压根不设 `subtitlesFromAsr`**（手动选/同名字幕、内封轨）—— 靠"前面刚清空过一次"兜着。
-//     这叫**隐式依赖**：哪天有人把清空挪走、或在清空与装载之间插一个新来源，标志就会带着旧值，
-//     界面立刻把 ASR 的混杂字幕按双语档去裁 —— **画面看着正常，但中英文各少一半，静默出错**。
-//   · 置 true 的只有 3 处 ASR 出字幕的地方，全靠人记着。
-//
-// 【收口方式：不给调用方传布尔值】
-// 按"来源"分成**具名入口**。传布尔就一定有人传错；不给布尔，这种错就不可能发生。
-// ⚠️ 新增任何"换字幕"入口，都必须走下面 5 个函数之一，**别再直接给那三个字段赋值**。
-
-/** 清空字幕（换视频时）：来源作废，4 个字段一起归零。 */
-internal fun clearSubtitles() {
-    sentences = emptyList()
-    srtName = ""
-    subtitlesFromAsr = false
-    asrMsg = ""
-}
-
-/**
- * 装载**抓来的现成字幕**：手动选的 / 同名 .srt / 内封轨 / B站 CC。
- * ⇒ 要跟字幕档位、要按双语行序把英文提上（即 `subtitlesFromAsr = false`）。
- */
-internal fun loadReadySubtitles(list: List<Sentence>, name: String) {
-    sentences = list
-    srtName = name
-    subtitlesFromAsr = false
-    asrMsg = ""
-}
-
-/**
- * 装载**我们自己 ASR 生成的字幕** ⇒ 档位与行序**两道都不碰**
- * （阿亮：我们生成的一律不管，理由见 [subtitlesFromAsr]）。
- * ⚠️ 名字固定写 [ASR_SUBTITLE_NAME]、**不让调用方传** —— 传了就会出现"名字说生成、标志说抓来"的自相矛盾。
- */
-internal fun loadAsrSubtitles(list: List<Sentence>) {
-    sentences = list
-    srtName = ASR_SUBTITLE_NAME
-    subtitlesFromAsr = true
-    asrMsg = ""
-}
-
-/**
- * 装载**字幕库里归档的字幕**（降级回退路径）。
- *
- * ⚠️ `srtName` 固定写 [ASR_SUBTITLE_NAME]（这份确实出自那次生成），
- *   但**是不是 ASR 的以库里的标记为准**：老数据没有这个字段 ⇒ false ⇒ 当"抓来的"处理（更安全）。
- *   ⇒ 这里**故意允许出现"名字是生成字幕、标志是 false"**的组合，那是历史数据的真实情况、不是 bug。
- */
-internal fun loadArchivedSubtitles(list: List<Sentence>, fromAsr: Boolean, msg: String = "") {
-    sentences = list
-    srtName = ASR_SUBTITLE_NAME
-    subtitlesFromAsr = fromAsr
-    asrMsg = msg
-}
-
-/**
- * 冷启恢复字幕（[loadVideoPrefs] 用）：来源按 `srtName` 回推。
- *
- * ⚠️ 这**不违反**"别拿 srtName 当判据"（见 [subtitlesFromAsr] 的说明）——
- *   因为这里是**读回自己写下的固定值**（`saveVideoPrefs` 存的就是 srtName），不是"看文案猜来源"。
- * 🔴 顺序要紧：**先定来源、再解句子** —— [decodeSentences] 的 `reorderBilingual` 要靠这个标志。
- */
-internal fun restoreSubtitles(sentencesRaw: String, name: String) {
-    val fromAsr = name == ASR_SUBTITLE_NAME
-    srtName = name
-    subtitlesFromAsr = fromAsr
-    asrMsg = ""
-    sentences = decodeSentences(sentencesRaw, reorderBilingual = !fromAsr)
-}
+// 【P2-b 第一批 · 1010】字幕域状态 + 「字幕装载唯一入口」已搬走 ⇒ 见 `SubtitleState.kt`：
+//   `sentences` / `srtName` / `subtitlesFromAsr` / `asrMsg` / `ASR_SUBTITLE_NAME`
+//   + `clearSubtitles` / `loadReadySubtitles` / `loadAsrSubtitles` / `loadArchivedSubtitles` / `restoreSubtitles`。
+// 本文件已逐个 import 上述成员（见文件头；Kotlin 不许 object 星号导入）⇒ 调用点、赋值写法**一字未改**。
+// 为什么搬：这几个字段被 15 个**非 UI 文件**（含纯算法 / 后台 Service / 备份模块）引用，
+// 它们原来都得反过来依赖 MainActivity ⇒ 依赖方向是反的。搬出来之后大家都依赖 SubtitleState。
 
 // ===== 换视频来源：跟「当前放的是哪条视频」绑定的状态，统一在这里重置 =====
 // 【为什么要收口】原来「媒体库选视频」[openVideoFromLibrary] 和「本地文件视频」[openVideoFileByPath]
@@ -401,7 +321,6 @@ internal fun switchToVideo(uri: Uri?, path: String, siblings: List<VideoItem>) {
 }
 internal var loopSentence by mutableStateOf(false)
 internal var recognizing by mutableStateOf(false)
-internal var asrMsg by mutableStateOf("")
 internal var asrProgress by mutableStateOf(0)
 // 【1003 加】当前正在做**哪一步**（抽音轨 / 上传识别 / 合并…）。
 // 为什么需要：asrProgress 只在抽音轨时上报，transcribe（上传 + 云端识别，几分钟）

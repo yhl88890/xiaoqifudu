@@ -1,5 +1,6 @@
 package com.xuanji.repeater
 
+import com.xuanji.repeater.SubtitleState.asrMsg
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
