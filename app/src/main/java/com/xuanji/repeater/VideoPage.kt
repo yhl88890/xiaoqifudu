@@ -573,10 +573,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         expandedVideoIndex = -1
         videoSentenceIndexGlobal = 0
         currentPos = parsed.first().startMs
-        sentences = parsed
-        srtName = src
-        subtitlesFromAsr = false   // 【1010】手动选的现成字幕 ⇒ 要跟档位/行序（不是我们生成的）
-        asrMsg = ""
+        // 【1010】手动选的现成字幕 ⇒ 要跟档位/行序（不是我们生成的）
+        loadReadySubtitles(parsed, src)
         videoSeek(parsed.first().startMs)
         SubtitleLibrary.saveVideo(ctx, videoName, parsed, path)
         saveVideoPrefs(ctx)
@@ -624,10 +622,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             expandedVideoIndex = -1
             videoSentenceIndexGlobal = 0
             currentPos = r.second.first().startMs
-            sentences = r.second
-            srtName = r.first
-            subtitlesFromAsr = false   // 【1010】内封轨 = 片方压进去的现成字幕（跟 B站CC 同性质）⇒ 要跟档
-            asrMsg = ""
+            // 【1010】内封轨 = 片方压进去的现成字幕（跟 B站CC 同性质）⇒ 要跟档
+            loadReadySubtitles(r.second, r.first)
             videoSeek(r.second.first().startMs)
             SubtitleLibrary.saveVideo(context, videoName, r.second, path)
             saveVideoPrefs(context)

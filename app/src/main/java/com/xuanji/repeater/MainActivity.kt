@@ -284,6 +284,82 @@ internal var subtitlesFromAsr by mutableStateOf(false)
 
 /** ASR 自动生成的字幕在 [srtName] 里的固定名字（「写」和「冷启还原」两处共用，别各写一份字面量）。 */
 internal const val ASR_SUBTITLE_NAME = "生成字幕"
+
+// ==================== 🔴🔴 字幕装载的唯一入口（1010 收口，别绕过去直接赋值）====================
+//
+// 【为什么非收不可 —— 这是 P2 立项的真实理由，不是"代码不好看"】
+//
+// `sentences` + `srtName` + `subtitlesFromAsr` 这三个字段**永远是一起变的** ——
+// 它们共同描述同一件事：「当前装的是哪一份字幕、它是从哪来的」。
+// 可它们原来散在 **12 处**各自赋值，而且分两种毛病：
+//   · **有几处压根不设 `subtitlesFromAsr`**（手动选/同名字幕、内封轨）—— 靠"前面刚清空过一次"兜着。
+//     这叫**隐式依赖**：哪天有人把清空挪走、或在清空与装载之间插一个新来源，标志就会带着旧值，
+//     界面立刻把 ASR 的混杂字幕按双语档去裁 —— **画面看着正常，但中英文各少一半，静默出错**。
+//   · 置 true 的只有 3 处 ASR 出字幕的地方，全靠人记着。
+//
+// 【收口方式：不给调用方传布尔值】
+// 按"来源"分成**具名入口**。传布尔就一定有人传错；不给布尔，这种错就不可能发生。
+// ⚠️ 新增任何"换字幕"入口，都必须走下面 5 个函数之一，**别再直接给那三个字段赋值**。
+
+/** 清空字幕（换视频时）：来源作废，4 个字段一起归零。 */
+internal fun clearSubtitles() {
+    sentences = emptyList()
+    srtName = ""
+    subtitlesFromAsr = false
+    asrMsg = ""
+}
+
+/**
+ * 装载**抓来的现成字幕**：手动选的 / 同名 .srt / 内封轨 / B站 CC。
+ * ⇒ 要跟字幕档位、要按双语行序把英文提上（即 `subtitlesFromAsr = false`）。
+ */
+internal fun loadReadySubtitles(list: List<Sentence>, name: String) {
+    sentences = list
+    srtName = name
+    subtitlesFromAsr = false
+    asrMsg = ""
+}
+
+/**
+ * 装载**我们自己 ASR 生成的字幕** ⇒ 档位与行序**两道都不碰**
+ * （阿亮：我们生成的一律不管，理由见 [subtitlesFromAsr]）。
+ * ⚠️ 名字固定写 [ASR_SUBTITLE_NAME]、**不让调用方传** —— 传了就会出现"名字说生成、标志说抓来"的自相矛盾。
+ */
+internal fun loadAsrSubtitles(list: List<Sentence>) {
+    sentences = list
+    srtName = ASR_SUBTITLE_NAME
+    subtitlesFromAsr = true
+    asrMsg = ""
+}
+
+/**
+ * 装载**字幕库里归档的字幕**（降级回退路径）。
+ *
+ * ⚠️ `srtName` 固定写 [ASR_SUBTITLE_NAME]（这份确实出自那次生成），
+ *   但**是不是 ASR 的以库里的标记为准**：老数据没有这个字段 ⇒ false ⇒ 当"抓来的"处理（更安全）。
+ *   ⇒ 这里**故意允许出现"名字是生成字幕、标志是 false"**的组合，那是历史数据的真实情况、不是 bug。
+ */
+internal fun loadArchivedSubtitles(list: List<Sentence>, fromAsr: Boolean, msg: String = "") {
+    sentences = list
+    srtName = ASR_SUBTITLE_NAME
+    subtitlesFromAsr = fromAsr
+    asrMsg = msg
+}
+
+/**
+ * 冷启恢复字幕（[loadVideoPrefs] 用）：来源按 `srtName` 回推。
+ *
+ * ⚠️ 这**不违反**"别拿 srtName 当判据"（见 [subtitlesFromAsr] 的说明）——
+ *   因为这里是**读回自己写下的固定值**（`saveVideoPrefs` 存的就是 srtName），不是"看文案猜来源"。
+ * 🔴 顺序要紧：**先定来源、再解句子** —— [decodeSentences] 的 `reorderBilingual` 要靠这个标志。
+ */
+internal fun restoreSubtitles(sentencesRaw: String, name: String) {
+    val fromAsr = name == ASR_SUBTITLE_NAME
+    srtName = name
+    subtitlesFromAsr = fromAsr
+    asrMsg = ""
+    sentences = decodeSentences(sentencesRaw, reorderBilingual = !fromAsr)
+}
 internal var loopSentence by mutableStateOf(false)
 internal var recognizing by mutableStateOf(false)
 internal var asrMsg by mutableStateOf("")
@@ -550,16 +626,10 @@ internal fun loadVideoPrefs(context: Context) {
     videoPath = path
     videoName = sp.getString("name", "") ?: ""
     currentPos = sp.getLong("pos", 0L)
-    srtName = sp.getString("srt", "") ?: ""
     // 【1010】冷启恢复时也要把"是不是 ASR 生成的"这件事**一起恢复** —— 否则重启一次就丢标志，
-    //   同一份混杂字幕前一秒不裁、重启后又被裁了。这里只认 srtName 这一处（唯一存了来源的地方），
-    //   因为是**读回自己写下的固定值**，不是"拿文案当判据"：下面 saveVideoPrefs 存的就是 srtName。
-    subtitlesFromAsr = srtName == ASR_SUBTITLE_NAME
-    sentences = decodeSentences(
-        sp.getString("sentences", "") ?: "",
-        // 【1010】ASR 生成的那份**不重排**（中英混杂不等于双语对照），其余照旧英文提上
-        reorderBilingual = !subtitlesFromAsr,
-    )
+    //   同一份混杂字幕前一秒不裁、重启后又被裁了。来源按 srtName 回推（唯一存了来源的地方）：
+    //   那是**读回自己写下的固定值**，不是"拿文案当判据"，理由见 restoreSubtitles 的注释。
+    restoreSubtitles(sp.getString("sentences", "") ?: "", sp.getString("srt", "") ?: "")
     // 【0915 修】冷启恢复同级视频列表：上一曲/下一曲靠 videoFolderVideos 定位当前视频的序号
     // （curFolderIdx = indexOfFirst { it.path == videoPath }），不恢复这个列表 → idx = -1 →
     // hasPrev/hasNext 全 false → 两个按钮全灰，"只能重新进视频选集再选一遍"才活。
@@ -614,10 +684,8 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
     videoResumePos = 0L
     videoBgResumePos = 0L
     videoBgWasPlaying = false
-    sentences = emptyList()
-    srtName = ""
-    asrMsg = ""
-    subtitlesFromAsr = false   // 【1010】换视频 ⇒ 来源作废，先按"非 ASR"（抓到现成字幕就一直是 false）
+    // 【1010】换视频 ⇒ 字幕来源作废，4 个字段一起归零（唯一入口）
+    clearSubtitles()
     videoFolderVideos = siblings
     // 打开/切换视频默认自动播放（暂停状态由返回时的续播逻辑尊重，不会在这里被误触发）
     videoPlaying = true
@@ -632,12 +700,15 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
     if (subFile != null) runCatching {
         val parsed = SubtitleParser.parseFile(subFile)
         if (parsed.isNotEmpty()) {
-            sentences = parsed
-            srtName = if (manualSub != null) {
-                ManualSubtitle.displayName(context, item.path).ifBlank { subFile.name }
-            } else {
-                subFile.name
-            }
+            // 手动选的 / 同名 .srt ⇒ 抓来的现成字幕（跟档位、行序英文提上）
+            loadReadySubtitles(
+                parsed,
+                if (manualSub != null) {
+                    ManualSubtitle.displayName(context, item.path).ifBlank { subFile.name }
+                } else {
+                    subFile.name
+                },
+            )
             // 同目录 / 手动选的字幕也算「播过的字幕」→ 归档字幕库（视频来源）
             SubtitleLibrary.saveVideo(context, videoName, parsed, item.path)
         }
@@ -659,9 +730,8 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
             // 所以这次重置是安全的、也是必需的（否则下标/钉子带着上一个视频的残留）。
             clearVideoSentenceRepeat()
             videoSentenceIndexGlobal = 0
-            sentences = list
-            srtName = name
-            asrMsg = ""
+            // 内封轨 = 片方压进去的现成字幕（跟 B站CC 同性质）⇒ 抓来的，要跟档位
+            loadReadySubtitles(list, name)
             SubtitleLibrary.saveVideo(context, videoName, list, vp)
             saveVideoPrefs(context)
         }
@@ -672,15 +742,16 @@ internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: L
         SubtitleLibrary.loadBySource(context, SubtitleLibrary.SOURCE_VIDEO)
             .firstOrNull { it.title == videoName && it.sentences.isNotEmpty() }
             ?.let {
-                sentences = it.sentences
-                srtName = ASR_SUBTITLE_NAME
-                // 【1010】据库里存的标记判定（这条回退路径取的是"该视频最后归档的字幕"，
-                //   它**本身可能就不是 ASR 的**）。老数据没这字段 ⇒ false ⇒ 当抓来的处理，安全。
-                subtitlesFromAsr = it.fromAsr
-                // 🔴【0929】这份字幕是残缺的（上次识别中途断了/有段被跳过）⇒ 打开时就明说，
-                //   否则界面只显示"生成字幕"，用户会一直以为字幕是全的，用到一半才发现少了。
-                //   提示带动作：重新点「生成字幕」会整段重跑并覆盖，就能补全。
-                if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
+                loadArchivedSubtitles(
+                    it.sentences,
+                    // 【1010】据库里存的标记判定（这条回退路径取的是"该视频最后归档的字幕"，
+                    //   它**本身可能就不是 ASR 的**）。老数据没这字段 ⇒ false ⇒ 当抓来的处理，安全。
+                    it.fromAsr,
+                    // 🔴【0929】这份字幕是残缺的（上次识别中途断了/有段被跳过）⇒ 打开时就明说，
+                    //   否则界面只显示"生成字幕"，用户会一直以为字幕是全的，用到一半才发现少了。
+                    //   提示带动作：重新点「生成字幕」会整段重跑并覆盖，就能补全。
+                    if (it.incomplete) "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别" else "",
+                )
             }
     }
     saveVideoPrefs(context)
@@ -698,10 +769,7 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
     videoHandedToBg = false
     videoResumePos = 0
     videoSentenceIndexGlobal = 0
-    sentences = emptyList()
-    srtName = ""
-    asrMsg = ""
-    subtitlesFromAsr = false   // 【1010】换视频 ⇒ 来源作废（同上）
+    clearSubtitles()   // 【1010】换视频 ⇒ 字幕来源作废（同上，唯一入口）
     videoFolderVideos = siblings
     videoPlaying = true
     PlaybackSession.onVideoStarted()   // Phase3-步骤1：本地文件视频（B站导入）同样记账
@@ -711,12 +779,14 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
     if (subFile != null) runCatching {
         val parsed = SubtitleParser.parseFile(subFile)
         if (parsed.isNotEmpty()) {
-            sentences = parsed
-            srtName = if (manualSub != null) {
-                ManualSubtitle.displayName(context, file.path).ifBlank { subFile.name }
-            } else {
-                subFile.name
-            }
+            loadReadySubtitles(
+                parsed,
+                if (manualSub != null) {
+                    ManualSubtitle.displayName(context, file.path).ifBlank { subFile.name }
+                } else {
+                    subFile.name
+                },
+            )
             SubtitleLibrary.saveVideo(context, videoName, parsed, file.path)
         }
     }
@@ -731,9 +801,7 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
             if (list.isEmpty()) return@autoLoad
             clearVideoSentenceRepeat()
             videoSentenceIndexGlobal = 0
-            sentences = list
-            srtName = name
-            asrMsg = ""
+            loadReadySubtitles(list, name)   // 内封轨 = 抓来的现成字幕
             SubtitleLibrary.saveVideo(context, videoName, list, vp)
             saveVideoPrefs(context)
         }
@@ -743,11 +811,12 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
         SubtitleLibrary.loadBySource(context, SubtitleLibrary.SOURCE_VIDEO)
             .firstOrNull { it.title == videoName && it.sentences.isNotEmpty() }
             ?.let {
-                sentences = it.sentences
-                srtName = ASR_SUBTITLE_NAME
-                subtitlesFromAsr = it.fromAsr   // 【1010】同上：据库里的标记判定
-                // 残缺标记同样要提示（与 openVideoFromLibrary 一致）
-                if (it.incomplete) asrMsg = "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别"
+                loadArchivedSubtitles(
+                    it.sentences,
+                    it.fromAsr,   // 【1010】同上：据库里的标记判定
+                    // 残缺标记同样要提示（与 openVideoFromLibrary 一致）
+                    if (it.incomplete) "⚠️ 字幕缺失：上次识别未跑完，点「生成字幕」可重新识别" else "",
+                )
             }
     }
     saveVideoPrefs(context)
@@ -846,9 +915,8 @@ private fun videoGenerateLyrics(context: Context) {
             recognizing = false
             asrStage = null   // 【1003】真识别结束，清掉阶段名
             if (finalSentences.isNotEmpty()) {
-                sentences = finalSentences
-                srtName = ASR_SUBTITLE_NAME
-                subtitlesFromAsr = true   // 【1010】当场 ASR 生成 ⇒ 两道处理都跳过（阿亮：我们生成的一律不管）
+                // 【1010】当场 ASR 生成 ⇒ 档位与行序两道处理都跳过（阿亮：我们生成的一律不管）
+                loadAsrSubtitles(finalSentences)
                 // 识别生成的视频字幕 → 归档字幕库（视频来源）
                 // 🔴 残缺标记随字幕一起存：下次打开视频靠它提示「字幕缺失」（见 openVideoFromLibrary 的回填）
                 SubtitleLibrary.saveVideo(
