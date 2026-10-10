@@ -394,6 +394,11 @@ internal fun videoJumpSentence(step: Int) {
     }
 }
 
+/** 🔴【1011 阿亮】画面底部那条控制条（进度条 + 5 键）的**统一底板色**。
+ *  以前进度条画 0.45、按钮行画 0.5 ⇒ 两块有色差、看着像两条。现在**只在外层 Column 画一次**，
+ *  两个子项都不再各画各的 ⇒ 一整条。取值比原来两块（0.45 / 0.5）**略浅一点**。 */
+internal val CTRL_BAND_COLOR = Color.Black.copy(alpha = 0.4f)
+
 /** 视频模式页：本地视频播放（框架 VideoView，0903 回退修复黑屏）。字幕导入 / ASR 自动断句已接入。
  *  控制条与音频模式统一：上一曲 / 上一句(长按快退) / 播放 / 下一句(长按快进) / 下一曲。
  *  全屏模式（需求6）：视频填满页面，仅在全屏时把字幕叠在画面上，并提供字幕开关。 */
@@ -1359,12 +1364,15 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     // 全屏底部：点屏才出（不再常驻），进度条紧贴 5 键控制条上方、合并成一块
                     if (controlsVisible) {
                         Column(
-                            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                            // 🔴【1011 阿亮】同上：全屏这条也合成**一整条底板**（背景只画一次），颜色统一、略浅；
+                            //   padding 放 background 之后 ⇒ 底板上边缘同样往上延伸 4dp（白球不贴边）。
+                            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                                .background(CTRL_BAND_COLOR)
+                                .padding(top = 4.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             Box(
                                 modifier = Modifier.fillMaxWidth()
-                                    .background(Color.Black.copy(alpha = 0.45f))
                                     .padding(horizontal = 14.dp, vertical = 0.dp),
                             ) {
                                 VideoProgressSlider(
@@ -1379,7 +1387,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             }
                             VideoTransportRow(
                                 modifier = Modifier.fillMaxWidth()
-                                    .background(Color.Black.copy(alpha = 0.5f)).padding(vertical = 2.dp),
+                                    .padding(vertical = 2.dp),
                                 onPrevTrack = { prevVideo() },
                                 onPrevSentence = { videoJumpSentence(-1) },
                                 onPrevSentenceHoldChange = { held -> if (held) startRewind() else stopFast() },
@@ -1398,12 +1406,18 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 // 非全屏：点画面浮出的控制条；进度条与控制条合并成一块、整体更靠底，点击屏幕即出且可拖动
                 if (!readingMode && !videoFullscreen && (controlsVisible || fastScrubbing) && videoUri != null) {
                     Column(
-                        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                        // 🔴【1011 阿亮】进度条和按钮**合成一条底板**：原来两块各自画背景（0.45 / 0.5）⇒ 有色差、看着是两条。
+                        //   现在背景只在这层 Column 上画一次，里面两个子项都不再画 ⇒ 一整条、颜色统一。
+                        //   整体比原来**略浅一点**（0.45/0.5 → 0.4）。
+                        // 🔴 padding 放在 background **之后** ⇒ 底板会把这段空白一起盖进去 = **底板上边缘往上延伸 4dp**，
+                        //   进度条白球不再贴着底板上边（原来只剩 2dp，现在 6dp）。进度条和按钮位置都不动。
+                        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                            .background(CTRL_BAND_COLOR)
+                            .padding(top = 4.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         Box(
                             modifier = Modifier.fillMaxWidth()
-                                .background(Color.Black.copy(alpha = 0.45f))
                                 .padding(horizontal = 14.dp, vertical = 0.dp),
                         ) {
                             VideoProgressSlider(
@@ -1423,7 +1437,6 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 //   图标中心本来在离底 19dp ⇒ 用 offset 把图标**整体往上挪 4dp**就正居中。
                                 //   offset 只是"把图标挪个位置"，黑条高度、进度条位置一律不动。
                                 modifier = Modifier.fillMaxWidth()
-                                    .background(Color.Black.copy(alpha = 0.5f))
                                     .padding(vertical = 2.dp)
                                     .offset(y = (-4).dp),
                                 onPrevTrack = { prevVideo() },
