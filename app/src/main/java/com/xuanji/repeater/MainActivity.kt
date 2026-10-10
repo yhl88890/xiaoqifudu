@@ -882,11 +882,8 @@ private fun videoGenerateLyrics(context: Context) {
     val key = AsrPrefs.loadKey(context)
     if (key.isBlank()) { asrMsg = "未配置识别 Key：去设置页填写 ASR Key 后才能自动识别"; return }
     val provider = AsrProvider.fromName(AsrPrefs.loadProvider(context))
-    recognizing = true
-    asrProgress = 0
-    asrMsg = ""
-    // 【1003】新一次识别开始 ⇒ 清掉上一轮残留的阶段名，否则 UI 会一直显示"上传识别中"
-    asrStage = null
+    // 【P2 收口】任务开始的状态归位走唯一入口（含 recognizing/asrProgress/asrMsg/asrStage 四个）
+    beginAsrRun()
     // 重新生成：先清空旧字幕，逐段识别时再边生成边显示
     // 🔴 【1003 P1】原来只清了 sentences、**没重置 videoSentenceIndexGlobal**
     // ⇒ 暂停在第 150 句时点重新生成，索引还是 150 而列表已空/很短，
@@ -922,8 +919,8 @@ private fun videoGenerateLyrics(context: Context) {
                 else
                     splitLongSentences(snapped, res.sentences, emptyList<LrcLine>())
             } else emptyList()
-            recognizing = false
-            asrStage = null   // 【1003】真识别结束，清掉阶段名
+            // 【P2 收口】正常出口 → 唯一归位入口（别手写 recognizing = false，见 endAsrRun 注释）
+            endAsrRun()
             if (finalSentences.isNotEmpty()) {
                 // 【1010】当场 ASR 生成 ⇒ 档位与行序两道处理都跳过（阿亮：我们生成的一律不管）
                 loadAsrSubtitles(finalSentences)
@@ -948,8 +945,8 @@ private fun videoGenerateLyrics(context: Context) {
                 asrMsg = res.note.ifBlank { "识别返回为空" }
             }
         } catch (t: Throwable) {
-            recognizing = false
-            asrStage = null   // 【1003】真识别结束，清掉阶段名
+            // 【P2 收口】异常出口 → 同一个归位入口（这一步漏了就会永久卡转圈）
+            endAsrRun()
             asrMsg = "识别出错：${t.message ?: t.javaClass.simpleName}"
         }
     }
@@ -967,6 +964,33 @@ private fun postAsrProgress(p: Int) {
 /** 设置当前阶段文案（抽音轨有百分比，所以进度一旦 <100 就清掉阶段名，让百分比露出来） */
 private fun postAsrStage(s: String?) {
     android.os.Handler(android.os.Looper.getMainLooper()).post { asrStage = s }
+}
+
+// ===== 视频「生成字幕」任务的开始 / 结束 —— 状态归位唯一入口 =====
+// 【为什么要收口】`recognizing` 是「这个任务正在跑」的唯一标志，UI 直接靠它：
+//   · `MainActivity` 顶栏：`enabled = !genActive` ⇒ **卡在 true 就再也点不出「生成字幕」**
+//   · `VideoPage` 转圈行 / 遮挡层同理
+//   而一次识别原来在**每个出口各写一遍**归位代码（正常出口 + `catch (Throwable)`），
+//   两处逐行一样。将来再加出口（比如「取消识别」）只要漏一处，用户就**永久卡在转圈**、
+//   按钮点不动 —— 而且这种 bug 单测抓不到、真机上还容易被当成"偶发"。
+//   ⇒ 收成 begin / end 两个动作，出口只调函数、不再散着赋那两三个字段。
+//
+// 🔴 新增任何「结束识别」的路径（取消 / 超时 / 提前返回）都必须调 [endAsrRun]，别再手写 `recognizing = false`。
+//
+// ⚠️ **故意不收 `asrMsg`**：它各出口文案不同（"识别完成，共 N 句" / 残缺提示 / "识别出错：…"），
+//   属于"随便一句话"，不是"永远一起变的一组"；只有 begin 时的清空是固定动作，所以留在 [beginAsrRun] 里。
+internal fun beginAsrRun() {
+    recognizing = true
+    asrProgress = 0
+    asrMsg = ""       // 新一轮开始 ⇒ 上一轮的结果/报错文案作废
+    // 【1003】新一次识别开始 ⇒ 清掉上一轮残留的阶段名，否则 UI 会一直显示"上传识别中"
+    asrStage = null
+}
+
+/** 识别任务收尾（正常结束 / 异常 / 将来可能的取消都走这里）。 */
+internal fun endAsrRun() {
+    recognizing = false
+    asrStage = null   // 【1003】真识别结束，清掉阶段名
 }
 
 /** 整段识别（短视频路径）。抽出上限跟着服务商走（见 [segmentMsFor]） */
