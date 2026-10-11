@@ -391,8 +391,16 @@ private var videoBgHandoffTime = 0L   // onPause 交接时刻（毫秒），用�
 private val bgPosHandler = android.os.Handler(android.os.Looper.getMainLooper())
 private var bgPosRunnable: Runnable? = null
 
-// 全屏内字幕开关（需求6）
+// 自绘字幕开关 —— 🔴【v146 阿亮定】只管**我们自绘那套**（自己解析句子后叠在画面上的 Text）。
+//   UI = 全屏右上角那个字幕图标按钮，点一下开、点一下关。
+//   ⚠️ 与 `videoNativeSubOn` **各管各的、不互斥**：两个都开就让它俩叠着（用户自己看得见、再点一下关掉）。
 internal var videoSubOn by mutableStateOf(true)
+// 🔴🔴【v146 1010/1011 阿亮】**原生字幕开关**（播放器渲染片源内封轨，不走我们自绘）。
+//   竖屏/全屏共用这一个 —— 竖屏开 ⇒ 全屏也开，竖屏关 ⇒ 全屏也关（1011 阿亮定）。
+//   收口点 = `VideoPage` 里 `player.trackSelectionParameters` 的 TEXT 轨开关 + 那个 `SubtitleView` 承载层。
+//   ⚠️ **必须挂在 `videoNativeSubOn` 上** —— 曾错接到 `videoSubOn` ⇒ 全屏那个按钮**把两套一起开关**（阿亮实测抓到）。
+//   ⚠️ 没内封轨 ⇒ 菜单项「原生字幕（无）」变灰点不了（`hasEmbedded` 判 `embeddedTracks.isNotEmpty()`）。
+internal var videoNativeSubOn by mutableStateOf(true)
 // 当前视频所在文件夹的同级视频列表（需求2：上一曲/下一曲在同级视频间切换）
 internal var videoFolderVideos by mutableStateOf<List<VideoItem>>(emptyList())
 
@@ -1110,6 +1118,10 @@ private suspend fun recognizeBySegments(
 // 【v119】内核由框架 MediaPlayer 换成 **ExoPlayer**（MKV 里的 AC3/EAC3 才认得出）。
 //   ⚠️ 变量名沿用 `videoMpRef`（全工程 50+ 处调用点），但类型已是 ExoPlayer，别再按 MediaPlayer 读。
 internal val videoMpRef = arrayOfNulls<ExoPlayer?>(1)
+// 🔴🔴【v146】原生字幕承载视图（`SubtitleView`，来自 media3-ui）。
+//   画面是裸 SurfaceView ⇒ 播放器渲染出的 cues 没地方落，必须有这一层接住（详见 VideoPage 里的说明）。
+//   放文件级跟 videoMpRef 一个理由：播放器进程常驻，承载视图也得能被"换播放器时重绑"拿到。
+internal val videoSubtitleViewRef = arrayOfNulls<androidx.media3.ui.SubtitleView?>(1)
 internal var videoMpSourceUri: Uri? = null
 
 /**

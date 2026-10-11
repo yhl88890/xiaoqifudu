@@ -35,6 +35,8 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
+// 【v146】原生字幕承载视图（media3-ui）—— 裸 SurfaceView 接不住 cues，必须有这一层
+import androidx.media3.ui.SubtitleView
 import android.os.Build
 import android.util.Log
 import java.io.File
@@ -623,6 +625,60 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
      * **先重置 UI 状态、再换数据**（反了会有一帧带着旧高亮/旧展开项 = 答案泄露）。
      * 扒不出（图片字幕 / 压缩轨 / 索引坏）就只弹一句提示，**不动**当前字幕。
      */
+    /**
+     * 🔴🔴【v147 阿亮实测】**「原生字幕轨」选择的唯一收口** —— 别在别处再写一份 override 逻辑。
+     *
+     * 为什么必须有这个函数（阿亮原话的问题）：
+     *   「我切换简英双字跟繁英双字…下边这个点播字幕它生效了、换成繁體了，
+     *     但视频窗口里头那个原生字幕它还是简体。」
+     *
+     * 根因 = **两条链路各走各的**：
+     *   · 下面列表 / 我们自绘的字幕 ← `applyEmbeddedTrack()` 走 `EmbeddedSubtitle` 从片子里扒，
+     *     扒的是**用户点名的那条轨** ⇒ 列表会变。
+     *   · 画面里的原生字幕 ← **播放器自己**渲染内封轨，选哪条由 `trackSelectionParameters` 决定；
+     *     原来的代码**永远取 `firstOrNull { TEXT }` + index 0** ⇒ 播放器压根不知道用户换了轨，
+     *     一直停在第一条（简英）⇒ 两边对不上。
+     *
+     * 用法：`applyEmbeddedTrack()` 切轨时、以及开关打开时，都调它。
+     * @param wantedIndex 用户点名的那条内封轨在 [embeddedTracks] 里的 `index`（= Media3 的 trackId）；
+     *   null / -1 / 对不上 ⇒ 退回"第一条 TEXT"（保持 v146 的老行为，绝不因为映射失败把字幕搞没）。
+     */
+    fun applyNativeTrackOverride(
+        b: androidx.media3.common.TrackSelectionParameters.Builder,
+        p: androidx.media3.exoplayer.ExoPlayer,
+        wantedIndex: Int = -1,
+    ): androidx.media3.common.TrackSelectionParameters.Builder {
+        val groups = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+        if (groups.isEmpty()) return b
+        // 命中用户指名的那条：用它的（轨道组, 组内下标）。⚠️ 取到就**立刻返回**，别再动别的轨。
+        // 🔴 匹配键 = `TrackFormat.id`（**String**，ExoPlayer 从容器里读到的轨道标识）
+        //    对 `EmbeddedSubtitle.Track.index`（**Int**，Media3 extractor 的 trackId）。
+        //    ⚠️ 两边本来就同源（都来自同一个 MatroskaExtractor 的 track id），但类型不同
+        //      ⇒ 这里**按字符串比**，同时兼容 `id` 为空时退回老行为。
+        if (wantedIndex >= 0) {
+            for (g in groups) {
+                for (i in 0 until g.length) {
+                    val f = g.getTrackFormat(i)
+                    if (f.id != null && f.id == wantedIndex.toString()) {
+                        Log.d("XJ_VID", "nativeSub 切到轨 id=$wantedIndex（${f.label ?: f.language ?: ""}）")
+                        return b.setOverrideForType(
+                            androidx.media3.common.TrackSelectionOverride(g.mediaTrackGroup, i)
+                        )
+                    }
+                }
+            }
+            Log.w("XJ_VID", "nativeSub 找不到 id=$wantedIndex 的 TEXT 轨（现有 id=${
+                groups.flatMap { g -> (0 until g.length).map { g.getTrackFormat(it).id } }
+            }），退回第一条")
+        }
+        // 退回：第一条 TEXT 轨的组内第 0 条（v146 老行为）
+        val g0 = groups.first()
+        Log.d("XJ_VID", "nativeSub 用默认第一条 TEXT 轨（共 ${groups.size} 组）")
+        return b.setOverrideForType(
+            androidx.media3.common.TrackSelectionOverride(g0.mediaTrackGroup, 0)
+        )
+    }
+
     fun applyEmbeddedTrack(trackIndex: Int) {
         val path = videoPath
         val uri = videoUri
@@ -647,6 +703,18 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             videoSeek(r.second.first().startMs)
             SubtitleLibrary.saveVideo(context, videoName, r.second, path)
             saveVideoPrefs(context)
+            // 🔴🔴【v147 阿亮实测】切内封轨必须**连画面里的原生字幕一起切** —— 否则出现
+            //   「下面列表换成繁體了、视频窗口里还是简体」两条链路口径不一致。
+            //   这里补上"通知播放器改选哪条 TEXT 轨"；映射不上（或没开原生字幕）时该函数内部
+            //   会安全退回第一条轨，不会把字幕搞没。
+            if (videoNativeSubOn) {
+                runCatching {
+                    val p = videoMpRef[0] ?: return@runCatching
+                    val b = p.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    p.trackSelectionParameters = applyNativeTrackOverride(b, p, trackIndex).build()
+                }.onFailure { Log.w("XJ_VID", "切原生字幕轨失败: ${it.message}") }
+            }
             Toast.makeText(context, "已用这份字幕：${r.first}", Toast.LENGTH_LONG).show()
         }
     }
@@ -664,6 +732,19 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     .getOrDefault(emptyList())
             }
             if (embeddedLoadedFor == path) embeddedTracks = list
+            // 🔴【v147 诊断，验完删】对照两边 id —— 我们要按 id 把用户选的轨映射到播放器轨道，
+            //   必须确认 EmbeddedSubtitle 的 index 与 ExoPlayer 的 TrackFormat.id 同源。
+            runCatching {
+                val p = videoMpRef[0] ?: return@runCatching
+                val exo = p.currentTracks.groups
+                    .filter { it.type == C.TRACK_TYPE_TEXT }
+                    .flatMap { g -> (0 until g.length).map { i ->
+                        val f = g.getTrackFormat(i)
+                        "id=${f.id} label=${f.label} lang=${f.language} mime=${f.sampleMimeType}"
+                    } }
+                Log.d("XJ_VID", "nativeSub 诊断 embeddedList=${list.map { "idx=${it.index} label=${it.label} mime=${it.mime}" }}")
+                Log.d("XJ_VID", "nativeSub 诊断 exoTextTracks=$exo")
+            }
         }
     }
 
@@ -878,6 +959,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         }
         videoMpRef[0] = mp
         videoMpSourceUri = uri
+        // 【v146】换播放器 ⇒ 承载视图必须重绑到新播放器，否则字幕层还挂在**已 release 的旧实例**上，
+        //   表现是"换片后原生字幕再也不出字"。跟下面 videoSurfaceRef 重绑同一个道理。
+        //   ⚠️ SubtitleView **没有公开的 setPlayer**（那是 PlayerView 内部用的）⇒ 走 onCues 手动喂。
         // 已有 Surface 立即绑定（SurfaceView 已就位）；否则等 surfaceCreated 再绑。
         // ⚠️ 必须放在 videoMpRef[0] = mp 之后——bindVideoSurface 靠 videoMpRef[0] 取播放器，
         // 放前面会取到 null 而静默跳过绑定 → 新建播放器永远没画面（黑屏）。
@@ -913,6 +997,26 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 if (nearEnd) 0L else resumePos
             } else 0L)
             Log.d("XJ_VID", "onPrepared target=$target resumePos=$resumePos spResumePos=$spResumePos dur=$videoDuration videoResumePos=$videoResumePos nearEnd=${(resumePos >= videoDuration - 2500 || resumePos >= (videoDuration * 98 / 100))}")
+            // 【v146】STATE_READY 之后**补一次文本轨选中** —— 这是原生字幕能出字的关键一步，
+            //   不是诊断代码，**别删**。理由见下面 LaunchedEffect 那段的长注释：
+            //   轨道要等 READY 才出现，而那个 effect 在 `prepare()` 之前就跑过一次、
+            //   那时 `currentTracks` 是空的 ⇒ override 建不起来（真机实测：单轨 mov_text
+            //   一直 `[en]` 不带星号、`onCues` 一次不来）。
+            runCatching {
+                val groups = mp.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+                if (videoNativeSubOn) {
+                    val tg0 = groups.firstOrNull()
+                    if (tg0 != null) {
+                        mp.trackSelectionParameters = mp.trackSelectionParameters
+                            .buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .setOverrideForType(
+                                androidx.media3.common.TrackSelectionOverride(tg0.mediaTrackGroup, 0)
+                            )
+                            .build()
+                    }
+                }
+            }.onFailure { Log.w("XJ_VID", "force-select TEXT track failed: ${it.message}") }
             if (target > 0) {
             // 【0910】冷启/换片续播：绝不能重播已听内容。
             // MediaPlayer 时代用 SEEK_NEXT_SYNC（只往前跳一个 GOP）来绕开"被吸到上一个关键帧"；
@@ -967,6 +1071,38 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         // 【v119】ExoPlayer 用统一的 Player.Listener 承接 就绪 / 播完 / 首帧 / 出错 四类事件
         // （原来 MediaPlayer 那一堆 setOnXxxListener 的等价物）。
         mp.addListener(object : Player.Listener {
+            // 🔴🔴【v146 原生字幕】**唯一把字幕喂给承载视图的地方**。
+            //   为什么是这条路而不是 `subtitleView.setPlayer(...)`：
+            //     `SubtitleView` **没有公开的 setPlayer**（那是 PlayerView 内部用的 @UnstableApi 东西），
+            //     它的公开入口只有 `setCues(list)`。而 media3 官方文档明说：
+            //     "对于实现自定义 UI 的视频应用…**`Listener.onCues` 回调可用于接收播放期间
+            //      需要渲染的字幕**" ⇒ 我们正是自定义 UI（裸 SurfaceView）这条路。
+            //   ⇒ 现在这条链路是完整的：
+            //     播放器选轨（setTrackTypeDisabled）→ TextRenderer 解出 cues → 这里 onCues 拿到
+            //     → SubtitleView.setCues() 画出来（**长相仍是 SubtitleView 默认那套**）。
+            //   ⚠️ 关字幕时播放器不选文本轨 ⇒ 这里收到的是空 CueGroup ⇒ setCues(空) ⇒ 字幕消失，
+            //     不需要在别处再判一次 videoSubOn（判了反而容易两边打架）。
+            //   ⚠️ 直接用全限定类型写参数：CueGroup 这个类名在本文件可能与其他概念撞名，
+            //     不给 IDE 留自动导错的机会。
+            override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+                // 🔴🔴【v147 阿亮实测】**喂进 SubtitleView 之前，清掉 cue 的 `windowColor`**。
+                //   不这么做会出「黑底白字」—— 片源 ASS 里 `chs` 样式写着 `BackColour=&H80000000`
+                //   （半透明黑）。规范上它那条 `BorderStyle=0`（描边模式）**不该**用 BackColour，
+                //   但 `SubtitleView` 在 `setApplyEmbeddedStyles(true)` 下**照样把它画成一整条黑底框**。
+                //   （PotPlayer/libass 严格按规范忽略 ⇒ 电脑上播是干净白字；阿亮一眼看出不对。）
+                //   ✅ 只 `clearWindowColor()`，**其余内嵌样式一律保留**：白字、黑描边、字号、
+                //      `\N` 双语换行、对齐全部照旧（v146 那些"必须保留"的理由依然成立）。
+                //   ⚠️ 用的就是 media3 自己的 API（`SubtitleViewUtils.removeAllEmbeddedStyling` 第一步
+                //      也是它）；**别去找 `setBackgroundColor`，没这个方法**。
+                //   ⚠️ 用 buildUpon 复制一份改，**别原地改** —— cueGroup.cues 里的对象可能被复用。
+                runCatching {
+                    val cleaned = cueGroup.cues.map { c ->
+                        c.buildUpon().clearWindowColor().build()
+                    }
+                    videoSubtitleViewRef[0]?.setCues(cleaned)
+                }
+            }
+
             override fun onPlaybackStateChanged(state: Int) {
                 when (state) {
                     // 就绪：交回上面那个一次性函数（⚠️ 必须守 readyHandled 闸门，见其定义处注释）
@@ -1030,6 +1166,41 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         })
         runCatching { mp.prepare() }
     }
+
+    // 🔴🔴【v146 1011 阿亮】「原生字幕」开关（竖屏/全屏共用 `videoNativeSubOn`）—— **唯一收口点**。
+    //   上面 LaunchedEffect(videoUri) 里那次设置只在**换片/首次建播放器**时跑一次；
+    //   开关在播放中途被点来点去时，靠这里即时生效（不用重建播放器）。
+    //   关 = 播放器禁用 TEXT 轨（画面无原生字幕）；开 = 放开 + 显式选中，播放器原生渲染。
+    //   ⚠️ 必须用 videoMpRef[0] 取**当前**播放器：换片时上面那个 effect 会先跑（新播放器已就位），
+    //      这里紧接着再确认一次，两条路径结果一致。
+    //   🔴 为什么变量从 `videoSubOn` 换成 `videoNativeSubOn`：`videoSubOn` 那个是"我们自绘字幕"
+    //      的显隐开关（老语义，横屏那套）。原生的要有一个**只管原生**的独立开关，
+    //      ⚠️ 否则那个按钮会**把两套一起开关**（v146 之前就是这毛病，阿亮实测抓到）。
+    LaunchedEffect(videoNativeSubOn, videoMpRef[0]) {
+        val p = videoMpRef[0] ?: return@LaunchedEffect
+        runCatching {
+            var b = p.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !videoNativeSubOn)
+            // 🔴🔴【v146 真机实测补的】**光"不禁用"不够 —— 还得显式选中**。
+            //   实测对照（同一台机、同一份代码）：
+            //     · 老友记 mkv（2 条 ASS 轨）→ `READY TEXT tracks=2 [zh*选中 | zh]` ← 自己选中了
+            //     · 自制 mp4（1 条 mov_text 轨）→ `READY TEXT tracks=1 [en]`      ← **没选中、onCues 一次不来**
+            //   ⇒ `setTrackTypeDisabled(TEXT,false)` 只是把 TEXT 轨**放回可选集合**，
+            //     至于选不选，"自动选择"那套规则在单轨/非默认轨道上并不保证命中。
+            //   这里在开关打开时**显式指定文本轨**（override 那套），关掉时清空 override 并交回禁用。
+            //   ⚠️ `TrackSelectionOverride` 用 `mediaItem` + `trackGroup` 构造；trackGroup 从
+            //      **当前已加载的轨道**里取第一组 TEXT（`currentTracks` 在 STATE_READY 后才有值）。
+            //   ⚠️ 取不到就**保持原样**（退回"只放开、不指定"），不能因为 override 建不起来把功能搞挂。
+            if (videoNativeSubOn) {
+                b = applyNativeTrackOverride(b, p)
+            } else {
+                b = b.clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            }
+            p.trackSelectionParameters = b.build()
+        }.onFailure { Log.w("XJ_VID", "subtitle track toggle failed: ${it.message}") }
+    }
+
 
     // 字幕列表自动滚动到当前句
     LaunchedEffect(videoSentenceIndexGlobal) {
@@ -1160,6 +1331,20 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             // 暗一档、对比度塌。SurfaceView 独立成层，走硬件叠加路径、由显示端做 tone
                             // mapping，才跟系统播放器（小米视频）一个观感。
                             SurfaceView(ctx).also { sv ->
+                                // 🔴🔴【v146 原生字幕】**必须设 mediaOverlay**，否则原生字幕被这层盖住看不见。
+                                //   根因（v146 实测：`onCues n=1 view=true` 全正常、画面却一个字没有，
+                                //   且 uiautomator dump 的画面区里**找不到 SubtitleView 节点**）：
+                                //   `SurfaceView` 是**独立图层**，默认 z 序在**所有普通 View 之上**（v122 注释
+                                //   里"独立成层、走硬件叠加路径"说的就是这件事）⇒ 我们在它之后声明的
+                                //   SubtitleView 虽然逻辑上"在上面"，实际被这个硬件层**整个盖住**，
+                                //   字幕画了但看不见。
+                                //   `setZOrderMediaOverlay(true)` = 把 SurfaceView 降到"媒体层"，
+                                //   与普通 View **同一层**、仍在本窗口之内（**不会**像 setZOrderOnTop 那样
+                                //   盖住顶栏/控制条/字幕条 —— 那个警告见下面几行，依然成立）。
+                                //   ⚠️ 这条同时解决"HDR 走 SurfaceView"与"字幕能盖上来"两个诉求：
+                                //     mediaOverlay 只是改 z 序归属，**不改变 SurfaceView 的硬件解码/叠加路径**，
+                                //     v122 治 HDR 发灰的结论不受影响（实测复核：画面观感无变化）。
+                                sv.setZOrderMediaOverlay(true)
                                 // 【圆角】SurfaceView 是独立图层，不吃父级 Compose 的圆角裁剪；系统从
                                 // Android 12(API 31) 起才支持按 outline 裁 SurfaceView。12 以下退回直角
                                 // 黑角（贴在本来就黑底的播放区上，可接受）。
@@ -1223,6 +1408,60 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         },
                         modifier = Modifier.fillMaxSize(),
                     )
+                    // 🔴🔴【v146 阿亮】**原生字幕承载层** —— 播放器把内封字幕渲染到这里。
+                    //   为什么必须有这一层：画面是**裸 SurfaceView**（自定义 UI 路线），ExoPlayer 的
+                    //   `TextRenderer` 虽然照跑、内封轨也照样被选中（v146 实测：
+                    //   `READY TEXT tracks=2 [zh*选中 | zh]`），但**没有承载视图接住 cues** ⇒ 画面不出字。
+                    //   `SubtitleView` 就是 media3 官方的承载物（PlayerView 内部也是用它。
+                    //   ⚠️ 位置必须在 SurfaceView **之后**（叠在画面之上）、在控制条/角标**之前**
+                    //     （被那些 UI 盖住，不会挡住按钮）。
+                    //   ⚠️ 层级：Compose 的 AndroidView 是按声明顺序叠的 ⇒ 这层天然在画面之上。
+                    //   ⚠️ 不吃点触：字幕层必须**不拦手势**，否则画面上的"点一下浮出控制条"和
+                    //     亮度/音量滑动全被它吞掉。
+                    AndroidView(
+                        factory = { ctx ->
+                            SubtitleView(ctx).also { sv ->
+                                // ⚠️ 绝不能吃触摸：这层铺满整个画面，一旦可点击，画面上的
+                                //   「点一下浮出控制条」和亮度/音量上下滑手势就全被它吞掉。
+                                sv.isClickable = false
+                                sv.isFocusable = false
+                                sv.isFocusableInTouchMode = false
+                                // 🔴🔴【v146 真机实测补的】光设上面三个"不可点"**不够** ——
+                                //   `SubtitleView` 继承自 `View`，其 `onTouchEvent` 在**可点击时**才返回 true，
+                                //   但 Compose 的 `AndroidView` 包装层仍会把它当成一个"有 View 的插槽"，
+                                //   实测表现 = 铺满播放区的这一层把「点一下浮出控制条」「播放/暂停」全吞了
+                                //   （真机：点画面中央播放键，media_session 一直 `PAUSED(2) position=0` 不动）。
+                                //   ⇒ 显式让父级**不拦截触摸**，手势正常穿透到下面的 SurfaceView 手势层。
+                                //   ⚠️ 用 `disallowInterceptTouchEvent` 不对（那是拦父级）；这里要的是"本层不接"：
+                                //     置 `isEnabled=false` + 关掉 clickable，等价于 `View.VISIBLE` 但透明穿透。
+                                sv.isEnabled = false
+                                // 这一层纯展示、无背景 ⇒ 必须**不消耗**任何触摸事件
+                                sv.setOnTouchListener { _, _ -> false }
+                                // 🔴🔴【v146 重要发现】**必须保留内嵌样式**（原本我一度关掉，是错的）。
+                                //   实测扒出片源字幕 = **ASS**（`ffprobe`: index=2/3 codec_name=ass,
+                                //   title=简英双字/繁英双字）。ASS 的"双语"排版**全靠内嵌样式**：
+                                //     中文正文 + `\N` 硬换行 + `{\fn…\fs14\1c&H4080FF&\b0}英文小字`
+                                //   ⇒ 关掉内嵌样式 = 丢掉换行和字号区分，"简英双字"会挤成一行同样大小。
+                                //   ⚠️ 一开始怀疑的"ASS `\pos` 绝对坐标把字画到画面外"——**本片源不成立**：
+                                //     全片事件里用的是 `\N` 换行 + 默认底部对齐（`Style` 里 Alignment=2），
+                                //     只有极个别标题行用 `\an8`。常规台词都是底部居中，坐标是合法的。
+                                sv.setApplyEmbeddedStyles(true)
+                                sv.setApplyEmbeddedFontSizes(true)
+                                // 记进文件级 ref：换播放器时 onCues 那边要往这里喂（见 Player.Listener.onCues）。
+                                // ⚠️ 这里**不调 setPlayer** —— SubtitleView 没这个公开 API，
+                                //   字幕是播放器 onCues 回调送进来的（media3 官方给自定义 UI 的正道）。
+                                videoSubtitleViewRef[0] = sv
+                                // 样式用**播放器默认**（阿亮："就是要它默认的"）⇒ 不 setStyle，
+                                // 只显式恢复默认的分数尺寸（视口高的 5.33%）与底部留白（8%），
+                                // 保证与全屏/竖屏、不同机器上一致。
+                                sv.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION)
+                                sv.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
+                                // ⚠️ 字幕默认贴在画面下方（media3 行为）——竖屏画面只有约 203dp 高，
+                                //    字幕会落在画面底沿，跟下方字幕列表是两块地方，不冲突。
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
                 // 【0903 黑屏修复】错误/空状态覆盖层：替代之前 videoUri==null 时只有一个浅白字的纯黑 Surface
                 // （容易被误判为"整个黑屏"）和 MediaPlayer 错误时静默黑屏（什么反馈都没有）。
@@ -1251,7 +1490,12 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 // 暂停在第 150 句 → 点重新生成 → 第 1 段识别完（size 只有 20）→ 进全屏
                 // ⇒ sentences[150] 直接 **IndexOutOfBoundsException 崩溃**。
                 // 用 `in sentences.indices` 一个条件把两头都判掉。
-                if (!readingMode && videoFullscreen && videoSubOn && videoSentenceIndexGlobal in sentences.indices) {
+                // 🔴🔴【v146 1011 阿亮】**这里不做互斥** —— 两个开关各管各的，同时开就让它叠。
+                //   阿亮拍板原话："全屏如果两个都开重叠了，那用户自己眼睛能看到，他就自己关掉嘛，
+                //   再点一下而已。" ⇒ 只判 `videoSubOn`（我们自绘那套自己的开关），
+                //   **不看 `videoNativeSubOn`**：原生归上面那个「原生字幕」开关管，井水不犯河水。
+                if (!readingMode && videoFullscreen && videoSubOn &&
+                    videoSentenceIndexGlobal in sentences.indices) {
                     Box(
                         // 🔴🔴【1011 阿亮】字幕条是**独立模块**，跟下面那条控制条是**两套操作逻辑**
                         //   （字幕 = 字幕开关常驻；控制条 = 点画面才浮出、过会儿自己藏回去）
@@ -1296,6 +1540,48 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 Icon(Icons.Filled.Subtitles, contentDescription = "字幕", tint = Color.White)
                             }
                             AppDropdownMenu(expanded = subMenuOpen, onDismissRequest = { subMenuOpen = false }) {
+                                // 🔴🔴【1011 阿亮】「原生字幕」**开关** —— 放菜单最上面（阿亮："就放在原来那个
+                                //   字幕集成里头…点一下开点一下关，有个小按钮"）。
+                                //   🔴 **名字叫「原生字幕」**（阿亮定：内部沟通统一用"原生字幕"这个词，
+                                //      便于对得上话）。指**播放器原生渲染**的片源自带字幕轨。
+                                //   🔴🔴 **必须做成"开关"的样子，不能做成勾选项**（阿亮 1011 实测后纠的）：
+                                //      "这个原生字幕要把它做成个开关，不然它跟其他的容易混了，
+                                //       它跟那个内嵌字幕…因为它不是选择项，是开关项，是不是？"
+                                //      下面「字幕显示」三档 / 「内封字幕（N 条）」轨列表都是**互斥选择项**
+                                //      （带 ✓ 单选）；这一项是**独立开关**（开=画面显示片源原生字幕 /
+                                //      关=不显示），跟它们不是一类东西 ⇒ 用 **Switch** 画，一眼分得开。
+                                //   ⚠️【v146 1011 阿亮 收口】**这个开关只管原生那套** —— 不再碰 videoSubOn。
+                                //     阿亮原话："全屏模式下那个字幕开关…那个就只管我们抓取的或生成的字幕的开关，
+                                //     现在是它把原生的跟我们抓取或生成的一起开关了，就这么点事儿。"
+                                //     ⇒ 两个开关各管各的：**这个管原生**（片源内封轨，竖屏全屏共用）；
+                                //       全屏控制条那个按钮管**我们自绘**那套。都开就会上下重叠 —— 阿亮拍板：
+                                //       "两个都开重叠了，那用户自己眼睛能看到，他就自己关掉嘛，再点一下而已。"
+                                //   🔴 没内封轨 ⇒ **变灰点不了**（阿亮："它如果没有原声字幕就变灰管不了"）：
+                                //     不然点了画面没反应，像坏了。
+                                val hasEmbedded = embeddedTracks.isNotEmpty()
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (hasEmbedded) "原生字幕" else "原生字幕（无）",
+                                            color = if (hasEmbedded) {
+                                                MaterialTheme.colorScheme.onSurface
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                            },
+                                        )
+                                    },
+                                    enabled = hasEmbedded,
+                                    trailingIcon = {
+                                        Switch(
+                                            checked = videoNativeSubOn && hasEmbedded,
+                                            onCheckedChange = if (hasEmbedded) {
+                                                { videoNativeSubOn = it }
+                                            } else null,
+                                            enabled = hasEmbedded,
+                                        )
+                                    },
+                                    onClick = { if (hasEmbedded) videoNativeSubOn = !videoNativeSubOn },
+                                )
                                 // 🔴【1010】字幕显示模式：双语 / 只看英文 / 只看中文（默认只看英文）。
                                 //   只对**双语字幕**起效 —— 单语字幕任何档位都原样显示，不会变空。
                                 //   放在菜单最上面（最常用），「选字幕…」按阿亮要求挪到最后。

@@ -552,14 +552,19 @@ internal object EmbeddedSubtitle {
         return out
     }
 
-    /** [normalize] 的结果；`startMs`/`endMs` 非空 = payload 自己带了时间轴（少数提取器会带） */
-    private data class Norm(val style: String, val startMs: Long?, val endMs: Long?, val text: String)
+    /** [normalize] 的结果；`startMs`/`endMs` 非空 = payload 自己带了时间轴（少数提取器会带）。
+     *  ⚠️ 跟 [normalize] 一起开成 `internal` 供单测用。 */
+    internal data class Norm(val style: String, val startMs: Long?, val endMs: Long?, val text: String)
 
     /**
      * 把一条 payload 拆成 (样式名, 自带起点, 自带终点, 文本)。认不出返回 null。
      * 顺序不能乱：先看"自带完整 Dialogue 行"，再看 SRT 形态，再看 ASS 裸 payload，最后当纯文本。
+     *
+     * ⚠️ 可见性 = `internal` 而**不是** `private`：这是纯字符串算法（不碰 Context/Uri），
+     *   故意留给 JVM 单测直接打 —— v147 那个"空文本 Dialogue 行被当字幕收下"的 bug
+     *   就是在这里发生的，没有测试就只能靠真机盲试。
      */
-    private fun normalize(raw: String, isAss: Boolean): Norm? {
+    internal fun normalize(raw: String, isAss: Boolean): Norm? {
         var p = raw.trim()
         if (p.isEmpty()) return null
 
@@ -575,13 +580,22 @@ internal object EmbeddedSubtitle {
             val rest = p.substringAfter(':')
             val wide = rest.split(',', limit = 11)
             if (wide.size == 11 && isAssTimeLike(wide[0]) && isAssTimeLike(wide[1])) {
-                if (wide[10].isNotBlank()) return Norm(wide[4].trim(), null, null, wide[10])
+                // 🔴🔴【v147 阿亮实测】文本为空的 Dialogue 行**直接丢弃**，不许掉到 ④ 兜底。
+                //   症状：老友记 2160p（47BT 简英双字轨）第一条是
+                //     `Dialogue: 0,0:00:00.00,0:00:06.00,Default,NTP,0000,0000,0000,,`
+                //   —— 结构完全合法、**就是文本空**（片源拿它占位/清屏）。
+                //   原来的写法：这里 `isNotBlank()` 不满足 ⇒ 不 return ⇒ 往下把 p 改成 `rest.trim()`
+                //   ⇒ 掉到「④ 纯文本」兜底 ⇒ **整行裸数据被当字幕收进列表**（阿亮截图里那条
+                //   `0:00:00:00,0:00:06:00,0,0,Default,NTP,0000,0000,0000,,` 就是它）。
+                //   ⇒ 判定"这是 Dialogue 结构"之后，**无论文本空不空都到此为止**，别再往下兜。
+                return if (wide[10].isNotBlank()) Norm(wide[4].trim(), null, null, wide[10]) else null
             }
             val std = rest.split(',', limit = 10)
             if (std.size == 10 && isAssTimeLike(std[1]) && isAssTimeLike(std[2])) {
-                if (std[9].isNotBlank()) {
-                    return Norm(std[3].trim(), assMs(std[1]), assMs(std[2]), std[9])
-                }
+                // 同上：标准布局的 Dialogue 行，文本空也**不再往下掉**。
+                return if (std[9].isNotBlank()) {
+                    Norm(std[3].trim(), assMs(std[1]), assMs(std[2]), std[9])
+                } else null
             }
             p = rest.trim()
         }
@@ -603,8 +617,10 @@ internal object EmbeddedSubtitle {
         if (isAss || looksLikeAssRaw(p)) {
             val parts = p.split(',', limit = 9)
             if (parts.size == 9 && parts[0].trim().toIntOrNull() != null) {
-                val text = parts[8]
-                if (text.isNotBlank()) return Norm(parts[2].trim(), null, null, text)
+                // 🔴🔴【v147 阿亮实测】跟 ① 同一个坑：**判定"这是 ASS 结构"之后，文本空也到此为止**。
+                //   Media3 裸字幕模式给的就是这种"不带 `Dialogue:` 前缀"的 payload；
+                //   文本空时原来会掉到 ④ 兜底 ⇒ 整行 `0,0,chs,NTP,0000,0000,0000,,` 被当字幕收下。
+                return if (parts[8].isNotBlank()) Norm(parts[2].trim(), null, null, parts[8]) else null
             }
         }
 
