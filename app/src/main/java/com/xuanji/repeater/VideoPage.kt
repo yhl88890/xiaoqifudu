@@ -1594,12 +1594,27 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 )
                                 // 🔴【1010】下方字幕档位：英中双语 / 只看英文 / 只看中文（默认只看英文）。
                                 //   只对**双语字幕**起效 —— 单语字幕任何档位都原样显示，不会变空。
-                                //   放在菜单最上面（最常用），「选字幕…」按阿亮要求挪到最后。
+                                //   放在菜单最上面（最常用）。
                                 // 🔴【1011 阿亮改名】原叫「字幕显示」太概括 —— 用户看不出它指"画面下方那条字幕"。
                                 //   改成「下方字幕」：直接说位置（阿亮原话："指的是显示窗口下面的字幕"）。
                                 //   ⚠️ 只管**画面下方那条字幕**（`videoSubOn` 那套 / 片源轨），不碰别的。
+                                // 🔴🔴【1011 阿亮】**ASR 生成的字幕 ⇒ 整块变灰点不动**。
+                                //   理由（MEMORY 铁律）：ASR 结果是**中英混杂**，不是"英上中下"的双语对照 ⇒
+                                //   裁档会连英文整行丢掉、行序也会把"含汉字那行"挪走 ⇒ 这三档对它**没有意义**。
+                                //   阿亮裁定："能用的功能就不变灰，不能用的功能就变灰"
+                                //   ⇒ 这里**标题和三个选项一起灰、一起点不动**，别再留能点却点了没反应的假活口。
+                                val dimDownSub = subtitlesFromAsr
                                 DropdownMenuItem(
-                                    text = { Text("下方字幕") },
+                                    text = {
+                                        Text(
+                                            if (dimDownSub) "下方字幕（识别字幕不适用）" else "下方字幕",
+                                            color = if (dimDownSub) {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface
+                                            },
+                                        )
+                                    },
                                     enabled = false,
                                     onClick = {},
                                 )
@@ -1610,23 +1625,49 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 ).forEach { (m, label) ->
                                     DropdownMenuItem(
                                         text = {
-                                            Text(if (subtitleMode == m) "✓ $label" else "     $label")
+                                            Text(
+                                                if (subtitleMode == m) "✓ $label" else "     $label",
+                                                color = if (dimDownSub) {
+                                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurface
+                                                },
+                                            )
                                         },
+                                        enabled = !dimDownSub,
                                         onClick = { subMenuOpen = false; setSubtitleMode(context, m) },
                                     )
                                 }
                                 // 【v120】视频**自带**的字幕轨（内封软字幕）。有几条列几条，当前在用的打勾。
                                 // ⚠️ 多条轨不能同时叠加（会重叠打架）⇒ 这里是"切换"入口，一次只用一条。
                                 // 自动挑的那条 = 简英双语 > 中上英下 > 简体中字 > 繁中 > 纯英文（见 EmbeddedSubtitle.score）。
-                                if (embeddedTracks.isNotEmpty()) {
-                                    DropdownMenuItem(
-                                        text = { Text("内封字幕（${embeddedTracks.size} 条）") },
-                                        enabled = false,
-                                        onClick = {},
-                                    )
-                                    val activeLabel = srtName
-                                        .takeIf { it.startsWith(EmbeddedSubtitle.TAG_PREFIX) }
-                                        ?.removePrefix(EmbeddedSubtitle.TAG_PREFIX)
+                                // 🔴🔴【1011 阿亮】**没内封轨时不再"整块隐藏"，改成灰着列出来**。
+                                //   阿亮原话："要要不显示就都不显示，要灰就都一起灰，为什么又有不显示又有变灰的呢？
+                                //   …既然这功能用不了就直接就不显示。**要统一逻辑啊**" ⇒ 最后裁定：
+                                //   "那就选全都选变灰，就能用的功能就不变灰，不能用的功能就变灰。"
+                                //   ⇒ 统一口径 = **标题 + 固定两条（简英双字 / 繁英双字）永远列出来**，
+                                //     有轨 ⇒ 正常可选（标题带条数）；无轨 ⇒ 整块灰掉点不动。
+                                //   ⚠️ 为什么列固定的两条而不是"有几条列几条"：菜单项**数量固定**用户才不会觉得
+                                //     "菜单怎么少了一块"。真有多条轨时，下面仍按实际轨逐条列出。
+                                val hasEmbedded2 = embeddedTracks.isNotEmpty()
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (hasEmbedded2) "内封字幕（${embeddedTracks.size} 条）" else "内封字幕（无）",
+                                            color = if (hasEmbedded2) {
+                                                MaterialTheme.colorScheme.onSurface
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                            },
+                                        )
+                                    },
+                                    enabled = false,
+                                    onClick = {},
+                                )
+                                val activeLabel = srtName
+                                    .takeIf { it.startsWith(EmbeddedSubtitle.TAG_PREFIX) }
+                                    ?.removePrefix(EmbeddedSubtitle.TAG_PREFIX)
+                                if (hasEmbedded2) {
                                     embeddedTracks.forEach { t ->
                                         DropdownMenuItem(
                                             text = {
@@ -1638,24 +1679,30 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                             },
                                         )
                                     }
+                                } else {
+                                    // 没内封轨 ⇒ 两条**占位**灰项（阿亮："简英双字跟繁英双字也选不了了"）
+                                    listOf("简英双字", "繁英双字").forEach { label ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    "     $label",
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                                                )
+                                            },
+                                            enabled = false,
+                                            onClick = {},
+                                        )
+                                    }
                                 }
                                 DropdownMenuItem(
                                     text = { Text("导出字幕") },
                                     onClick = { subMenuOpen = false; exportSubtitleNow() },
                                 )
-                                // 🔴【1010 阿亮定】「选字幕…」挪到**菜单最后**：
-                                //   现在内封轨能自动抓到、时间轴 100% 对得上，手动选字幕已降级为最后兜底
-                                //   （只有"抓不出来"或"自己生成的不准"时才用）。
-                                DropdownMenuItem(
-                                    text = { Text("选字幕…") },
-                                    onClick = {
-                                        subMenuOpen = false
-                                        // mime 一律给 */*：各家文件管理器给 .srt/.ass 报的 mime 五花八门
-                                        // （text/plain、application/octet-stream…），按 mime 过滤会让用户
-                                        // "在选文件界面里根本看不见自己那份字幕"。选完再按内容判定。
-                                        pickSubtitleFile.launch(arrayOf("*/*"))
-                                    },
-                                )
+                                // 🔴【1011 阿亮】「选字幕…」**已删除**（他："我感觉基本上不用选。先删了吧…
+                                //   我感觉这个没用"）。原来留着是当"抓不出来/自己生成的不准"的兜底，
+                                //   但实测字幕**要么是抓的、要么是 ASR 生成的**，都在视频旁边同一个文件夹，
+                                //   自动匹配（`SubtitleParser.pickBest`）稳定兜得住 ⇒ 手动挑一份的场景不存在。
+                                //   ⚠️ 别再"顺手加回来" —— 要加先问阿亮。
                             }
                         }
                         IconButton(onClick = { videoFullscreen = true; controlsVisible = false }) {
