@@ -1607,7 +1607,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 DropdownMenuItem(
                                     text = {
                                         Text(
-                                            if (dimDownSub) "下方字幕（识别字幕不适用）" else "下方字幕",
+                                            // ⚠️ 文案**必须短**：菜单有固定宽度，「下方字幕（识别字幕不适用）」
+                                            //   实测会**折成两行**、挤掉下面一行的位置（v151 真机截图发现的）。
+                                            if (dimDownSub) "下方字幕（不适用）" else "下方字幕",
                                             color = if (dimDownSub) {
                                                 MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                                             } else {
@@ -1626,7 +1628,11 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                     DropdownMenuItem(
                                         text = {
                                             Text(
-                                                if (subtitleMode == m) "✓ $label" else "     $label",
+                                                // 🔴 灰掉时**不打勾**：灰 = 这档用不了，再打一个"✓ 当前选中"
+                                                //   会让用户以为"哎它明明选着怎么又是灰的"（v151 真机截图发现的）。
+                                                if (dimDownSub) "     $label"
+                                                else if (subtitleMode == m) "✓ $label"
+                                                else "     $label",
                                                 color = if (dimDownSub) {
                                                     MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                                                 } else {
@@ -1641,14 +1647,16 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 // 【v120】视频**自带**的字幕轨（内封软字幕）。有几条列几条，当前在用的打勾。
                                 // ⚠️ 多条轨不能同时叠加（会重叠打架）⇒ 这里是"切换"入口，一次只用一条。
                                 // 自动挑的那条 = 简英双语 > 中上英下 > 简体中字 > 繁中 > 纯英文（见 EmbeddedSubtitle.score）。
-                                // 🔴🔴【1011 阿亮】**没内封轨时不再"整块隐藏"，改成灰着列出来**。
+                                // 🔴🔴【1011 阿亮】**没内封轨时不再"整块隐藏"，改成标题灰着列出来**。
                                 //   阿亮原话："要要不显示就都不显示，要灰就都一起灰，为什么又有不显示又有变灰的呢？
-                                //   …既然这功能用不了就直接就不显示。**要统一逻辑啊**" ⇒ 最后裁定：
-                                //   "那就选全都选变灰，就能用的功能就不变灰，不能用的功能就变灰。"
-                                //   ⇒ 统一口径 = **标题 + 固定两条（简英双字 / 繁英双字）永远列出来**，
-                                //     有轨 ⇒ 正常可选（标题带条数）；无轨 ⇒ 整块灰掉点不动。
-                                //   ⚠️ 为什么列固定的两条而不是"有几条列几条"：菜单项**数量固定**用户才不会觉得
-                                //     "菜单怎么少了一块"。真有多条轨时，下面仍按实际轨逐条列出。
+                                //   …**要统一逻辑啊**" ⇒ 最后裁定："那就选全都选变灰，
+                                //   能用的功能就不变灰，不能用的功能就变灰。"
+                                //   ⚠️【v151 真机返工】**不要造"简英双字/繁英双字"占位项** ——
+                                //     我第一版加了这两条灰占位，菜单总高顶破 `DropdownMenu` 的可视高度，
+                                //     最底下「导出字幕」**被裁掉了一半**（真机截图实测）。
+                                //     而且那两条本来就是"某个片源里恰好有的轨名"，凭空列出来反而误导。
+                                //   ⇒ 正确做法：**只把标题灰掉**（`内封字幕（无）`）。行数不变、不顶破高度，
+                                //     也照样满足"统一变灰"这条口径。有轨时行为**完全不变**。
                                 val hasEmbedded2 = embeddedTracks.isNotEmpty()
                                 DropdownMenuItem(
                                     text = {
@@ -1664,10 +1672,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                     enabled = false,
                                     onClick = {},
                                 )
-                                val activeLabel = srtName
-                                    .takeIf { it.startsWith(EmbeddedSubtitle.TAG_PREFIX) }
-                                    ?.removePrefix(EmbeddedSubtitle.TAG_PREFIX)
                                 if (hasEmbedded2) {
+                                    val activeLabel = srtName
+                                        .takeIf { it.startsWith(EmbeddedSubtitle.TAG_PREFIX) }
+                                        ?.removePrefix(EmbeddedSubtitle.TAG_PREFIX)
                                     embeddedTracks.forEach { t ->
                                         DropdownMenuItem(
                                             text = {
@@ -1677,20 +1685,6 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                                 subMenuOpen = false
                                                 applyEmbeddedTrack(t.index)
                                             },
-                                        )
-                                    }
-                                } else {
-                                    // 没内封轨 ⇒ 两条**占位**灰项（阿亮："简英双字跟繁英双字也选不了了"）
-                                    listOf("简英双字", "繁英双字").forEach { label ->
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(
-                                                    "     $label",
-                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-                                                )
-                                            },
-                                            enabled = false,
-                                            onClick = {},
                                         )
                                     }
                                 }
@@ -2276,19 +2270,21 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             }
                         } else if (videoUri != null) {
                             // 【1008】没字幕时的空态。原来这块是**一片空白** —— 用户分不清"这视频本来就没字幕"
-                            // 和"软件坏了"。给一个能直接点的入口，省掉"先点画面、再找右上角菜单"两步。
-                            // 只在有视频时出现（没视频时不提字幕这回事）。
+                            // 和"软件坏了"。给一句能看懂的引导。
+                            // 🔴【1011 阿亮】原文案是「没有字幕，点这里选一份」+ 拉起选文件。
+                            //   阿亮把「选字幕…」菜单项删了（"我感觉这个没用"）⇒ 这里**不能再指向它**，
+                            //   否则用户按提示点进来只会更懵。改成指向**顶栏「生成字幕」**这条真实可用的路
+                            //   （跑完还会自动把字幕落到视频旁边）。
+                            //   ⚠️ 纯提示文字、**不带点击** —— 不新增入口，避免和顶栏按钮职责重叠。
                             Box(
                                 modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 10.dp),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text(
-                                    "没有字幕，点这里选一份",
+                                    "这个视频还没有字幕，点上方「生成字幕」让软件听一遍",
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .clickable { pickSubtitleFile.launch(arrayOf("*/*")) }
-                                        .padding(12.dp),
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                    modifier = Modifier.padding(12.dp),
                                 )
                             }
                         }
