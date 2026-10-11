@@ -732,19 +732,6 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     .getOrDefault(emptyList())
             }
             if (embeddedLoadedFor == path) embeddedTracks = list
-            // 🔴【v147 诊断，验完删】对照两边 id —— 我们要按 id 把用户选的轨映射到播放器轨道，
-            //   必须确认 EmbeddedSubtitle 的 index 与 ExoPlayer 的 TrackFormat.id 同源。
-            runCatching {
-                val p = videoMpRef[0] ?: return@runCatching
-                val exo = p.currentTracks.groups
-                    .filter { it.type == C.TRACK_TYPE_TEXT }
-                    .flatMap { g -> (0 until g.length).map { i ->
-                        val f = g.getTrackFormat(i)
-                        "id=${f.id} label=${f.label} lang=${f.language} mime=${f.sampleMimeType}"
-                    } }
-                Log.d("XJ_VID", "nativeSub 诊断 embeddedList=${list.map { "idx=${it.index} label=${it.label} mime=${it.mime}" }}")
-                Log.d("XJ_VID", "nativeSub 诊断 exoTextTracks=$exo")
-            }
         }
     }
 
@@ -1085,16 +1072,11 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             //   ⚠️ 直接用全限定类型写参数：CueGroup 这个类名在本文件可能与其他概念撞名，
             //     不给 IDE 留自动导错的机会。
             override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
-                // 🔴🔴【v147 阿亮实测】**喂进 SubtitleView 之前，清掉 cue 的 `windowColor`**。
-                //   不这么做会出「黑底白字」—— 片源 ASS 里 `chs` 样式写着 `BackColour=&H80000000`
-                //   （半透明黑）。规范上它那条 `BorderStyle=0`（描边模式）**不该**用 BackColour，
-                //   但 `SubtitleView` 在 `setApplyEmbeddedStyles(true)` 下**照样把它画成一整条黑底框**。
-                //   （PotPlayer/libass 严格按规范忽略 ⇒ 电脑上播是干净白字；阿亮一眼看出不对。）
-                //   ✅ 只 `clearWindowColor()`，**其余内嵌样式一律保留**：白字、黑描边、字号、
-                //      `\N` 双语换行、对齐全部照旧（v146 那些"必须保留"的理由依然成立）。
-                //   ⚠️ 用的就是 media3 自己的 API（`SubtitleViewUtils.removeAllEmbeddedStyling` 第一步
-                //      也是它）；**别去找 `setBackgroundColor`，没这个方法**。
-                //   ⚠️ 用 buildUpon 复制一份改，**别原地改** —— cueGroup.cues 里的对象可能被复用。
+                // 🔴🔴【v148 更正】黑底的正解在 **SubtitleView 的 CaptionStyleCompat.backgroundColor**
+                //   （见 AndroidView factory 里 `sv.setStyle(...)` 那段长注释 + javap 实证）。
+                //   这里清 cue 的 `windowColor` **不是**解法 —— 片源/DEFAULT 的 windowColor
+                //   本来就是透明，清了也没变化（v147 我在这点上判断错了，被真机抓包）。
+                //   ⚠️ 保留这行只为"万一某条轨真带了 windowColor 也顺手清掉"，**别指望它去黑底**。
                 runCatching {
                     val cleaned = cueGroup.cues.map { c ->
                         c.buildUpon().clearWindowColor().build()
@@ -1447,6 +1429,34 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 //     只有极个别标题行用 `\an8`。常规台词都是底部居中，坐标是合法的。
                                 sv.setApplyEmbeddedStyles(true)
                                 sv.setApplyEmbeddedFontSizes(true)
+                                // 🔴🔴【v148 真机实证·去黑底的正解】黑底**不是 cue 的 windowColor**，是
+                                //   `CaptionStyleCompat.backgroundColor`！
+                                //   javap 反编译 `CaptionStyleCompat` 静态初始化：
+                                //     `DEFAULT = new CaptionStyleCompat(-1, -16777216, 0, 0, -1, null)`
+                                //     第 2 个参数 `-16777216` = 0xFF000000 = **纯不透明黑** = backgroundColor；
+                                //     第 3 个参数 `0` = **透明** = windowColor。
+                                //   而 `SubtitlePainter` 取色次序（javap 实证）：
+                                //     `Cue.windowColorSet ? Cue.windowColor : CaptionStyleCompat.windowColor`
+                                //     `backgroundColor = CaptionStyleCompat.backgroundColor`（**没有 cue 级来源**！）
+                                //   ⇒ v147 清 `clearWindowColor()` **清了个无关的东西**（DEFAULT 的 windowColor
+                                //     本来就是透明 0）⇒ 黑底纹丝不动，阿亮当场抓包。
+                                //   ✅ 正解 = 给 SubtitleView 设一份**背景透明**的 CaptionStyleCompat，
+                                //     前景/描边/字全部沿用 DEFAULT，**只把 backgroundColor 改成透明**。
+                                //     ⚠️ `CaptionStyleCompat` 的构造函数参数顺序是
+                                //        (foregroundColor, backgroundColor, windowColor,
+                                //         edgeType, edgeColor, typeface) —— 别写错位置。
+                                runCatching {
+                                    sv.setStyle(
+                                        androidx.media3.ui.CaptionStyleCompat(
+                                            androidx.media3.ui.CaptionStyleCompat.DEFAULT.foregroundColor,
+                                            android.graphics.Color.TRANSPARENT,   // ← 就是这里：背景透明
+                                            androidx.media3.ui.CaptionStyleCompat.DEFAULT.windowColor,
+                                            androidx.media3.ui.CaptionStyleCompat.DEFAULT.edgeType,
+                                            androidx.media3.ui.CaptionStyleCompat.DEFAULT.edgeColor,
+                                            androidx.media3.ui.CaptionStyleCompat.DEFAULT.typeface,
+                                        )
+                                    )
+                                }.onFailure { Log.w("XJ_VID", "设 CaptionStyle 失败: ${it.message}") }
                                 // 记进文件级 ref：换播放器时 onCues 那边要往这里喂（见 Player.Listener.onCues）。
                                 // ⚠️ 这里**不调 setPlayer** —— SubtitleView 没这个公开 API，
                                 //   字幕是播放器 onCues 回调送进来的（media3 官方给自定义 UI 的正道）。
