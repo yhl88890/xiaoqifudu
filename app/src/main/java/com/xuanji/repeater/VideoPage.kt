@@ -607,11 +607,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         if (uri != null) applyPickedSubtitle(context, uri)
     }
 
-    /** 把当前字幕写成 SRT 放到视频旁边（同名位置被占就退让成 `<基名>-识别.srt`，**绝不覆盖**）。 */
-    fun exportSubtitleNow() {
-        val r = SubtitleExport.writeBeside(videoPath, sentences)
-        Toast.makeText(context, r.message, Toast.LENGTH_LONG).show()
-    }
+    // 🔴【1011 阿亮】原 `exportSubtitleNow()`（手动导出字幕到视频旁边）**已删除** ——
+    //   唯一调用者是上面那个「导出字幕」菜单项，菜单项删了就成死码。
+    //   ⚠️ **ASR 生成完自动落地仍然在**（`SubtitleExport.writeAsrBeside`，MainActivity 里调），
+    //     所以磁盘上的字幕文件照样会生成，只是不再提供"手动再导一份"这个按钮。
 
     // 同级视频列表里当前位置（上一曲/下一曲用）
     val curFolderIdx = videoFolderVideos.indexOfFirst { it.path == videoPath }
@@ -1683,10 +1682,11 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                         )
                                     }
                                 }
-                                DropdownMenuItem(
-                                    text = { Text("导出字幕") },
-                                    onClick = { subMenuOpen = false; exportSubtitleNow() },
-                                )
+                                // 🔴【1011 阿亮】「导出字幕」**已删除**（他："导出字幕留着没有什么用呢，没什么用了"）。
+                                //   连同菜单里的「选字幕…」一起删掉 —— 这两项阿亮都判定为没用了。
+                                //   ⚠️ **ASR 自动落地不受影响**：走的是 `SubtitleExport.writeAsrBeside`（MainActivity 里），
+                                //     跟这个菜单项无关。别因为删了菜单项就以为"字幕不再落地了"。
+                                //   ⚠️ 别再"顺手加回来" —— 要加先问阿亮。
                                 // 🔴【1011 阿亮】「选字幕…」**已删除**（他："我感觉基本上不用选。先删了吧…
                                 //   我感觉这个没用"）。原来留着是当"抓不出来/自己生成的不准"的兜底，
                                 //   但实测字幕**要么是抓的、要么是 ASR 生成的**，都在视频旁边同一个文件夹，
