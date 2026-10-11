@@ -1598,11 +1598,16 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 // 🔴【1011 阿亮改名】原叫「字幕显示」太概括 —— 用户看不出它指"画面下方那条字幕"。
                                 //   改成「下方字幕」：直接说位置（阿亮原话："指的是显示窗口下面的字幕"）。
                                 //   ⚠️ 只管**画面下方那条字幕**（`videoSubOn` 那套 / 片源轨），不碰别的。
-                                // 🔴🔴【1011 阿亮】**ASR 生成的字幕 ⇒ 整块变灰点不动**。
+                                // 🔴🔴【1011 阿亮】**ASR 生成的字幕 ⇒ 标题灰掉，三档不再展示**。
                                 //   理由（MEMORY 铁律）：ASR 结果是**中英混杂**，不是"英上中下"的双语对照 ⇒
                                 //   裁档会连英文整行丢掉、行序也会把"含汉字那行"挪走 ⇒ 这三档对它**没有意义**。
-                                //   阿亮裁定："能用的功能就不变灰，不能用的功能就变灰"
-                                //   ⇒ 这里**标题和三个选项一起灰、一起点不动**，别再留能点却点了没反应的假活口。
+                                //   🔴 阿亮第二轮纠正（v152）：我原来把三档**灰着列出来**，但内封字幕那边是
+                                //   "用不了就不列子项" ⇒ **两处口径又不统一了**。他原话：
+                                //     "既然把内封字幕那个没的时候下边那两项都不展示了，
+                                //      那下方字幕不适用的时候，那下边那几行也不用展示了，不然这逻辑又不统一了。"
+                                //   ⇒ 统一口径 = **用不了 ⇒ 只留一行标题（灰），子项一律不列**。
+                                //     标题留着是为了让用户知道"这里有这么个东西、现在用不了"，
+                                //     子项不列是因为**列出来也没用、还占菜单高度**（v151 顶破过一次）。
                                 val dimDownSub = subtitlesFromAsr
                                 DropdownMenuItem(
                                     text = {
@@ -1620,29 +1625,19 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                     enabled = false,
                                     onClick = {},
                                 )
-                                listOf(
-                                    SubtitleMode.EN_ONLY to "只看英文",
-                                    SubtitleMode.CN_ONLY to "只看中文",
-                                    SubtitleMode.BILINGUAL to "英中双语",
-                                ).forEach { (m, label) ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                // 🔴 灰掉时**不打勾**：灰 = 这档用不了，再打一个"✓ 当前选中"
-                                                //   会让用户以为"哎它明明选着怎么又是灰的"（v151 真机截图发现的）。
-                                                if (dimDownSub) "     $label"
-                                                else if (subtitleMode == m) "✓ $label"
-                                                else "     $label",
-                                                color = if (dimDownSub) {
-                                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurface
-                                                },
-                                            )
-                                        },
-                                        enabled = !dimDownSub,
-                                        onClick = { subMenuOpen = false; setSubtitleMode(context, m) },
-                                    )
+                                if (!dimDownSub) {
+                                    listOf(
+                                        SubtitleMode.EN_ONLY to "只看英文",
+                                        SubtitleMode.CN_ONLY to "只看中文",
+                                        SubtitleMode.BILINGUAL to "英中双语",
+                                    ).forEach { (m, label) ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(if (subtitleMode == m) "✓ $label" else "     $label")
+                                            },
+                                            onClick = { subMenuOpen = false; setSubtitleMode(context, m) },
+                                        )
+                                    }
                                 }
                                 // 【v120】视频**自带**的字幕轨（内封软字幕）。有几条列几条，当前在用的打勾。
                                 // ⚠️ 多条轨不能同时叠加（会重叠打架）⇒ 这里是"切换"入口，一次只用一条。
