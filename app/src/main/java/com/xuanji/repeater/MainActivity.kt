@@ -854,6 +854,20 @@ private fun videoGenerateLyrics(context: Context) {
                     incomplete = res.incomplete,
                     fromAsr = true,   // 【1010】这份是我们自己 ASR 生成的 ⇒ 库里也标上，读回来不重排、不裁
                 )
+                // 🔴🔴【1011 阿亮】生成完**自动落到视频旁边**（跟抓来的 .srt 同一个文件夹）。
+                //   原来只躺 SubtitleLibrary(SharedPreferences)：① 卸载软件全丢 ② 超过 200 条被挤掉
+                //   ⇒ 学习资料不该住在"私人兜里"。落到旁边之后：
+                //     ▸ 用户自己在文件夹里就能看见、能拷走备份（不再依赖「导出字幕」按钮）
+                //     ▸ 下次打开视频走 `SubtitleParser.pickBest` 的「同名/含 ASR 标记」匹配，自动认得
+                //   ⚠️ **顺序不能反**：上面库那份是保底，必须先存好。旁边写不进去（只读目录/权限）
+                //      也只是少一份副本，绝不能让用户白跑一次识别。
+                //   ⚠️ 命名/退让规则见 `SubtitleExport.writeAsrBeside`：优先 `<基名>.srt`，
+                //      被占（一般是抓来的）⇒ 退让 `<基名>-ASR.srt`；内容一样则早退不重写。
+                //   ⚠️ 写失败**不改变** msg 的"识别完成"口径，只在后面追加一句说明。
+                val saved = if (videoPath.isNotBlank()) {
+                    runCatching { SubtitleExport.writeAsrBeside(videoPath, finalSentences) }
+                        .getOrElse { SubtitleExport.Result(false, "导出失败：${it.message ?: "未知错误"}", null) }
+                } else null
                 // 🔴【0929】残缺的字幕必须**明说**：这次的字幕照常显示（用户马上能用），
                 //   但提示里要点出"字幕缺失"，别让他以为识别干净了。
                 //   原来只报"识别完成，共 N 句（3/5 段成功）"——后半句用户不会当回事，
@@ -862,6 +876,8 @@ private fun videoGenerateLyrics(context: Context) {
                     append("识别完成，共 ${finalSentences.size} 句")
                     if (res.note.isNotBlank()) append("（${res.note}）")
                     if (res.incomplete) append(" ⚠️ 字幕缺失")
+                    // 落到旁边没成功要说清"字幕还在 App 里"，否则用户去文件夹找不到会以为白识别了
+                    if (saved != null && !saved.ok) append("；字幕已存在 App 里（${saved.message}）")
                 }
                 saveVideoPrefs(context)
             } else {

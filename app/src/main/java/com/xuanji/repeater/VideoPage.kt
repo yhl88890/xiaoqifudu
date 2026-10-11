@@ -1592,18 +1592,21 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                     },
                                     onClick = { if (hasEmbedded) videoNativeSubOn = !videoNativeSubOn },
                                 )
-                                // 🔴【1010】字幕显示模式：双语 / 只看英文 / 只看中文（默认只看英文）。
+                                // 🔴【1010】下方字幕档位：英中双语 / 只看英文 / 只看中文（默认只看英文）。
                                 //   只对**双语字幕**起效 —— 单语字幕任何档位都原样显示，不会变空。
                                 //   放在菜单最上面（最常用），「选字幕…」按阿亮要求挪到最后。
+                                // 🔴【1011 阿亮改名】原叫「字幕显示」太概括 —— 用户看不出它指"画面下方那条字幕"。
+                                //   改成「下方字幕」：直接说位置（阿亮原话："指的是显示窗口下面的字幕"）。
+                                //   ⚠️ 只管**画面下方那条字幕**（`videoSubOn` 那套 / 片源轨），不碰别的。
                                 DropdownMenuItem(
-                                    text = { Text("字幕显示") },
+                                    text = { Text("下方字幕") },
                                     enabled = false,
                                     onClick = {},
                                 )
                                 listOf(
                                     SubtitleMode.EN_ONLY to "只看英文",
                                     SubtitleMode.CN_ONLY to "只看中文",
-                                    SubtitleMode.BILINGUAL to "双语",
+                                    SubtitleMode.BILINGUAL to "英中双语",
                                 ).forEach { (m, label) ->
                                     DropdownMenuItem(
                                         text = {

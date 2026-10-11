@@ -46,7 +46,38 @@ internal object SubtitleExport {
     }
 
     /** 写到视频旁边：`<基名>.srt`，被占了就退让成 `<基名>-识别.srt`。 */
-    fun writeBeside(mediaPath: String, list: List<Sentence>): Result {
+    fun writeBeside(mediaPath: String, list: List<Sentence>): Result =
+        writeBesideImpl(mediaPath, list, fallbackSuffix = "-识别", sameContentMsg = "字幕已经在视频旁边了")
+
+    /**
+     * 🔴【1011 阿亮】**ASR 生成完自动落地到视频旁边**用的入口。
+     *
+     * 背景（阿亮原话）："这 ASR 我们每次生成那就要把它放在源文件旁边了…就不能把它放在私人兜里了"。
+     * 原来 ASR 结果**只存 `SubtitleLibrary`（SharedPreferences）**，有两个硬伤：
+     *   ① **卸载 App 就全丢**（私有目录，安卓铁律改不了）；
+     *   ② 库里 `MAX_ENTRIES = 200`，**攒够 200 条老的自动被挤掉**。
+     * ⇒ 落地成"视频旁边的 .srt"是**唯一可靠的持久化**（公共存储，卸载不删、还能被自动匹配读到）。
+     *
+     * 命名：优先 `<基名>.srt`；已被占（一般是抓的）⇒ 退让成 **`<基名>-ASR.srt`**。
+     *   ⚠️ `SubtitleParser.NOISE` **已把 `asr`/`识别`/`生成` 当噪音词删掉** ⇒ 带这两种尾巴的
+     *     字幕文件**照样能被自动匹配认出来**（不然有两份时会掉进"不猜"、字幕直接消失）。
+     *
+     * 返回结果给调用方决定要不要 Toast；**写失败不影响库里那份**（调用方保证先存库）。
+     */
+    fun writeAsrBeside(mediaPath: String, list: List<Sentence>): Result =
+        writeBesideImpl(mediaPath, list, fallbackSuffix = "-ASR", sameContentMsg = "生成的字幕已经在视频旁边了")
+
+    /**
+     * 落地实现（两个入口共用）。
+     * @param fallbackSuffix 同名被占时的退让后缀，**自带连接符**（`-识别` / `-ASR`）
+     * @param sameContentMsg 内容已经一样时的提示语
+     */
+    private fun writeBesideImpl(
+        mediaPath: String,
+        list: List<Sentence>,
+        fallbackSuffix: String,
+        sameContentMsg: String,
+    ): Result {
         if (mediaPath.isBlank()) return Result(false, "拿不到视频路径，导出失败")
         val src = File(mediaPath)
         val dir = src.parentFile
@@ -55,15 +86,23 @@ internal object SubtitleExport {
         if (text.isBlank()) return Result(false, "还没有字幕可以导出")
 
         val base = src.name.substringBeforeLast('.')
+        val fallback = File(dir, "$base$fallbackSuffix.srt")
         val sameName = File(dir, "$base.srt")
-        if (sameName.isFile) {
-            val old = runCatching { sameName.readText() }.getOrNull()
+
+        // 先看自己的退让名在不在（ASR 反复生成时命中这里 ⇒ 内容一样就早退，别重复写）
+        for (candidate in listOf(sameName, fallback)) {
+            if (!candidate.isFile) continue
+            val old = runCatching { candidate.readText() }.getOrNull()
             if (old != null && old.trim() == text.trim()) {
-                return Result(true, "字幕已经在视频旁边了", sameName)
+                return Result(true, sameContentMsg, candidate)
             }
-            // 内容不同（或读不出来，比如 GBK 老字幕）⇒ 不覆盖，换名字
         }
-        val target = if (sameName.isFile) File(dir, "$base-识别.srt") else sameName
+        // 同名被占 ⇒ 退让；退让名也被占 ⇒ 不覆盖，报清楚（不静默）
+        val target = when {
+            !sameName.isFile -> sameName
+            !fallback.isFile -> fallback
+            else -> return Result(false, "${fallback.name} 已经存在且内容不同，不覆盖")
+        }
         return try {
             target.writeText(text)   // UTF-8，不带 BOM
             Result(true, "已导出 ${target.name}", target)

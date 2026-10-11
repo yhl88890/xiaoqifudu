@@ -384,6 +384,46 @@ class SubtitleParserTest {
         assertNull(SubtitleParser.pickBest("movie.mp4", emptyList()))
     }
 
+    // ------------------------------------------------------------------
+    // 【1011】ASR 自动落地到视频旁边 ⇒ `xxx-ASR.srt` 必须能被自动认得
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `匹配_ASR退让名_能被自动配上`() {
+        // 🔴 场景：视频旁边只有我们 ASR 生成的那份（抓的那份不存在）。
+        //   `writeAsrBeside` 写的就是 `<基名>-ASR.srt`。**这必须能被 pickBest 认出来** ——
+        //   认不出来就等于下次打开视频字幕"凭空消失"，用户会以为生成的字幕丢了。
+        val subs = listOf(File("新概念3.1-ASR.srt"))
+        val hit = SubtitleParser.pickBest("新概念3.1.mp3", subs)
+        assertEquals("新概念3.1-ASR.srt", hit?.name)
+    }
+
+    @Test
+    fun `匹配_抓的字幕与ASR副本共存_优先命中原名那份`() {
+        // 🔴 场景：先抓了字幕（`xxx.srt`），后来又 ASR 生成 ⇒ 退让成 `xxx-ASR.srt`。
+        //   两份都在时，**同名的抓取版优先**（它更准），绝不能被 ASR 版抢走。
+        val subs = listOf(File("新概念3.1-ASR.srt"), File("新概念3.1.srt"))
+        val hit = SubtitleParser.pickBest("新概念3.1.mp3", subs)
+        assertEquals("新概念3.1.srt", hit?.name)
+    }
+
+    @Test
+    fun `匹配_点分ASR名_也能配上`() {
+        // ⚠️ 防回归：如果将来谁把退让名改成 `xxx.ASR.srt`（点分隔），`asr` 依然要靠 NOISE 剥掉。
+        //   这条钉住「点分隔」这条路径不会退化。
+        val subs = listOf(File("movie.ASR.srt"))
+        val hit = SubtitleParser.pickBest("movie.mp4", subs)
+        assertEquals("movie.ASR.srt", hit?.name)
+    }
+
+    @Test
+    fun `匹配_识别后缀的退让名_也能配上`() {
+        // `SubtitleExport.writeBeside`（手动导出）的退让名是 `-识别`，同一个坑，一并钉住。
+        val subs = listOf(File("movie-识别.srt"))
+        val hit = SubtitleParser.pickBest("movie.mp4", subs)
+        assertEquals("movie-识别.srt", hit?.name)
+    }
+
     @Test
     fun `匹配_短名字不参与互含_防乱命中`() {
         // 基名互相包含有最短长度门槛（>=6）⇒ 短名字不会因为"包含"就乱配上。
