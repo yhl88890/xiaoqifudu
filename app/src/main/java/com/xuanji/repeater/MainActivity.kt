@@ -632,26 +632,30 @@ private fun clearVideoHandoffPrefs(context: Context) {
 internal fun openVideoFromLibrary(context: Context, item: VideoItem, siblings: List<VideoItem> = emptyList()) {
     // 【P2 收口】换视频的状态重置（含停后台音频、清后台交接残留）统一走 [switchToVideo]
     switchToVideo(VideoScanner.uriFor(item.id), item.path, siblings)
-    // 字幕来源优先级：① 手动选过的（用户显式指定，最高）② 同名/近名的字幕文件（下面那段）③ 以前识别的结果
+    // 字幕来源优先级：① 同名/近名的字幕文件（下面那段）② 内封轨 ③ 以前识别的结果
     // 🔴【1008】原来调 SrtParser.findBestSrtFile —— 它只认 .srt，而且找不到同名就"取同目录第一个"，
     //   一个目录里放多个视频时会把**别的视频的字幕**加载进来（张冠李戴且界面看不出来）。
     //   现在统一走 [SubtitleParser] 四级匹配（SRT/ASS/SSA + 去版本尾巴 + 编码自适应），
-    //   四级都不中一律**不自动加载**（返回 null，交给右上角「选字幕」）。
-    val manualSub = ManualSubtitle.saved(context, item.path)
-    val subFile = manualSub ?: SubtitleParser.findBestSubtitle(item.path)
+    //   四级都不中一律**不自动加载**（返回 null，交给顶栏「生成字幕」）。
+    // 🔴【1012】原来这里还有一级"手动选过的"（`ManualSubtitle`，优先级最高）——
+    //   随「选字幕…」菜单项一起**删掉了**（阿亮："我感觉基本上不用选"：字幕要么是抓的、要么是 ASR 生成，
+    //   都在视频旁边，自动匹配稳定兜得住）。
+    //   ⚠️ **光删 UI 不删这里会出事**：写入口没了、读取还在且优先级最高 ⇒ 老记忆**永久生效且无法撤销**。
+    //   ⇒ 所以连读取一起删，`ManualSubtitle` 整个 object 已移除（这是一条通用纪律：删功能要连读入口一起查）。
+    val subFile = SubtitleParser.findBestSubtitle(item.path)
     if (subFile != null) runCatching {
         val parsed = SubtitleParser.parseFile(subFile)
         if (parsed.isNotEmpty()) {
-            // 手动选的 / 同名 .srt ⇒ 抓来的现成字幕（跟档位、行序英文提上）
-            loadReadySubtitles(
-                parsed,
-                if (manualSub != null) {
-                    ManualSubtitle.displayName(context, item.path).ifBlank { subFile.name }
-                } else {
-                    subFile.name
-                },
-            )
-            // 同目录 / 手动选的字幕也算「播过的字幕」→ 归档字幕库（视频来源）
+            // 🔴【1012】磁盘上这份若是**我们自己 ASR 落地的**（`<基名>-ASR.srt`）⇒ 必须还原成 ASR 来源。
+            //   否则会被当"抓来的"处理：菜单档位误变可用、行序按双语重排（ASR 中英混杂，会搞乱）。
+            //   判据是文件名后缀常量、不是猜内容 —— 见 `SubtitleExport.isAsrExport` 的注释。
+            if (SubtitleExport.isAsrExport(subFile.name)) {
+                loadAsrSubtitles(parsed)
+            } else {
+                // 同名的现成字幕 ⇒ 抓来的（跟档位、行序英文提上）
+                loadReadySubtitles(parsed, subFile.name)
+            }
+            // 同目录的字幕也算「播过的字幕」→ 归档字幕库（视频来源）
             SubtitleLibrary.saveVideo(context, videoName, parsed, item.path)
         }
     }
@@ -706,20 +710,17 @@ private fun openVideoFileByPath(context: Context, file: File, siblings: List<Vid
     // ✅ 2026-10-10：本条路径原来**不停后台音频**（⇒ 从音频模式直接导 B站 视频可能双声），
     //   已按阿亮批准统一 —— 现在和媒体库那条行为一致。
     switchToVideo(Uri.fromFile(file), file.path, siblings)
-    // 字幕来源优先级：同 openVideoFromLibrary（见那里的【1008】说明）—— 手动选的 > 同目录文件 > 识别结果
-    val manualSub = ManualSubtitle.saved(context, file.path)
-    val subFile = manualSub ?: SubtitleParser.findBestSubtitle(file.path)
+    // 字幕来源优先级：同 openVideoFromLibrary（见那里的【1008】/【1012】说明）—— 同目录文件 > 内封轨 > 识别结果
+    val subFile = SubtitleParser.findBestSubtitle(file.path)
     if (subFile != null) runCatching {
         val parsed = SubtitleParser.parseFile(subFile)
         if (parsed.isNotEmpty()) {
-            loadReadySubtitles(
-                parsed,
-                if (manualSub != null) {
-                    ManualSubtitle.displayName(context, file.path).ifBlank { subFile.name }
-                } else {
-                    subFile.name
-                },
-            )
+            // 🔴【1012】ASR 落地的那份（`<基名>-ASR.srt`）要还原成 ASR 来源 —— 理由同 openVideoFromLibrary。
+            if (SubtitleExport.isAsrExport(subFile.name)) {
+                loadAsrSubtitles(parsed)
+            } else {
+                loadReadySubtitles(parsed, subFile.name)
+            }
             SubtitleLibrary.saveVideo(context, videoName, parsed, file.path)
         }
     }
@@ -1885,7 +1886,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     }
-                    // ---- 右组：生成字幕/重新生成 + 文件夹（贴右） ----
+                    // ---- 右组：生成字幕/重新识别 + 文件夹（贴右） ----
                     Row(
                         modifier = Modifier.align(Alignment.CenterEnd),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1895,7 +1896,15 @@ class MainActivity : ComponentActivity() {
                 val isVideoMode = activeKind == MediaKind.VIDEO
                 val genActive = if (isVideoMode) recognizing else state.recognizing
                 val genDisabled = if (isVideoMode) (videoUri == null) else (state.currentItem == null)
-                // 【1005 阿亮】以前生成过字幕的，按钮变成「重新生成」，一眼知道能重跑
+                // 【1005 阿亮】以前生成过字幕的，按钮变成「重跑」态，一眼知道能重跑。
+                // 🔴【1012 自审 B3】名字从「重新生成」改成「**重新识别**」：
+                //   这颗按钮是**破坏性**的 —— 点下去整段重跑 ASR，把当前正用着的那份字幕顶掉
+                //   （哪怕你手里是配得很好的双语字幕）。旧名「重新生成」中性、位置也中性，
+                //   用户可能以为是"刷新一下字幕列表"，点完才发现换掉了。
+                //   改叫「重新识别」= 直接点明"要重新听一遍"，和运行时那句错误提示
+                //   「上次识别未跑完，点「生成字幕」可重新识别」（~699/~752）用词统一。
+                //   ⚠️ 只许改字面、**不许加长**：顶栏是 Box 三层叠加，右组变宽只会往左长、
+                //      会压到中间钉死的定时按钮上（见 1007 注释）。「重新识别」与「重新生成」同为 4 字，等宽 ✅
                 val hasSubs = if (isVideoMode) sentences.isNotEmpty() else state.lyrics.isNotEmpty()
                 Surface(
                     onClick = {
@@ -1906,7 +1915,7 @@ class MainActivity : ComponentActivity() {
                     shape = RoundedCornerShape(16.dp),
                     color = if (genActive || genDisabled) MaterialTheme.colorScheme.surfaceVariant
                     else MaterialTheme.colorScheme.primaryContainer,
-                    // 【1007 顶栏对称】选集按钮有 padding(horizontal=6.dp)，生成字幕/重新生成原来没有
+                    // 【1007 顶栏对称】选集按钮有 padding(horizontal=6.dp)，生成字幕/重新识别原来没有
                     // ⇒ 左边「设置→选集」间隙 18dp、右边「生成字幕→文件夹」只有 12dp，看着歪。
                     // 补上同样的 6dp，两边间隙一致（18dp）。
                     modifier = Modifier.padding(horizontal = 6.dp),
@@ -1925,7 +1934,7 @@ class MainActivity : ComponentActivity() {
                         }
                         Text(
                         text = when {
-                            !genActive -> if (hasSubs) "重新生成" else "生成字幕"
+                            !genActive -> if (hasSubs) "重新识别" else "生成字幕"
                                 // 【1010 阿亮】视频模式：识别进度**只在画面正中那颗胶囊里**露
                                 // （带 % 和阶段名，见 VideoPage 的 asrOverlayText），顶栏按钮只留「识别中」。
                                 // 原因：asrStage 文案形如"第 3/5 块上传识别中"，一长就把按钮顶宽 ——

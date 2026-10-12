@@ -10,12 +10,13 @@ import java.util.Locale
  * 换手机、清数据就没了，也没法拿去别的地方用。导出成 `.srt` 放在视频旁边：
  * ① 下次打开这个视频会被 [SubtitleParser] **自动匹配**到（同一个基名）；② 也能拿去别的播放器。
  *
- * ## 🔴 覆盖策略：宁可多一个文件，也不覆盖用户的字幕
+ * ## 🔴 覆盖策略：**只写自己那一份（`<基名>-ASR.srt`），绝不碰 `<基名>.srt`**
  *
- * 目标默认是 `<视频基名>.srt`（B站 导入的字幕、自己下的字幕都在这个位置上）。
- * 如果那个名字**已经存在**：
- * - 内容跟我们这份一模一样 ⇒ 当成"已经导过了"，不重复写；
- * - 内容不一样 ⇒ **绝不覆盖**（那可能是阿亮自己下的双语字幕，覆盖了就找不回来），改存 `<基名>-识别.srt`。
+ * `<基名>.srt` 是"最好的字幕"的黄金位置（B站 抓的、自己下的都在那儿），机器识别结果**永远不去占它**。
+ * 内容没变就跳过不写（反复点「重新识别」不会反复写盘、也不动 mtime）；内容变了就覆盖**自己那份**旧结果。
+ *
+ * ⚠️【1012 变更】以前是"优先抢 `<基名>.srt`、被占才退让 `-识别.srt`"——那条已经**删掉**，
+ *   抢同名会让来源标志丢失（详见 [writeAsrBeside] 的说明）。别照着旧记忆改回来。
  *
  * ## 时间格式
  *
@@ -45,10 +46,6 @@ internal object SubtitleExport {
         return sb.toString()
     }
 
-    /** 写到视频旁边：`<基名>.srt`，被占了就退让成 `<基名>-识别.srt`。 */
-    fun writeBeside(mediaPath: String, list: List<Sentence>): Result =
-        writeBesideImpl(mediaPath, list, fallbackSuffix = "-识别", sameContentMsg = "字幕已经在视频旁边了")
-
     /**
      * 🔴【1011 阿亮】**ASR 生成完自动落地到视频旁边**用的入口。
      *
@@ -58,27 +55,22 @@ internal object SubtitleExport {
      *   ② 库里 `MAX_ENTRIES = 200`，**攒够 200 条老的自动被挤掉**。
      * ⇒ 落地成"视频旁边的 .srt"是**唯一可靠的持久化**（公共存储，卸载不删、还能被自动匹配读到）。
      *
-     * 命名：优先 `<基名>.srt`；已被占（一般是抓的）⇒ 退让成 **`<基名>-ASR.srt`**。
-     *   ⚠️ 退让名照样能被 [SubtitleParser.pickBest] 自动认出来 —— 靠的是「基名互相包含」那一级
-     *     （`xxxasr` 包含 `xxx`），不是靠 NOISE；NOISE 里那几个来源标记词是**冗余保险**，
-     *     详见 `SubtitleParser.NOISE` 上面的注释（我做过变异验证，别把它说成"不加就丢字幕"）。
+     * 🔴🔴【1012】**固定写 `<基名>-ASR.srt`，不再"优先抢 `<基名>.srt`"** —— 这是一处真正的逻辑修bug：
+     *   抢同名会让**来源标志丢失**。`<基名>.srt` 是"最好的字幕"的黄金位置（B站抓的 / 用户自己下的），
+     *   机器识别的结果一旦占了它，下次打开视频走「完全同名」匹配、会被当成**抓来的**
+     *   （`loadReadySubtitles` ⇒ `subtitlesFromAsr = false`）：
+     *     ▸ 菜单「下方字幕」三档**误变可用**（同一份内容，冷启是灰的、从媒体库打开能点 ⇒ 用户懵）
+     *     ▸ 它还会被按"双语字幕"处理（ASR 是中英混杂，行序重排会搞乱）
+     *   ⇒ 现在**各归各位**：`<基名>.srt` 永远留给好字幕，机器生成的住 `<基名>-ASR.srt`，
+     *     打开视频时靠后缀就能认回来源（见 [isAsrExport]）。
+     *
+     * ⚠️ 带后缀**照样能被自动匹配**：靠 [SubtitleParser.pickBest] 第 3 级「基名互相包含」
+     *   （`e04asr` 含 `e04`）。但若视频基名 normalize 后不足 4 字符、或不足 6 字符，该级会跳过
+     *   ⇒ 这类超短名字匹配不上（**既有约束、非本次引入**，真遇上报再单开一轮）。
      *
      * 返回结果给调用方决定要不要 Toast；**写失败不影响库里那份**（调用方保证先存库）。
      */
-    fun writeAsrBeside(mediaPath: String, list: List<Sentence>): Result =
-        writeBesideImpl(mediaPath, list, fallbackSuffix = "-ASR", sameContentMsg = "生成的字幕已经在视频旁边了")
-
-    /**
-     * 落地实现（两个入口共用）。
-     * @param fallbackSuffix 同名被占时的退让后缀，**自带连接符**（`-识别` / `-ASR`）
-     * @param sameContentMsg 内容已经一样时的提示语
-     */
-    private fun writeBesideImpl(
-        mediaPath: String,
-        list: List<Sentence>,
-        fallbackSuffix: String,
-        sameContentMsg: String,
-    ): Result {
+    fun writeAsrBeside(mediaPath: String, list: List<Sentence>): Result {
         if (mediaPath.isBlank()) return Result(false, "拿不到视频路径，导出失败")
         val src = File(mediaPath)
         val dir = src.parentFile
@@ -86,23 +78,11 @@ internal object SubtitleExport {
         val text = toSrt(list)
         if (text.isBlank()) return Result(false, "还没有字幕可以导出")
 
-        val base = src.name.substringBeforeLast('.')
-        val fallback = File(dir, "$base$fallbackSuffix.srt")
-        val sameName = File(dir, "$base.srt")
-
-        // 先看自己的退让名在不在（ASR 反复生成时命中这里 ⇒ 内容一样就早退，别重复写）
-        for (candidate in listOf(sameName, fallback)) {
-            if (!candidate.isFile) continue
-            val old = runCatching { candidate.readText() }.getOrNull()
-            if (old != null && old.trim() == text.trim()) {
-                return Result(true, sameContentMsg, candidate)
-            }
-        }
-        // 同名被占 ⇒ 退让；退让名也被占 ⇒ 不覆盖，报清楚（不静默）
-        val target = when {
-            !sameName.isFile -> sameName
-            !fallback.isFile -> fallback
-            else -> return Result(false, "${fallback.name} 已经存在且内容不同，不覆盖")
+        val target = File(dir, src.name.substringBeforeLast('.') + ASR_SUFFIX + ".srt")
+        // 内容没变就别重复写（反复点「重新识别」会命中这里；省一次磁盘写、也不动 mtime）
+        val old = runCatching { target.readText() }.getOrNull()
+        if (old != null && old.trim() == text.trim()) {
+            return Result(true, "生成的字幕已经在视频旁边了", target)
         }
         return try {
             target.writeText(text)   // UTF-8，不带 BOM
@@ -112,6 +92,22 @@ internal object SubtitleExport {
             Result(false, "导出失败：这个文件夹不让写")
         }
     }
+
+    /**
+     * ASR 自动落地的后缀（`<基名>-ASR.srt`）。**打开视频时靠它认回"这份是机器生成的"**。
+     * ⚠️ 改名要连 [isAsrExport] 一起想 —— 它是"来源判定"的锚点。
+     */
+    const val ASR_SUFFIX = "-ASR"
+
+    /**
+     * 这个文件名是不是我们 ASR 自动落地产生的那份？
+     *
+     * ⚠️ 这**不是**"拿文案当判据"（那条铁律禁止的是"看字符串猜来源"）——
+     *   后缀是**我们自己写下的固定值**，性质等同 `srtName == ASR_SUBTITLE_NAME`（读回自己写的常量），
+     *   不涉及任何"猜内容"。见 `SubtitleState.subtitlesFromAsr` 的注释。
+     */
+    fun isAsrExport(fileName: String): Boolean =
+        fileName.substringBeforeLast('.').endsWith(ASR_SUFFIX, ignoreCase = true)
 
     private fun msToSrt(ms: Long): String {
         val c = ms.coerceAtLeast(0L)

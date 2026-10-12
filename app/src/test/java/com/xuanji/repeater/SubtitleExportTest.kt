@@ -2,7 +2,6 @@ package com.xuanji.repeater
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -11,14 +10,20 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * [SubtitleExport] 的单测。【1011 新建】
+ * [SubtitleExport] 的单测。【1011 新建；1012 按新落地规则重写】
  *
- * 为什么必须测：ASR 生成完**自动往视频旁边写 `.srt`** 是本轮新加的行为，
- * 它直接动用户的文件夹。三条分支（早退 / 退让 / 不覆盖）任何一条写错，
- * 轻则天天重复写文件，重则**把用户自己下的字幕盖掉**（找不回来）。
+ * 为什么必须测：ASR 生成完**自动往视频旁边写 `.srt`**，它直接动用户的文件夹。
+ * 写错轻则天天重复写文件，重则**把用户自己下的字幕盖掉**（找不回来）。
  * 这种事在真机上"偶尔"才看得到，必须靠单测钉住。
  *
- * ⚠️ 边界：这里测的是**文件落盘行为**，不测 `pickBest` 能不能认出退让名
+ * 🔴🔴【1012 规则变更】**ASR 落地固定写 `<基名>-ASR.srt`，不再"优先抢 `<基名>.srt`"**。
+ *   原因见 [SubtitleExport.writeAsrBeside] 的注释（抢同名会让**来源标志丢失**：
+ *   下次打开走「完全同名」匹配、被当成抓来的 ⇒ 菜单档位误变可用）。
+ *   ⇒ 好几条断言从"写基名.srt"改成了"永远写 -ASR"。
+ *   ⇒ 并新增一整组 [SubtitleExport.isAsrExport] 用例 —— 它是"打开视频时认回 ASR 来源"的**唯一锚点**，
+ *     判错 = 菜单状态错乱（真机表现：同一份字幕，冷启能点/从媒体库打开不能点）。
+ *
+ * ⚠️ 边界：这里测的是**文件落盘行为 + 后缀判据**，不测 `pickBest` 能不能认出这个后缀名
  *   （那部分在 `SubtitleParserTest`）。两边分开，免得一处改动同时弄红一堆用例。
  */
 class SubtitleExportTest {
@@ -32,21 +37,55 @@ class SubtitleExportTest {
     private val sample = listOf(s(0, 1000, "hello"), s(1000, 2000, "world"))
 
     // ==================================================================
-    // ① 基本落盘
+    // ① 落盘位置：**永远是 `<基名>-ASR.srt`**（不论旁边有没有别的字幕）
     // ==================================================================
 
     @Test
-    fun `ASR导出_旁边没字幕时_写成基名srt`() {
+    fun `ASR导出_永远写成减ASR后缀`() {
         val dir = tmp.newFolder("media")
         val video = File(dir, "新概念3.1.mp4").apply { writeText("x") }
 
         val r = SubtitleExport.writeAsrBeside(video.absolutePath, sample)
 
         assertTrue(r.ok)
-        val out = File(dir, "新概念3.1.srt")
-        assertTrue("应该写成 <基名>.srt", out.isFile)
+        val out = File(dir, "新概念3.1-ASR.srt")
+        assertTrue("应写成 <基名>-ASR.srt", out.isFile)
         assertEquals(out.canonicalPath, r.file?.canonicalPath)
         assertTrue(out.readText().contains("hello"))
+    }
+
+    @Test
+    fun `ASR导出_旁边有抓的字幕时_依然只碰减ASR那份`() {
+        // 🔴 这是本次修 bug 的核心防线：以前会去抢 `<基名>.srt` 那个位置，
+        //   跟"抓来的"撞名 ⇒ 下次打开视频被当成抓来的（来源标志丢失）。
+        //   现在各归各位：用户那份**一个字节不动**，机器生成只写自己的后缀。
+        val dir = tmp.newFolder("media")
+        val video = File(dir, "ep01.mp4").apply { writeText("x") }
+        val grabbed = File(dir, "ep01.srt")
+            .apply { writeText("1\n00:00:00,000 --> 00:00:01,000\n抓来的双语") }
+
+        val r = SubtitleExport.writeAsrBeside(video.absolutePath, sample)
+
+        assertTrue(r.ok)
+        assertEquals("ep01-ASR.srt", r.file?.name)
+        assertEquals(
+            "用户自己那份一个字节都不能变",
+            "1\n00:00:00,000 --> 00:00:01,000\n抓来的双语",
+            grabbed.readText(),
+        )
+    }
+
+    @Test
+    fun `ASR导出_旁边没字幕时也不占用基名位置`() {
+        // 以前是"旁边没字幕 ⇒ 写 <基名>.srt"，现在一律 `-ASR`。
+        // 目的：让 `<基名>.srt` 这个"黄金位置"**永远留给好字幕**（抓的 / 用户自己下的）。
+        val dir = tmp.newFolder("media")
+        val video = File(dir, "ep02.mp4").apply { writeText("x") }
+
+        SubtitleExport.writeAsrBeside(video.absolutePath, sample)
+
+        assertFalse("<基名>.srt 不该被 ASR 占用", File(dir, "ep02.srt").exists())
+        assertTrue(File(dir, "ep02-ASR.srt").isFile)
     }
 
     @Test
@@ -55,30 +94,14 @@ class SubtitleExportTest {
         val video = File(dir, "a.mp4").apply { writeText("x") }
         SubtitleExport.writeAsrBeside(video.absolutePath, sample)
 
-        val text = File(dir, "a.srt").readText()
+        val text = File(dir, "a-ASR.srt").readText()
         // 序号 + 逗号毫秒时间轴 + 空行分隔，缺一个别的播放器都可能读不了
         assertTrue(text.startsWith("1\n00:00:00,000 --> 00:00:01,000\nhello\n\n2\n"))
     }
 
     // ==================================================================
-    // ② 退让：同名被占 ⇒ 写 `<基名>-ASR.srt`，**绝不覆盖**
+    // ② 重复生成 / 内容变更（`-ASR` 是 ASR 的专属位置）
     // ==================================================================
-
-    @Test
-    fun `ASR导出_旁边已有抓的字幕_退让成减ASR且不动原文件`() {
-        val dir = tmp.newFolder("media")
-        val video = File(dir, "ep01.mp4").apply { writeText("x") }
-        // 抓来的字幕（内容是双语，用户自己下的 / B站抓的，动了就找不回来）
-        val grabbed = File(dir, "ep01.srt").apply { writeText("1\n00:00:00,000 --> 00:00:01,000\n抓来的双语") }
-
-        val r = SubtitleExport.writeAsrBeside(video.absolutePath, sample)
-
-        assertTrue(r.ok)
-        val out = File(dir, "ep01-ASR.srt")
-        assertTrue("应退让成 -ASR", out.isFile)
-        // 🔴 最关键的一条：原来那份**一个字节都不能变**
-        assertEquals("1\n00:00:00,000 --> 00:00:01,000\n抓来的双语", grabbed.readText())
-    }
 
     @Test
     fun `ASR导出_反复生成内容一样_不重复写且报已存在`() {
@@ -87,7 +110,7 @@ class SubtitleExportTest {
 
         val first = SubtitleExport.writeAsrBeside(video.absolutePath, sample)
         assertTrue(first.ok)
-        val out = File(dir, "ep01.srt")
+        val out = File(dir, "ep01-ASR.srt")
         val stamp = out.lastModified()
 
         // 再生成一次，内容相同 ⇒ 命中早退分支，不该重写
@@ -98,53 +121,43 @@ class SubtitleExportTest {
     }
 
     @Test
-    fun `ASR导出_退让名已存在且内容相同_也早退不重复写`() {
+    fun `ASR导出_重新识别出不同内容_覆盖自己那份旧结果`() {
+        // 和上面"内容一样不重写"互补：这是 ASR 的专属位置，内容变了就该更新。
+        // ⚠️ 覆盖的是**自己上次的结果**，不涉及任何用户文件。
         val dir = tmp.newFolder("media")
         val video = File(dir, "ep01.mp4").apply { writeText("x") }
-        File(dir, "ep01.srt").writeText("1\n00:00:00,000 --> 00:00:01,000\n抓来的")
-
-        // 第一次：退让写 -ASR
-        val first = SubtitleExport.writeAsrBeside(video.absolutePath, sample)
-        assertTrue(first.ok)
-        val out = File(dir, "ep01-ASR.srt")
-        val stamp = out.lastModified()
-
-        // 第二次：同名还占着、退让名已存在且内容相同 ⇒ 早退
-        val second = SubtitleExport.writeAsrBeside(video.absolutePath, sample)
-        assertTrue(second.ok)
-        assertEquals(stamp, out.lastModified())
-        assertEquals("ep01-ASR.srt", second.file?.name)
-    }
-
-    @Test
-    fun `ASR导出_两个名字都被占且内容都不同_不覆盖并报错`() {
-        val dir = tmp.newFolder("media")
-        val video = File(dir, "ep01.mp4").apply { writeText("x") }
-        File(dir, "ep01.srt").writeText("抓的")
-        val asr = File(dir, "ep01-ASR.srt").apply { writeText("上次生成的别的内容") }
+        File(dir, "ep01-ASR.srt").writeText("上一次识别出来的旧内容")
 
         val r = SubtitleExport.writeAsrBeside(video.absolutePath, sample)
 
-        assertFalse("两个名字都占着且内容不同 ⇒ 必须失败而不是覆盖", r.ok)
-        assertEquals("上次生成的别的内容", asr.readText())
-        assertTrue(r.message.contains("不覆盖"))
+        assertTrue(r.ok)
+        val out = File(dir, "ep01-ASR.srt")
+        assertTrue("应该更新成新内容", out.readText().contains("hello"))
+        assertFalse("旧内容应该被换掉", out.readText().contains("上一次识别出来的旧内容"))
     }
 
     // ==================================================================
-    // ③ 两个入口互不串味（退让名不同）
+    // ③ isAsrExport —— 打开视频时"认回 ASR 来源"的唯一锚点
     // ==================================================================
 
     @Test
-    fun `手动导出_退让名是减识别_不是减ASR`() {
-        val dir = tmp.newFolder("media")
-        val video = File(dir, "ep01.mp4").apply { writeText("x") }
-        File(dir, "ep01.srt").writeText("抓的")
+    fun `isAsrExport_认出自己落的减ASR文件`() {
+        assertTrue(SubtitleExport.isAsrExport("ep01-ASR.srt"))
+        assertTrue(SubtitleExport.isAsrExport("ep01-ASR.ass"))
+        assertTrue("大小写不敏感", SubtitleExport.isAsrExport("ep01-asr.srt"))
+    }
 
-        val r = SubtitleExport.writeBeside(video.absolutePath, sample)
+    @Test
+    fun `isAsrExport_不误认抓来的和用户下的`() {
+        assertFalse("普通字幕，不带后缀", SubtitleExport.isAsrExport("ep01.srt"))
+        assertFalse("名字里含 ASR 字样但不是我们的后缀，不能误判", SubtitleExport.isAsrExport("Friends.S01E04.ASRip.srt"))
+        assertFalse(SubtitleExport.isAsrExport("中上英下ASS.srt"))
+    }
 
-        assertTrue(r.ok)
-        assertEquals("ep01-识别.srt", r.file?.name)
-        assertFalse("手动导出不该写出 -ASR", File(dir, "ep01-ASR.srt").exists())
+    @Test
+    fun `isAsrExport_无扩展名也不崩`() {
+        assertFalse(SubtitleExport.isAsrExport("noext"))
+        assertTrue(SubtitleExport.isAsrExport("noext-ASR"))
     }
 
     // ==================================================================
@@ -159,7 +172,7 @@ class SubtitleExportTest {
         val r = SubtitleExport.writeAsrBeside(video.absolutePath, emptyList())
 
         assertFalse(r.ok)
-        assertFalse(File(dir, "a.srt").exists())
+        assertFalse(File(dir, "a-ASR.srt").exists())
     }
 
     @Test
@@ -170,7 +183,7 @@ class SubtitleExportTest {
         val r = SubtitleExport.writeAsrBeside(video.absolutePath, listOf(s(0, 1000, "   ")))
 
         assertFalse(r.ok)
-        assertFalse(File(dir, "a.srt").exists())
+        assertFalse(File(dir, "a-ASR.srt").exists())
     }
 
     @Test
@@ -188,15 +201,15 @@ class SubtitleExportTest {
     }
 
     @Test
-    fun `导出_视频名没有扩展名_也按基名写`() {
+    fun `导出_视频名没有扩展名_也按基名拼后缀`() {
         val dir = tmp.newFolder("media")
         val video = File(dir, "noext").apply { writeText("x") }
 
         val r = SubtitleExport.writeAsrBeside(video.absolutePath, sample)
 
         assertTrue(r.ok)
-        // substringBeforeLast('.') 在无点时返回原串 ⇒ 得到 `noext.srt`
-        assertTrue(File(dir, "noext.srt").isFile)
+        // substringBeforeLast('.') 在无点时返回原串 ⇒ 得到 `noext-ASR.srt`
+        assertTrue(File(dir, "noext-ASR.srt").isFile)
     }
 
     // ==================================================================

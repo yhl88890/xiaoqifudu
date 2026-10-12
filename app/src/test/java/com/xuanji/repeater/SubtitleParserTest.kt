@@ -393,7 +393,7 @@ class SubtitleParserTest {
     //   结论：`NOISE` 里加 `asr/识别/生成` 对这两个命名是**冗余保险**（不是必需修复）——
     //   我拿变异验证砸过 `asr` 那一行，用例**仍然是绿的**，证明它没被真正测到。
     //   之所以保留：① 万一将来有人收紧第 3 级（比如要求互含也唯一），它就是唯一防线；
-    //   ② `SubtitleExport.writeBesideImpl` 的早退分支靠 `NS` 比对，同规则不打架。
+    //   ② 用户文件夹里可能还躺着旧版手动导出的 `-识别.srt`（功能 v153 已删、文件还在）。
     //   ⚠️ 所以**别把这些用例当成"NOISE 的测试"** —— 它们测的是「退让名能被认出来」这个
     //       用户可见行为。真要测 NOISE 本身，得让两边**互不包含**，那是另一回事。
     //   ⚠️ 每条都故意放一份**干扰字幕**，否则会走到最后一级「目录唯一 ⇒ 只能是它」，
@@ -420,7 +420,8 @@ class SubtitleParserTest {
 
     @Test
     fun `匹配_点分与识别后缀的退让名_都能配上`() {
-        // 顺带钉住另外两种写法：点分隔 `movie.ASR.srt`、手动导出的 `movie-识别.srt`。
+        // 顺带钉住另外两种写法：点分隔 `movie.ASR.srt`、旧版手动导出的 `movie-识别.srt`
+        //（导出按钮 v153 已删，但老文件可能还躺在用户文件夹里 ⇒ 仍要认得出来）。
         assertEquals(
             "movie.ASR.srt",
             SubtitleParser.pickBest("movie.mp4", listOf(File("movie.ASR.srt"), File("other.srt")))?.name,

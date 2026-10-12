@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 35
         // bump 版本只改这一个数即可（versionName 由它算出来）
-        val code = 153
+        val code = 154
         versionCode = code
         // 🔴 版本名**跟着 versionCode 走**（0919 阿亮要求）：
         //    他手机上「应用信息 → 版本」显示的就是这一行。以前这里写死 "1.2"

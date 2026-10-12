@@ -100,6 +100,16 @@ internal object EmbeddedSubtitle {
     private const val CACHE_DIR = "embedded_sub"
 
     /**
+     * 🔴【1012】内封轨缓存**总量上限**（份）。
+     *
+     * 缓存是"一个视频一份、同一视频只留最新一份"（见 [writeCache]），所以这个数 = **最多记住多少个视频**。
+     * 为什么必须封顶：不加限制会**随看片量一直涨**（真机上曾堆到 18+ 个文件，且**全代码无删除逻辑**）。
+     * ⚠️ 删缓存**没有副作用**：最坏情况是那个视频下次打开要重扒一次（几秒），
+     *   字幕本身还在片源里，不会丢数据。
+     */
+    internal const val MAX_CACHE_FILES = 30
+
+    /**
      * 单轨最多读多少条样本（保护，不是功能）。
      * 一集 45 分钟 ≈ 800 条；两万条已经远超任何正常片源，真到这一步说明读错轨了。
      */
@@ -800,9 +810,28 @@ internal object EmbeddedSubtitle {
             val dir = cacheDir(context).apply { mkdirs() }
             // 一次只留一份（用户换过轨 ⇒ 旧的那份删掉，别攒垃圾）
             cachedFile(context, videoPath)?.delete()
-            File(dir, "${hashOf(videoPath)}__${sanitize(label)}.srt")
-                .writeText(toSrt(list), Charsets.UTF_8)
+            val out = File(dir, "${hashOf(videoPath)}__${sanitize(label)}.srt")
+            out.writeText(toSrt(list), Charsets.UTF_8)
+            // 🔴【1012】写完顺手修剪总量 —— 上面只保证"同一视频不攒"，跨视频仍会一直涨。
+            trimCache(dir, keep = out)
         }
+    }
+
+    /**
+     * 缓存总量封顶：超过 [MAX_CACHE_FILES] 就按**修改时间**删最旧的（[keep] 是刚写完的那份，必留）。
+     *
+     * ⚠️ 只在"写完新缓存"这一个时机修剪，不做定期任务 —— 修剪本身要列目录，
+     *   放在启动路径上会白等；放在写缓存后零成本（本来就在动这个目录）。
+     * ⚠️ 任何一步失败都静默吞掉：**缓存清理失败绝不能影响播放/扒轨主流程**。
+     */
+    internal fun trimCache(dir: File, keep: File) {
+        val all = dir.listFiles { f: File -> f.isFile } ?: return
+        if (all.size <= MAX_CACHE_FILES) return
+        all.asSequence()
+            .filter { it != keep }
+            .sortedByDescending { it.lastModified() }
+            .drop(MAX_CACHE_FILES - 1)          // keep 占掉一个名额
+            .forEach { runCatching { it.delete() } }
     }
 
     private fun toSrt(list: List<Sentence>): String {

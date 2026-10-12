@@ -537,13 +537,12 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     val REWIND_STEP_MS = 250L  // 快退：每次回拖的时长
     val REWIND_TICK_MS = 80L   // 快退：回拖间隔（约 3 倍速回退）
 
-    // ===== 【1008】字幕入口：手动选一份 / 把当前字幕导成 SRT =====
-    // 阿亮的场景："我下了《老友记》一集的视频，又下了它的字幕，放一起、或者不放在一起，
-    // 反正都能在咱们软件上点播。" —— 自动匹配（[SubtitleParser]）覆盖"放一起且名字对得上"，
-    // 剩下"分开放 / 名字对不上"就靠这里手动指定。
-    // 选中后**复制进 App 私有目录并记住**（见 [ManualSubtitle]）：原文件不动、不改名、不搬走。
-    // ⚠️ 位置要求：必须放在上面那些 `by remember` 状态声明**之后** —— 下面这个局部函数要写
-    //    `expandedVideoIndex`，而局部函数捕获的局部属性只在其声明点之后可见（编译期就报 Unresolved）。
+    // ===== 字幕菜单开关（v153 起菜单只剩「内封字幕」+「下方字幕」）=====
+    // 🔴【1012】原来这里是"手动选一份字幕"的入口（`pickSubtitleFile` launcher + `applyPickedSubtitle`），
+    //   已随「选字幕…」菜单项一起**整条删除**（阿亮："我感觉基本上不用选"）——
+    //   字幕要么是抓的、要么是 ASR 生成的，都在视频旁边，自动匹配（[SubtitleParser]）稳定兜得住。
+    //   ⚠️ 连带 `ManualSubtitle`（私有目录副本 + 路径映射）整个 object 也删了 ——
+    //     光删 UI 入口不删它，老的记忆会**永久生效且无法撤销**（写入口没了，读入口优先级却最高）。
     var subMenuOpen by remember { mutableStateOf(false) }
 
     // 🔴【1010】字幕显示模式：双语 / 只看英文 / 只看中文。**默认「只看英文」**（阿亮定）。
@@ -568,44 +567,9 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     var embeddedLoadedFor by remember { mutableStateOf("") }
     var embeddedBusy by remember { mutableStateOf(false) }
 
-    /**
-     * 选中一份字幕后立刻用上。
-     * ⚠️ 纪律：**先重置 UI 状态、再换数据** —— 反了的话新字幕会有一帧带着旧高亮/旧展开项（等于答案泄露）。
-     */
-    fun applyPickedSubtitle(ctx: Context, uri: Uri) {
-        val path = videoPath
-        if (path.isBlank()) {
-            Toast.makeText(ctx, "先选一个视频", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val copied = ManualSubtitle.put(ctx, path, uri)
-        if (copied == null) {
-            Toast.makeText(ctx, "这份字幕读不出来（只认 SRT / ASS / SSA）", Toast.LENGTH_LONG).show()
-            return
-        }
-        val src = ManualSubtitle.displayName(ctx, path).ifBlank { copied.name }
-        val parsed = SubtitleParser.parseFile(copied)
-        if (parsed.isEmpty()) {
-            // 复制时已验过一次，这里是第二道闸：任何原因导致空，就当没选（别留个哑状态）
-            ManualSubtitle.clear(ctx, path)
-            Toast.makeText(ctx, "这份字幕里没有内容，换一份试试", Toast.LENGTH_LONG).show()
-            return
-        }
-        clearVideoSentenceRepeat()      // 换字幕 = 换整套时间轴，复读任务和高亮钉子都要撤
-        expandedVideoIndex = -1
-        videoSentenceIndexGlobal = 0
-        currentPos = parsed.first().startMs
-        // 【1010】手动选的现成字幕 ⇒ 要跟档位/行序（不是我们生成的）
-        loadReadySubtitles(parsed, src)
-        videoSeek(parsed.first().startMs)
-        SubtitleLibrary.saveVideo(ctx, videoName, parsed, path)
-        saveVideoPrefs(ctx)
-        Toast.makeText(ctx, "已用这份字幕：$src", Toast.LENGTH_LONG).show()
-    }
-
-    val pickSubtitleFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) applyPickedSubtitle(context, uri)
-    }
+    // 🔴【1012】原 `applyPickedSubtitle()` + `pickSubtitleFile` launcher（手动选一份字幕用）
+    //   **已删除** —— 随「选字幕…」菜单项一起走的，连同 `ManualSubtitle` 整个 object。
+    //   ⚠️ 别再"顺手加回来"：要加先问阿亮（他的判断是"基本上不用选"）。
 
     // 🔴【1011 阿亮】原 `exportSubtitleNow()`（手动导出字幕到视频旁边）**已删除** ——
     //   唯一调用者是上面那个「导出字幕」菜单项，菜单项删了就成死码。
@@ -620,8 +584,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     val pageScope = rememberCoroutineScope()
 
     /**
-     * 【v120】切到某条**内封**字幕轨。纪律跟 [applyPickedSubtitle] 一模一样：
-     * **先重置 UI 状态、再换数据**（反了会有一帧带着旧高亮/旧展开项 = 答案泄露）。
+     * 【v120】切到某条**内封**字幕轨。
+     * 🔴 纪律：**先重置 UI 状态、再换数据**（反了会有一帧带着旧高亮/旧展开项 = 答案泄露）。
+     *   这条原来是从 `applyPickedSubtitle` 那抄的参照（那个函数 v153 已随「选字幕」一起删掉了），
+     *   **规矩本身照旧有效** —— 只要还有"换一整套字幕"的操作，就按这个顺序来。
      * 扒不出（图片字幕 / 压缩轨 / 索引坏）就只弹一句提示，**不动**当前字幕。
      */
     /**
@@ -1565,32 +1531,26 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 //     ⇒ 两个开关各管各的：**这个管原生**（片源内封轨，竖屏全屏共用）；
                                 //       全屏控制条那个按钮管**我们自绘**那套。都开就会上下重叠 —— 阿亮拍板：
                                 //       "两个都开重叠了，那用户自己眼睛能看到，他就自己关掉嘛，再点一下而已。"
-                                //   🔴 没内封轨 ⇒ **变灰点不了**（阿亮："它如果没有原声字幕就变灰管不了"）：
-                                //     不然点了画面没反应，像坏了。
+                                //   🔴🔴【1012 改口径】**没内封轨 ⇒ 整项不显示**（v151~v153 是"灰着点不了"）。
+                                //     理由：没有内封轨是**绝大多数视频的常态** ⇒ 灰着占位会让菜单
+                                //     **上下两行永远是灰的**，用户打开菜单的第一反应是"字幕功能是不是坏了？"
+                                //     （可字幕明明正常显示着）。这是"为了统一而制造噪音"。
+                                //     阿亮 1011 原话里本就给了两个选项："要**不显示就都不显示**，要灰就都一起灰"
+                                //     —— 这里选"都不显示"，比"永远灰两行"干净得多。
+                                //   ⚠️ 有内封轨时**行为完全不变**（开关 + 下面的轨列表照旧）。
                                 val hasEmbedded = embeddedTracks.isNotEmpty()
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            if (hasEmbedded) "原生字幕" else "原生字幕（无）",
-                                            color = if (hasEmbedded) {
-                                                MaterialTheme.colorScheme.onSurface
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                                            },
-                                        )
-                                    },
-                                    enabled = hasEmbedded,
-                                    trailingIcon = {
-                                        Switch(
-                                            checked = videoNativeSubOn && hasEmbedded,
-                                            onCheckedChange = if (hasEmbedded) {
-                                                { videoNativeSubOn = it }
-                                            } else null,
-                                            enabled = hasEmbedded,
-                                        )
-                                    },
-                                    onClick = { if (hasEmbedded) videoNativeSubOn = !videoNativeSubOn },
-                                )
+                                if (hasEmbedded) {
+                                    DropdownMenuItem(
+                                        text = { Text("原生字幕") },
+                                        trailingIcon = {
+                                            Switch(
+                                                checked = videoNativeSubOn,
+                                                onCheckedChange = { videoNativeSubOn = it },
+                                            )
+                                        },
+                                        onClick = { videoNativeSubOn = !videoNativeSubOn },
+                                    )
+                                }
                                 // 🔴【1010】下方字幕档位：英中双语 / 只看英文 / 只看中文（默认只看英文）。
                                 //   只对**双语字幕**起效 —— 单语字幕任何档位都原样显示，不会变空。
                                 //   放在菜单最上面（最常用）。
@@ -1646,27 +1606,19 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 //   …**要统一逻辑啊**" ⇒ 最后裁定："那就选全都选变灰，
                                 //   能用的功能就不变灰，不能用的功能就变灰。"
                                 //   ⚠️【v151 真机返工】**不要造"简英双字/繁英双字"占位项** ——
-                                //     我第一版加了这两条灰占位，菜单总高顶破 `DropdownMenu` 的可视高度，
-                                //     最底下「导出字幕」**被裁掉了一半**（真机截图实测）。
+                                //     第一版加了这两条灰占位，菜单总高顶破 `DropdownMenu` 的可视高度，
+                                //     最底下那一项**被裁掉了一半**（真机截图实测）。
                                 //     而且那两条本来就是"某个片源里恰好有的轨名"，凭空列出来反而误导。
-                                //   ⇒ 正确做法：**只把标题灰掉**（`内封字幕（无）`）。行数不变、不顶破高度，
-                                //     也照样满足"统一变灰"这条口径。有轨时行为**完全不变**。
-                                val hasEmbedded2 = embeddedTracks.isNotEmpty()
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            if (hasEmbedded2) "内封字幕（${embeddedTracks.size} 条）" else "内封字幕（无）",
-                                            color = if (hasEmbedded2) {
-                                                MaterialTheme.colorScheme.onSurface
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                                            },
-                                        )
-                                    },
-                                    enabled = false,
-                                    onClick = {},
-                                )
-                                if (hasEmbedded2) {
+                                //   🔴【1012 改口径】**没内封轨 ⇒ 整项不显示**（和上面的「原生字幕」保持一致）。
+                                //     v151~v153 是"留着灰标题、不列子项"；现在连标题也不留 ——
+                                //     理由见上面「原生字幕」那段（没有内封轨是常态，别让菜单永远挂着灰行）。
+                                //   ⇒ 有内封轨时行为**完全不变**（标题 + 轨道列表，当前在用的打勾）。
+                                if (hasEmbedded) {
+                                    DropdownMenuItem(
+                                        text = { Text("内封字幕（${embeddedTracks.size} 条）") },
+                                        enabled = false,
+                                        onClick = {},
+                                    )
                                     val activeLabel = srtName
                                         .takeIf { it.startsWith(EmbeddedSubtitle.TAG_PREFIX) }
                                         ?.removePrefix(EmbeddedSubtitle.TAG_PREFIX)
@@ -2271,15 +2223,37 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             //   否则用户按提示点进来只会更懵。改成指向**顶栏「生成字幕」**这条真实可用的路
                             //   （跑完还会自动把字幕落到视频旁边）。
                             //   ⚠️ 纯提示文字、**不带点击** —— 不新增入口，避免和顶栏按钮职责重叠。
-                            Box(
-                                modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 10.dp),
-                                contentAlignment = Alignment.Center,
+                            // 🔴【1012 自审 B4】只指「生成字幕」还是不够：软件本来有三条路能拿到字幕
+                            //   ① 同文件夹里放一个同名 .srt（**最省事，不用花时间跑 ASR**）
+                            //   ② 片子自己带的内封轨（打开时自动扒，用户不用做任何事）③ 在线识别（「生成字幕」）
+                            //   ① 从来没在界面上说过一个字 ⇒ 用户以为"只有跑识别这一条路"，白等几分钟。
+                            //   现在补上 ①，口径**对齐阅读模式那句**（ReadingPage：可先在视频模式点「生成字幕」或导入 .srt）。
+                            //   ⚠️ 得带上「再重新打开」—— 找字幕只发生在**打开视频那一刻**（findBestSubtitle），
+                            //      当前页面不会自己发现新扔进来的文件；不说这句，用户放完没反应会以为没用。
+                            //   ⚠️ 内封轨（②）不在这里提：那是软件自己干的活，不需要用户做任何操作，说了只是噪音。
+                            Column(
+                                modifier = Modifier.fillMaxWidth().weight(1f)
+                                    .padding(top = 10.dp, start = 16.dp, end = 16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
                             ) {
                                 Text(
-                                    "这个视频还没有字幕，点上方「生成字幕」让软件听一遍",
+                                    "这个视频还没有字幕",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                    textAlign = TextAlign.Center,
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    // ⚠️ 这里的手动换行是**故意的、也是必需的**：让它自然折行会断在词中间，
+                                    //   实测第一版写「或者找一个 .srt 放到视频旁边，再重新打开」时，
+                                    //   末尾「开」字被挤到第四行、孤零零一个字（真机截图看到的）。
+                                    //   ⇒ 每行都压在约 15 个全角字以内，宽度绝对够，不会再折。
+                                    "点上方「生成字幕」让软件听一遍\n" +
+                                        "或者放个 .srt 到视频旁边再重开",
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                                    modifier = Modifier.padding(12.dp),
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                                    textAlign = TextAlign.Center,
                                 )
                             }
                         }
