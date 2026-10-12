@@ -330,6 +330,12 @@ internal var videoSpeed by mutableStateOf(1f)
 /** 【0903 黑屏修复】视频播放/加载错误信息：MediaPlayer onError 时设上，视频窗口显示醒目的错误卡片（替代静默黑屏）。
  *  null = 正常；非 null = 渲染错误卡片（带重试/换视频按钮）。 */
 internal var videoErrorMessage by mutableStateOf<String?>(null)
+
+// 【1012 修】错误浮层的「重试」原本这么写：`videoUri = null` 紧接 `videoUri = cur`
+//   —— **同一次快照里改回原值**，Compose 最终看到的 key 没变 ⇒ `LaunchedEffect(videoUri)` 根本不会重跑
+//   ⇒ 那个按钮就是个摆设（阿亮实报"重试压根儿没用"，属实）。
+//   ⇒ 加一个**单调递增的 tick** 当第二把 key，点一次才真的重建一次播放器。
+internal var videoRetryTick by mutableStateOf(0)
 // 当前高亮的句子。放在文件级而不是 VideoPage 的 remember：
 // 切到别的模式再切回来，VideoPage 会被销毁重建，remember 状态会归零，
 // 高亮就会跳回第 0 句（而实际播放位置在第 30 句），看着像「跳句失灵」。

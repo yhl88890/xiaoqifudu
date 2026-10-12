@@ -752,7 +752,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             val now = System.currentTimeMillis()
             if (now - lastSave > 2000) { lastSave = now; saveVideoPrefs(context) }
             // 【媒体卡片进度同步】每 1s 把最新位置推给 MediaSession/通知，使下拉卡片进度条跟实际播放对齐
-            if (now - lastPosNotify > 1000) { lastPosNotify = now; PlayerService.instance?.notifyVideoStateChanged() }
+            if (now - lastPosNotify > 1000) {
+                lastPosNotify = now
+                PlayerService.instance?.notifyVideoStateChanged()
+            }
             // seek 后 2000ms 内不打扰 videoSentenceIndex，避免刚跳过去又被轮询拉回旧句。
             // seekTo 是异步的，连续点下一句时 mp.currentPosition 可能仍停留在旧句，2000ms
             // 足够本地视频完成 seek；之后轮询再按真实位置修正。
@@ -810,7 +813,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     // 装载 / 换片：自建 ExoPlayer + SurfaceView（单播放器·彻底修）。
     // 重要：续播严格尊重 videoPlaying 状态——暂停后返回/切回绝不自动开始；
     // 只有打开新视频(openVideoFromLibrary 会把 videoPlaying 置 true) 或本来就在播放才续播。
-    LaunchedEffect(videoUri) {
+    LaunchedEffect(videoUri, videoRetryTick) {
         val uri = videoUri ?: return@LaunchedEffect
         videoPrepared = false
         // 冷启/换片才清权威续播位；若是「回前台后台接管」(videoHandedToBg=true，Activity 重建常见) 则保留，
@@ -1087,23 +1090,32 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         "找不到视频文件（可能已被删除或移动）"
                     PlaybackException.ERROR_CODE_IO_NO_PERMISSION ->
                         "无法读取视频文件（权限不足）"
+                    // 【1012 阿亮定】网络类别混进"权限不足/已删除"里 —— 那是两码事，要分开说
                     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
                     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
-                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+                        "网络读不到这个视频"
                     PlaybackException.ERROR_CODE_IO_UNSPECIFIED ->
-                        "无法读取视频文件（权限不足或文件已被删除）"
+                        "读不到这个视频文件"
+                    // 【1012 阿亮定】文件损坏 ≠ 格式不支持，分开说（原来两者混成一句"损坏或不被支持"）
                     PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
                     PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ->
-                        "视频格式损坏或不被支持"
+                        "这个视频文件损坏了，播不了"
+                    // 【1012 阿亮定】真·格式/编码不支持 ⇒ **直接说播不了**。
+                    //   原来那句"试试转码成标准 mp4"**删掉** —— 转码是兜底手段，
+                    //   不该在报错里指挥用户去干这个（阿亮反复强调：兜底最后考虑）。
                     PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
                     PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
                     PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
                     PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
                     PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ->
-                        "视频编码不支持（试试转码成标准 mp4）"
+                        "这个视频的格式不支持，播不了"
+                    // 【1012 阿亮定】超时属于"软件的毛病"，**不许再说"请重试"** —— 那句是误导
+                    //   （重建播放器也救不回来）。但按钮本身已修好（见 videoRetryTick），值得点一下。
                     PlaybackException.ERROR_CODE_TIMEOUT ->
-                        "读取超时，请重试"
-                    else -> "播放失败（${e.errorCodeName}）"
+                        "播放卡住了（软件的毛病，不是你的文件问题）"
+                    // 内部错误码只该进日志，不给用户看 —— 他看不懂，也不会因此多做什么
+                    else -> "播放失败"
                 }
                 Log.w("XJ_VID", "ERROR code=${e.errorCode}(${e.errorCodeName}) hint=$hint cause=${e.cause}")
                 videoErrorMessage = hint
@@ -1446,10 +1458,18 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                         errorText = videoErrorMessage,
                         onRetry = {
                             videoErrorMessage = null
-                            // 重新触发 LaunchedEffect(videoUri)：先清再设
-                            val cur = videoUri
-                            videoUri = null
-                            videoUri = cur
+                            // 🔴【1012 修·这个按钮以前是摆设】两个原因，缺一不可：
+                            //   ① key 没变：原写法 `videoUri = null` 紧接 `= cur`（同一快照里改回原值）
+                            //      ⇒ Compose 认为 key 没变 ⇒ `LaunchedEffect(videoUri)` **根本不重跑**。
+                            //      改用 `videoRetryTick` 递增当第二把 key。
+                            //   ② 光重跑还不够：`loadVideo` 里有一条「同一个播放器还活着就**直接复用**」
+                            //      的快速路径 ⇒ 会把那个卡死的播放器原样拿回来。
+                            //      ⇒ 必须**先把旧播放器放掉**（照 218-220 行那套：摘画面 → release → 置空），
+                            //        `loadVideo` 才会走真·重建。
+                            runCatching { videoMpRef[0]?.setVideoSurface(null) }
+                            runCatching { videoMpRef[0]?.release() }
+                            videoMpRef[0] = null
+                            videoRetryTick++
                         },
                         onPickVideo = {
                             // 跳到文件夹页选视频（视频选集模式：直接钻到视频所在文件夹）
