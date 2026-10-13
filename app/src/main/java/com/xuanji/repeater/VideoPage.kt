@@ -377,8 +377,9 @@ private fun formatDuration(ms: Long): String {
 }
 
 /** 【v157】手势提示用的时间格式：**带小时**。
- *  ⚠️ 别复用 [formatDuration] —— 那个只出「分:秒」，遇到 2 小时的合集会显示成 "123:45"。 */
-private fun formatSeekTime(ms: Long): String {
+ *  ⚠️ 别复用 [formatDuration] —— 那个只出「分:秒」，遇到 2 小时的合集会显示成 "123:45"。
+ *  🔴【v159】改成 `internal`：`VideoUi.kt` 的进度条两头也要用它显示时间。 */
+internal fun formatSeekTime(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0)
     val h = s / 3600
     val m = (s % 3600) / 60
@@ -386,13 +387,16 @@ private fun formatSeekTime(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
 }
 
-/** 【v157】横向拖动时的提示文案：`15秒   01:23 / 45:30`。
- *  🔴 **方向不在文案里**了（原来开头带"→ / ←"）—— 方向改由胶囊**两侧的箭头图标**表达，
- *  文字只负责报数。所以别再从文本里认方向，认 `gestureSeekBack`。 */
+/** 【v157】横向拖动时的提示文案：`+1:08   6:55 / 22:46`。
+ *  🔴 **方向不在文案里**（原来开头带"→ / ←"）—— 方向改由胶囊**两侧的箭头图标**表达，
+ *  文字只负责报数。所以别再从文本里认方向，认 `gestureSeekBack`。
+ *  🔴【v159 阿亮】原来写的是中文「1分8秒」—— 他嫌"太突兀"，要求去掉中文。
+ *  现在用**带符号的时分秒**（`+1:08` / `-1:15`）：跟右边「6:55 / 22:46」同一个格式，
+ *  一行里不打架；`+`/`-` 再把增/减说清楚（箭头图标管方向，这个是管"跳了多少"）。 */
 private fun formatSeekHint(targetMs: Long, durMs: Long, deltaMs: Long): String {
-    val sec = kotlin.math.abs(deltaMs) / 1000
-    val step = if (sec >= 60) "${sec / 60}分${sec % 60}秒" else "${sec}秒"
-    return "$step   ${formatSeekTime(targetMs)} / ${formatSeekTime(durMs)}"
+    val sign = if (deltaMs >= 0) "+" else "-"
+    val step = formatSeekTime(kotlin.math.abs(deltaMs))
+    return "$sign$step   ${formatSeekTime(targetMs)} / ${formatSeekTime(durMs)}"
 }
 
 internal fun videoJumpSentence(step: Int) {

@@ -6,20 +6,31 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 // ===== 视频模式的独立 UI 组件（从 MainActivity 纯搬迁，逻辑零改动） =====
 
@@ -44,41 +55,75 @@ internal fun VideoProgressSlider(
     // ⚠️ 下限别再往下压：`thumb` 直径 12dp，Box 高必须 **> 12dp**，否则小圆点顶出上下边；
     //   16dp 时上下各还留 2dp 余量（再降到 14 就只剩 1dp，视觉上圆点会"戳"到边上）。
     //   触摸区从 18 变 16dp，点轨道/拖圆点仍够用（真机验过）。
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(16.dp)
-            .padding(horizontal = 8.dp)
-            // 点击轨道 → 跳转
-            .pointerInput(totalMs) {
-                detectTapGestures { offset ->
-                    onSeek((offset.x / size.width * totalMs).toLong().coerceIn(0L, totalMs))
-                }
-            }
-            // 拖动 thumb → 连续跳转
-            .pointerInput(totalMs) {
-                detectDragGestures(
-                    onDragStart = { offset ->
+    // 【v159 阿亮】"整个视频界面以前一个时间也没有" ⇒ 补上时间。
+    //
+    // 🔴🔴 **时间必须"浮"在轨道上方，绝不能占布局高度**。这里踩过两次，别再犯：
+    //   ① 放轨道**下方、另起一行** ⇒ 撑高控制条，把之前好几轮才压下去的
+    //      「进度条 → 功能键」间距又还回去了（阿亮原话："我们刚花了好多轮改的"）；
+    //   ② 放轨道**同一行、左右两头** ⇒ 高度确实没变，但那一条正对着**自绘字幕条**，
+    //      时间和字幕挤成一排（截图里是 `5:46 推她下楼… 22:46`）。
+    //   ⇒ 正解：`Modifier.offset(y = -Xdp)` 把时间画到轨道**上方**（落在画面上）。
+    //     **offset 不参与父容器测量** ⇒ 整个组件高度一个字都不变，
+    //     下面那几个功能键原位不动 —— 这是本页的硬约束，见 `VideoProgressSlider` 上方
+    //     那段"再缩一点点"的注释。
+    //   浮在画面上会碰上浅色背景 ⇒ 文字加一层淡阴影保可读性。
+    val timeStyle = MaterialTheme.typography.labelSmall.copy(
+        // 【v159】阿亮："字再小一点，不用太显眼，我只是说有个时间就行"
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Medium,
+        shadow = Shadow(color = Color.Black.copy(alpha = 0.75f), blurRadius = 3f),
+    )
+    val timeColor = if (overlay) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.primary
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        // 轨道（高 16dp —— 这是「轨道 → 功能键」间距的基准，🔴 别动）
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(16.dp)
+                .padding(horizontal = 8.dp)
+                // 点击轨道 → 跳转
+                .pointerInput(totalMs) {
+                    detectTapGestures { offset ->
                         onSeek((offset.x / size.width * totalMs).toLong().coerceIn(0L, totalMs))
-                    },
-                    onDrag = { change, _ ->
-                        onSeek((change.position.x / size.width * totalMs).toLong().coerceIn(0L, totalMs))
-                        change.consume()
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val centerY = size.height / 2f
-            val w = size.width
-            val tx = fraction * w
-            // 轨道与 thumb 都严格画在 centerY → 小圆点处于进度条正中（不再偏上）
-            drawLine(color = inert, start = Offset(0f, centerY), end = Offset(w, centerY), strokeWidth = trackH.toPx(), cap = StrokeCap.Round)
-            if (tx > 0f) {
-                drawLine(color = Color.White, start = Offset(0f, centerY), end = Offset(tx, centerY), strokeWidth = trackH.toPx(), cap = StrokeCap.Round)
+                    }
+                }
+                // 拖动 thumb → 连续跳转
+                .pointerInput(totalMs) {
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            onSeek((offset.x / size.width * totalMs).toLong().coerceIn(0L, totalMs))
+                        },
+                        onDrag = { change, _ ->
+                            onSeek((change.position.x / size.width * totalMs).toLong().coerceIn(0L, totalMs))
+                            change.consume()
+                        },
+                    )
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val centerY = size.height / 2f
+                val w = size.width
+                val tx = fraction * w
+                // 轨道与 thumb 都严格画在 centerY → 小圆点处于进度条正中（不再偏上）
+                drawLine(color = inert, start = Offset(0f, centerY), end = Offset(w, centerY), strokeWidth = trackH.toPx(), cap = StrokeCap.Round)
+                if (tx > 0f) {
+                    drawLine(color = Color.White, start = Offset(0f, centerY), end = Offset(tx, centerY), strokeWidth = trackH.toPx(), cap = StrokeCap.Round)
+                }
+                drawCircle(color = Color.White, radius = thumbR.toPx(), center = Offset(tx, centerY))
             }
-            drawCircle(color = Color.White, radius = thumbR.toPx(), center = Offset(tx, centerY))
+        }
+        // 时间：offset 上浮到轨道上方（不占高度 ⇒ 不顶走任何东西）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp)
+                .offset(y = (-14).dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(text = formatSeekTime(currentMs), style = timeStyle, color = timeColor)
+            Text(text = formatSeekTime(totalMs), style = timeStyle, color = timeColor)
         }
     }
 }
