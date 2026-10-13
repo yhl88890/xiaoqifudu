@@ -62,6 +62,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -103,11 +104,14 @@ fun SettingsPage(
     themeIndex: Int,
     darkMode: Boolean,
     floatOn: Boolean,
+    /** 【1014】悬浮窗字号档位（0=小 / 1=中 / 2=大），索引对应 `FloatPrefs.SIZE_SP` */
+    floatSizeIdx: Int,
     resumeOn: Boolean,
     layoutEdit: Boolean,
     onThemeIndexChange: (Int) -> Unit,
     onDarkModeChange: (Boolean) -> Unit,
     onFloatChange: (Boolean) -> Unit,
+    onFloatSizeChange: (Int) -> Unit,
     onResumeChange: (Boolean) -> Unit,
     onLayoutEditChange: (Boolean) -> Unit,
     onBack: () -> Unit,
@@ -184,9 +188,12 @@ fun SettingsPage(
                 //    🔴 病根：v49 为了缩短，把原句「别的 App 看**上**歌词、台词」的「上」删了，
                 //    「别的 App」于是从**地点状语**变成**主语** ⇒ 读成"别的 App 在看歌词"。
                 //    ⚠️ 以后写这类"地点 + 看某物"的短说明，**别省掉「上 / 里」**。
+                // 【1014 阿亮】note「（仅显示字幕）」**删掉了** —— 他原话"那几个字也有点多余"，
+                //    这块空隙让给字号三档。上面 0919 那段来龙去脉留作记录（"别省掉「上 / 里」"
+                //    的教训依然成立，只是这句文案本身不再需要）。
                 SettingsSwitch(
                     "悬浮窗", floatOn, onFloatChange,
-                    note = "仅显示字幕",
+                    trailing = { FloatSizePicker(floatSizeIdx, onFloatSizeChange) },
                 )
             }
 
@@ -1305,6 +1312,10 @@ private fun SettingsSwitch(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     note: String? = null,
+    /** 【1014】标签与开关之间的**自定义控件**（目前只有「悬浮窗」那一行用来放字号三档）。
+     *  给了它就别再给 `note` —— 两者抢的是同一块空隙，`trailing` 优先。
+     *  ⚠️ 默认 null ⇒ 其他十几处调用点**一行都不用改**。 */
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -1316,7 +1327,13 @@ private fun SettingsSwitch(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (!note.isNullOrBlank()) {
+        val tr = trailing   // 提成局部 val：`@Composable` 函数参数直接 smart cast 会报错
+        if (tr != null) {
+            // 自定义控件**贴着开关**放：先把前面撑开，尾巴留 10dp、别跟 Switch 贴死
+            Spacer(modifier = Modifier.weight(1f))
+            tr()
+            Spacer(modifier = Modifier.width(10.dp))
+        } else if (!note.isNullOrBlank()) {
             // 【0919 阿亮】说明不另占一行 ⇒ 塞进「标签」和「开关」中间的空隙，两边加全角括号。
             // 🔴 字号 `labelSmall`(11sp)，**比标签小**。这是实测逼出来的，别往上调：
             //    同字号(14sp)时三条全被截成「…」；降到 12sp 还是截。11sp 才够。
@@ -1343,6 +1360,44 @@ private fun SettingsSwitch(
             Spacer(modifier = Modifier.weight(1f))
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/**
+ * 【1014】悬浮窗字号三档选择器：**小 / 中 / 大**。
+ *
+ * 塞在设置行「标签」和「开关」中间的空隙里（位置由 `SettingsSwitch.trailing` 提供），
+ * 所以做得**尽量紧凑** —— 这一行要同时容下「悬浮窗」+ 选择器 + 开关，
+ * 而且必须在 **360dp 窄屏 @1.5 倍字号**下也放得下（v48 的血泪，见上面 `SettingsSwitch` 的注释）。
+ *
+ * 🔴 宽度是压着上面那个条件估的。**要改字（比如「超小 / 超大」）必须重跑真机宽度截图验收。**
+ */
+@Composable
+private fun FloatSizePicker(index: Int, onPick: (Int) -> Unit) {
+    val labels = listOf("小", "中", "大")
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        labels.forEachIndexed { i, label ->
+            val selected = i == index
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
+                    )
+                    .clickable { onPick(i) }
+                    .padding(horizontal = 9.dp, vertical = 3.dp),
+            )
+        }
     }
 }
 

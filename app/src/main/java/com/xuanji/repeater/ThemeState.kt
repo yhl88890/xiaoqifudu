@@ -84,10 +84,20 @@ private fun blend(base: Color, overlay: Color, ratio: Float): Color {
     return Color(r, g, b, 1f)
 }
 
-/** 悬浮窗开关偏好持久化 */
+/** 悬浮窗开关 / 字号偏好持久化 */
 object FloatPrefs {
     private const val NAME = "float_prefs"
     private const val KEY_ON = "float_on"
+    private const val KEY_SIZE = "float_size_idx"
+
+    /** 【1014】悬浮窗字号三档（sp），索引即档位。
+     *  🔴 **`SIZE_DEFAULT` 必须指向 15sp** —— 那是加这个功能之前源码里写死的值，
+     *    默认档一旦变了，等于悄悄把所有老用户的悬浮窗字号改掉。
+     *  🔴 单位是 **sp**（`FloatLyricsService` 直接喂给 `TextView.setTextSize`），
+     *    所以它会**跟随系统字体缩放**，且**不受 App 那个 1.5 倍上限约束**
+     *    （悬浮窗是独立 Window，不走 Compose 那棵树）。 */
+    val SIZE_SP = listOf(13f, 15f, 18f)
+    const val SIZE_DEFAULT = 1
 
     fun load(context: Context): Boolean =
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE).getBoolean(KEY_ON, false)
@@ -96,6 +106,20 @@ object FloatPrefs {
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_ON, on).apply()
     }
+
+    /** 字号档位。越界（历史脏数据 / 以后增删档位）一律回落到默认档，别抛也别硬取。 */
+    fun loadSizeIndex(context: Context): Int =
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_SIZE, SIZE_DEFAULT)
+            .coerceIn(0, SIZE_SP.size - 1)
+
+    fun saveSizeIndex(context: Context, idx: Int) {
+        context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+            .edit().putInt(KEY_SIZE, idx.coerceIn(0, SIZE_SP.size - 1)).apply()
+    }
+
+    /** 悬浮窗当前字号（sp）。 */
+    fun sizeSp(context: Context): Float = SIZE_SP[loadSizeIndex(context)]
 }
 object ThemePrefs {
     private const val NAME = "theme_prefs"

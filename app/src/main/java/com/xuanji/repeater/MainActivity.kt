@@ -1572,6 +1572,9 @@ class MainActivity : ComponentActivity() {
             if (p == Page.REVIEW) showSettings = false
         }
         var floatOn by remember { mutableStateOf(FloatPrefs.load(context)) }
+        // 【1014】悬浮窗字号档位（0=小 / 1=中 / 2=大）。跟开关一样由 remember 持有，
+        // 改动立即写盘；冷启由 FloatPrefs.loadSizeIndex 读回。
+        var floatSizeIdx by remember { mutableStateOf(FloatPrefs.loadSizeIndex(context)) }
         var resumeOn by remember { mutableStateOf(PlaybackPrefs.loadResume(context)) }
         // 选集页滚动位置：提升到 Activity 层，页面切换（组合销毁/重建）后仍保留。
         // rememberSaveable 在这里有效：Activity 重建/旋转时也恢复。
@@ -1725,8 +1728,16 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(Unit) {
             combine(
                 PlaybackSession.activeKind,
-                snapshotFlow { videoSentenceIndexGlobal to sentences },
-            ) { kind, (idx, list) -> kind to list.getOrNull(idx)?.text.orEmpty() }
+                // 【1014】把 subtitleMode 一并纳入监听：换档位时"当前句"没变，但悬浮窗的文本要重算
+                snapshotFlow { Triple(videoSentenceIndexGlobal, sentences, subtitleMode) },
+            ) { kind, (idx, list, mode) ->
+                // 🔴【1014 阿亮】这里**必须过 filterByMode**。
+                //    推的原本是 `sentences[idx].text` 原文，而下方自绘字幕是按档位裁过的
+                //    （收起时 filterByMode、长按展开才是全量）⇒ 两条路不一致，
+                //    就成了阿亮看到的「下面只显示英文、悬浮窗还是双语」。
+                val raw = list.getOrNull(idx)?.text.orEmpty()
+                kind to if (raw.isBlank()) raw else filterByMode(raw, mode)
+            }
                 .collect { (kind, text) ->
                     // 只在视频是真值来源时推：音频模式别拿视频的残留文本把悬浮窗带偏
                     if (kind == MediaKind.VIDEO) PlaybackSession.setFloatText(text)
@@ -2145,6 +2156,7 @@ class MainActivity : ComponentActivity() {
                 themeIndex = themeIndex,
                 darkMode = darkMode,
                 floatOn = floatOn,
+                floatSizeIdx = floatSizeIdx,
                 resumeOn = resumeOn,
                 layoutEdit = layoutEdit,
                 // 【v89】设置页滚动位置 Activity 层持有：关掉重开不再跳顶
@@ -2156,6 +2168,12 @@ class MainActivity : ComponentActivity() {
                         floatOn = ok
                         FloatPrefs.save(context, ok)
                     }
+                },
+                // 【1014】字号三档：存盘 + 让**正在显示的那个**悬浮窗立刻换字号（没在跑就只存盘）
+                onFloatSizeChange = { idx ->
+                    floatSizeIdx = idx
+                    FloatPrefs.saveSizeIndex(context, idx)
+                    FloatLyricsService.applyFontSize(context)
                 },
                 onResumeChange = {
                     resumeOn = it

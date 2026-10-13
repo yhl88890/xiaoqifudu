@@ -30,6 +30,19 @@ import kotlinx.coroutines.launch
  */
 class FloatLyricsService : Service() {
 
+    companion object {
+        /** 【1014】当前活着的实例，只给 `applyFontSize` 用。`onCreate` 挂上、`onDestroy` 摘掉。 */
+        @Volatile
+        private var instance: FloatLyricsService? = null
+
+        /** 字号档位改了 ⇒ 让**正在显示的**悬浮窗立刻换字号。
+         *  没在跑就什么都不做（下次启动 `addFloatView` 自然会读到新档，不用额外处理）。
+         *  ⚠️ 必须主线程调（改 View 属性）；调用点是设置页点击回调，天然主线程。 */
+        fun applyFontSize(context: Context) {
+            instance?.textView?.textSize = FloatPrefs.sizeSp(context)
+        }
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var windowManager: WindowManager? = null
     private var textView: TextView? = null
@@ -39,12 +52,14 @@ class FloatLyricsService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         addFloatView()
         observeState()
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
         removeFloatView()
         scope.cancel()
         super.onDestroy()
@@ -54,7 +69,10 @@ class FloatLyricsService : Service() {
         val tv = TextView(this).apply {
             text = "小七复读机"
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 15f
+            // 【1014】字号走设置页的三档，默认 15sp（= 加这个功能之前源码里写死的值）。
+            // ⚠️ 单位是 sp ⇒ 跟随系统字体缩放，且**不受 App 那个 1.5 倍上限约束**
+            //    （悬浮窗是独立 Window，不走 Compose 那棵树）。改档位时 applyFontSize 立即生效。
+            textSize = FloatPrefs.sizeSp(this@FloatLyricsService)
             maxLines = 3
             setPadding(dp(14), dp(10), dp(14), dp(10))
             background = GradientDrawable().apply {
@@ -107,7 +125,19 @@ class FloatLyricsService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!moved) PlayerService.instance?.togglePlayPause()
+                    // 【1014 阿亮】原来这里**写死调音频服务** —— 可视频模式下视频根本不在那个服务里
+                    // （播放器活在 MainActivity、搬不进 Service），所以一点就跑去播残留的音频，
+                    // 他实测的现象就是"点悬浮窗 → 跳到音频开始播放"。
+                    // 正解：按**当前真值来源**分发；视频走 videoTogglePlay()（视频播放/暂停的唯一入口）。
+                    // ⚠️ 触摸回调在主线程 ⇒ 满足 videoTogglePlay 操作 MediaPlayer 的线程要求。
+                    if (!moved) {
+                        if (PlaybackSession.activeKind.value == MediaKind.VIDEO) {
+                            // 播放器为 null 时函数内部直接 return ⇒ App 被回收后点它只是没反应，不会炸
+                            videoTogglePlay()
+                        } else {
+                            PlayerService.instance?.togglePlayPause()
+                        }
+                    }
                     true
                 }
                 else -> false
