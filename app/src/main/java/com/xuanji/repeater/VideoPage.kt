@@ -112,6 +112,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Subtitles
@@ -384,12 +386,13 @@ private fun formatSeekTime(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
 }
 
-/** 【v157】横向拖动时的提示文案：`→ 15秒   01:23 / 45:30`（`←` 表示往回退）。 */
+/** 【v157】横向拖动时的提示文案：`15秒   01:23 / 45:30`。
+ *  🔴 **方向不在文案里**了（原来开头带"→ / ←"）—— 方向改由胶囊**两侧的箭头图标**表达，
+ *  文字只负责报数。所以别再从文本里认方向，认 `gestureSeekBack`。 */
 private fun formatSeekHint(targetMs: Long, durMs: Long, deltaMs: Long): String {
-    val arrow = if (deltaMs >= 0) "→" else "←"
     val sec = kotlin.math.abs(deltaMs) / 1000
     val step = if (sec >= 60) "${sec / 60}分${sec % 60}秒" else "${sec}秒"
-    return "$arrow $step   ${formatSeekTime(targetMs)} / ${formatSeekTime(durMs)}"
+    return "$step   ${formatSeekTime(targetMs)} / ${formatSeekTime(durMs)}"
 }
 
 internal fun videoJumpSentence(step: Int) {
@@ -549,9 +552,12 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     // 手势提示：0=不显示 1=亮度 2=音量 3=快进/快退（3 是 v157 加的）
     var gestureHint by remember { mutableStateOf(0) }
     var gestureHintValue by remember { mutableStateOf(0f) }
-    // 【v157】横向拖动时的提示文案。它是**时间型**的（"→ 15秒 01:23 / 45:30"），
+    // 【v157】横向拖动时的提示文案。它是**时间型**的（"15秒 01:23 / 45:30"），
     // 塞不进 0~1 的 gestureHintValue ⇒ 单独给一个。
     var gestureSeekText by remember { mutableStateOf("") }
+    // 【v157】往哪边滑（true = 往回退）。胶囊两侧的箭头图标照它翻向。
+    // 🔴 别再从 gestureSeekText 里认方向 —— 文案已经不带箭头了。
+    var gestureSeekBack by remember { mutableStateOf(false) }
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
     // 提示条显示 900ms 后自动收；滑动中数值一变就重置计时 ⇒ 表现为「松手后才开始计时」。
@@ -1403,6 +1409,7 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                     seekDeltaMs = (dx / size.width.toFloat() * span).toLong()
                                     val target = (seekBaseMs + seekDeltaMs).coerceIn(0L, dur)
                                     gestureSeekText = formatSeekHint(target, dur, seekDeltaMs)
+                                    gestureSeekBack = seekDeltaMs < 0
                                     gestureHintValue = (target.toFloat() / dur).coerceIn(0f, 1f)
                                     // 跟手预览：**节流到 100ms 一次**。不节流会把解码器压垮
                                     // （连续 seekTo 排队），4K 尤其明显 ⇒ 反而卡成幻灯片。
@@ -1989,9 +1996,16 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 if (gestureHint == 3) {
-                                    Text(
-                                        if (gestureSeekText.startsWith("←")) "⏪" else "⏩",
-                                        style = MaterialTheme.typography.titleMedium,
+                                    // 【v157】快进/快退：**胶囊两侧各一个箭头**，中间报数。
+                                    // 图标复用底部控制条那两颗（FastForward / FastRewind）⇒ 风格统一；
+                                    // 只调小一号 + 压暗一档，让它比正主"弱"一点、不抢中间那行字。
+                                    val seekIcon =
+                                        if (gestureSeekBack) Icons.Filled.FastRewind else Icons.Filled.FastForward
+                                    Icon(
+                                        imageVector = seekIcon,
+                                        contentDescription = null,
+                                        tint = Color.White.copy(alpha = 0.72f),
+                                        modifier = Modifier.size(18.dp),
                                     )
                                     Spacer(modifier = Modifier.width(10.dp))
                                     Text(
@@ -1999,10 +2013,23 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                         color = Color.White,
                                         style = MaterialTheme.typography.bodyMedium,
                                     )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Icon(
+                                        imageVector = seekIcon,
+                                        contentDescription = null,
+                                        tint = Color.White.copy(alpha = 0.72f),
+                                        modifier = Modifier.size(18.dp),
+                                    )
                                 } else {
-                                    Text(
-                                        if (gestureHint == 1) "🔆" else "🔊",
-                                        style = MaterialTheme.typography.titleMedium,
+                                    // 【v157】亮度和音量也换成**白色矢量图标**（原来是 🔆 / 🔊 彩色 emoji）。
+                                    // 🔴 阿亮要求"跟底部那排功能按键一个色" ⇒ 这里是 Color.White，
+                                    //    别再往这两个图标上加颜色。
+                                    Icon(
+                                        imageVector = if (gestureHint == 1) Icons.Filled.LightMode
+                                        else Icons.Filled.VolumeUp,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp),
                                     )
                                     Spacer(modifier = Modifier.width(10.dp))
                                     // 进度条：底槽 + 白色填充（fillMaxWidth 要 0~1，滑到底不能越界）
