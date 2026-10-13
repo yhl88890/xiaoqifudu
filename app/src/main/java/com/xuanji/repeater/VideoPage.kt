@@ -298,6 +298,21 @@ internal fun videoSeekBy(delta: Int) {
     videoSeek(p); currentPos = p
 }
 
+/**
+ * 【v157 · 手势快进/快退】拖动过程中的**预览 seek**。
+ *
+ * 只跳到目标附近的**最近关键帧**（`CLOSEST_SYNC`）⇒ 解码量小、出画快，
+ * 画面才跟得上手指。落点会差几秒，但拖动中本来就是给人"看个大概"的。
+ *
+ * 🔴 松手时必须由 [videoSeek] 切回 `EXACT` 精确定位 —— 那才是不许偏的地方。
+ * 🔴 **别拿它做跳句**：跳句要求精确落在句子开头（见 [videoSeek] 的注释）。
+ */
+internal fun videoSeekPreview(targetMs: Long) {
+    val mp = videoMpRef[0] ?: return
+    runCatching { mp.setSeekParameters(SeekParameters.CLOSEST_SYNC) }
+    runCatching { mp.seekTo(targetMs) }
+}
+
 /** 跳到第 idx 句并高亮（与旧 VideoView 版逻辑一致：落点异步复核，避免跳到上一句中间） */
 internal fun videoSeekToSentence(idx: Int) {
     val mp = videoMpRef[0] ?: return
@@ -357,6 +372,24 @@ internal fun checkSubtitleTimeline() {
 private fun formatDuration(ms: Long): String {
     val totalSec = (ms / 1000).coerceAtLeast(0)
     return "%d:%02d".format(totalSec / 60, totalSec % 60)
+}
+
+/** 【v157】手势提示用的时间格式：**带小时**。
+ *  ⚠️ 别复用 [formatDuration] —— 那个只出「分:秒」，遇到 2 小时的合集会显示成 "123:45"。 */
+private fun formatSeekTime(ms: Long): String {
+    val s = (ms / 1000).coerceAtLeast(0)
+    val h = s / 3600
+    val m = (s % 3600) / 60
+    val sec = s % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
+}
+
+/** 【v157】横向拖动时的提示文案：`→ 15秒   01:23 / 45:30`（`←` 表示往回退）。 */
+private fun formatSeekHint(targetMs: Long, durMs: Long, deltaMs: Long): String {
+    val arrow = if (deltaMs >= 0) "→" else "←"
+    val sec = kotlin.math.abs(deltaMs) / 1000
+    val step = if (sec >= 60) "${sec / 60}分${sec % 60}秒" else "${sec}秒"
+    return "$arrow $step   ${formatSeekTime(targetMs)} / ${formatSeekTime(durMs)}"
 }
 
 internal fun videoJumpSentence(step: Int) {
@@ -513,13 +546,18 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
         }.getOrDefault(0.5f).coerceIn(0.05f, 1f)
     }
-    // 手势提示：0=不显示 1=亮度 2=音量
+    // 手势提示：0=不显示 1=亮度 2=音量 3=快进/快退（3 是 v157 加的）
     var gestureHint by remember { mutableStateOf(0) }
     var gestureHintValue by remember { mutableStateOf(0f) }
+    // 【v157】横向拖动时的提示文案。它是**时间型**的（"→ 15秒 01:23 / 45:30"），
+    // 塞不进 0~1 的 gestureHintValue ⇒ 单独给一个。
+    var gestureSeekText by remember { mutableStateOf("") }
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
-    // 提示条显示 900ms 后自动收；滑动中数值一变就重置计时 ⇒ 表现为「松手后才开始计时」
-    LaunchedEffect(gestureHint, gestureHintValue) {
+    // 提示条显示 900ms 后自动收；滑动中数值一变就重置计时 ⇒ 表现为「松手后才开始计时」。
+    // 🔴【v157】key 里必须带上 gestureSeekText：横向拖动时 gestureHintValue 变化很细微，
+    //    光靠它可能不重启计时 ⇒ 拖着拖着提示自己消失了（人还在拖）。
+    LaunchedEffect(gestureHint, gestureHintValue, gestureSeekText) {
         if (gestureHint != 0) {
             delay(900)
             gestureHint = 0
@@ -1229,56 +1267,155 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
             color = Color.Black,
         ) {
             Box(modifier = Modifier.fillMaxSize()
-                // 【v124】画面手势：左半屏上下滑 = 亮度、右半屏上下滑 = 音量
-                // （左右分工是**实测**小米播放器得来的）。垂直拖动要先越过 touch slop 才会被
-                // detectVerticalDragGestures 接管 ⇒ 跟下面 .clickable（点一下浮出控制条）不打架。
+                // 【v124】画面手势：左半屏上下滑 = 亮度、右半屏上下滑 = 音量（左右分工是实测小米播放器得来的）
+                // 【v157】新增横向：左右滑 = 快进/快退（**拖动中跟手预览、松手才精确定位**）
+                //
+                // 🔴🔴 **必须手写方向锁定**：绝不能把 detectVerticalDragGestures 和
+                //    detectHorizontalDragGestures 叠在一起 —— 两个 detector 各等各的滑移量，
+                //    谁先越过 slop 谁抢到事件，实际表现就是"滑到一半突然变身"（阿亮担心的正是这个）。
+                //    正解：自己收原始指针事件，**先判主方向、判定后整场锁死不再改**。
                 .pointerInput(Unit) {
-                    var isBrightness = true
-                    var acc = 0f
-                    // 松手写盘。拖动过程里不写（一次一次写 SharedPreferences 白费）。
-                    // 🔴 只在"确实调的是亮度"时才存；音量是**系统音量**，系统自己记着，不归我们管。
-                    // 🔴 被打断（onDragCancel）也要写 —— 否则会出现"我明明调了，重开又回去了"。
-                    val persistBrightness = {
-                        if (isBrightness) BrightnessPrefs.save(context, appBrightness ?: sysBrightness)
+                    val slop = viewConfiguration.touchSlop
+                    // 横向起点离左右边缘多近算"贴边" ⇒ 让位给系统返回手势。
+                    // 没这道闸的话：从屏幕边缘往中间划想快进，会先被系统吃掉变成"返回"。
+                    val edgeGuard = 32.dp.toPx()
+
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        // 左右分工照搬 v124：用**按下时**的 x 判，滑动中跨半屏不会串台
+                        val startX = down.position.x
+                        var isBrightness = startX < size.width / 2f
+                        val nearEdge = startX < edgeGuard || startX > size.width - edgeGuard
+
+                        var acc = 0f
+                        // 松手写盘。拖动过程里不写（一次一次写 SharedPreferences 白费）。
+                        // 🔴 只在"确实调的是亮度"时才存；音量是**系统音量**，系统自己记着，不归我们管。
+                        // 🔴 被打断也要写 —— 否则会出现"我明明调了，重开又回去了"。
+                        val persistBrightness = {
+                            if (isBrightness) BrightnessPrefs.save(context, appBrightness ?: sysBrightness)
+                        }
+
+                        var axis = 0            // 0=未判 1=竖向(亮度/音量) 2=横向(进度)
+                        var dx = 0f             // 累计横向位移（横向用**累计**：seek 是相对起点的绝对偏移）
+                        var dy = 0f
+                        var seekBaseMs = 0L
+                        var seekDeltaMs = 0L
+                        var wasPlayingBeforeDrag = false
+                        var lastPreviewAt = 0L  // 跟手预览的节流时间戳
+
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            val d = ch.position - ch.previousPosition
+                            dx += d.x
+                            dy += d.y
+
+                            if (!ch.pressed) {
+                                // ================= 抬手 =================
+                                when (axis) {
+                                    2 -> {
+                                        // 松手才**精确**落位：预览用的 CLOSEST_SYNC 会差几秒
+                                        val mp = videoMpRef[0]
+                                        val dur = mp?.duration?.let {
+                                            if (it == C.TIME_UNSET || it <= 0L) 0L else it
+                                        } ?: 0L
+                                        if (mp != null && dur > 0L) {
+                                            val target = (seekBaseMs + seekDeltaMs).coerceIn(0L, dur)
+                                            Log.d("XJ_SEEK", "gestureEnd base=$seekBaseMs delta=$seekDeltaMs target=$target dur=$dur")
+                                            videoSeek(target, "horizontalGesture")   // 内部会切回 EXACT
+                                            if (wasPlayingBeforeDrag) {
+                                                mp.play(); videoPlaying = true
+                                                PlaybackSession.onVideoStarted()
+                                                attachVideoPlayback()
+                                                PlayerService.instance?.notifyVideoStateChanged()
+                                            }
+                                        }
+                                        gestureHint = 0
+                                    }
+                                    1 -> persistBrightness()
+                                }
+                                break
+                            }
+
+                            if (axis == 0) {
+                                // ============ 方向判定（只判一次，判完锁死）============
+                                if (kotlin.math.abs(dx) > slop || kotlin.math.abs(dy) > slop) {
+                                    // 【横向门槛故意更高】竖滑是天天用的（亮度/音量），横滑偶尔用。
+                                    // 要求 |dx| > |dy| * 1.5 才算横滑 ⇒ 手稍微斜一点仍走竖向，不破坏老习惯。
+                                    // 贴边时一律不给横滑（那块地是系统返回手势的）。
+                                    axis = if (!nearEdge && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.5f) 2 else 1
+                                    Log.d("XJ_SEEK", "gestureAxis=$axis dx=$dx dy=$dy slop=$slop viewW=${size.width} nearEdge=$nearEdge")
+                                    if (axis == 2) {
+                                        seekBaseMs = videoMpRef[0]?.currentPosition ?: 0L
+                                        wasPlayingBeforeDrag = videoPlaying
+                                        // 拖动期间先停住：不然"播放"会盖掉 seek 的结果，画面来回抖
+                                        if (wasPlayingBeforeDrag) runCatching { videoMpRef[0]?.pause() }
+                                        gestureHint = 3
+                                    } else {
+                                        acc = if (isBrightness) {
+                                            // 🔴 直接读全局 appBrightness —— 不能在组合期先算成局部 val：
+                                            //    pointerInput(Unit) 的 lambda 只创建一次，局部 val 会被捕获成"永远的老值"。
+                                            appBrightness ?: sysBrightness
+                                        } else {
+                                            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                                            audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
+                                        }
+                                        gestureHint = if (isBrightness) 1 else 2
+                                        gestureHintValue = acc
+                                    }
+                                    // ⚠️ 只有**真的开始拖了**才消费事件。没超 slop 时消费掉，
+                                    //    会把下面 .clickable 的「点一下浮出控制条」判成移动、彻底失效。
+                                    ch.consume()
+                                }
+                                continue
+                            }
+
+                            if (axis == 1) {
+                                // ============ 竖向：照搬 v124 的行为 ============
+                                val h = size.height.toFloat().coerceAtLeast(1f)
+                                // ⚠️ 这里用**本次增量 d.y**（不是累计 dy）—— v124 的 dragAmount 就是增量语义。
+                                // 向上滑 ⇒ d.y 为负 ⇒ 数值变大。整屏高度滑一遍 = 走完整量程。
+                                // 亮度留个下限：真到 0 屏幕就全黑了，什么都看不见。
+                                acc = (acc - d.y / h).coerceIn(if (isBrightness) 0.01f else 0f, 1f)
+                                if (isBrightness) {
+                                    appBrightness = acc   // 全局状态（方案 B）⇒ 全 App 统一，切页面不跳
+                                } else {
+                                    val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                                    // flags = 0 ⇒ 不弹系统那条音量条，提示统一由我们自己的浮层出
+                                    audioManager.setStreamVolume(
+                                        AudioManager.STREAM_MUSIC,
+                                        (acc * max).roundToInt().coerceIn(0, max),
+                                        0,
+                                    )
+                                }
+                                gestureHintValue = acc
+                            } else {
+                                // ============ 横向：快进 / 快退 ============
+                                val dur = videoMpRef[0]?.duration?.let {
+                                    if (it == C.TIME_UNSET || it <= 0L) 0L else it
+                                } ?: 0L
+                                if (dur > 0L) {
+                                    // 滑满画面宽度 = 总时长的 10%，限幅 10 秒 ~ 5 分钟
+                                    // ⇒ 10 分钟的短片和 2 小时的长片都顺手。
+                                    // ⚠️ 按**画面自己的宽度**算，不是屏幕宽度：竖屏时视频窗口只占上面一块，
+                                    //    按屏幕宽度算会灵敏过头。
+                                    val span = (dur / 10).coerceIn(10_000L, 300_000L)
+                                    seekDeltaMs = (dx / size.width.toFloat() * span).toLong()
+                                    val target = (seekBaseMs + seekDeltaMs).coerceIn(0L, dur)
+                                    gestureSeekText = formatSeekHint(target, dur, seekDeltaMs)
+                                    gestureHintValue = (target.toFloat() / dur).coerceIn(0f, 1f)
+                                    // 跟手预览：**节流到 100ms 一次**。不节流会把解码器压垮
+                                    // （连续 seekTo 排队），4K 尤其明显 ⇒ 反而卡成幻灯片。
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastPreviewAt >= 100L) {
+                                        lastPreviewAt = now
+                                        videoSeekPreview(target)
+                                    }
+                                }
+                            }
+                            ch.consume()
+                        }
                     }
-                    detectVerticalDragGestures(
-                        onDragStart = { offset ->
-                            // 用「手指按下时」的 x 判左右（而不是滑动过程中），避免跨半屏时串台
-                            isBrightness = offset.x < size.width / 2f
-                            acc = if (isBrightness) {
-                                // 🔴 必须**直接读全局状态** appBrightness —— 不能在组合期先算成一个局部 val：
-                                //    pointerInput(Unit) 里的这个 lambda 只创建一次，局部 val 会被捕获成"永远的老值"。
-                                appBrightness ?: sysBrightness
-                            } else {
-                                val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-                                audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
-                            }
-                            // 1=亮度 2=音量（见 gestureHint 定义处）
-                            gestureHint = if (isBrightness) 1 else 2
-                            gestureHintValue = acc
-                        },
-                        onDragEnd = { persistBrightness() },
-                        onDragCancel = { persistBrightness() },
-                        onVerticalDrag = { change, dragAmount ->
-                            change.consume()
-                            // 向上滑 ⇒ dragAmount 为负 ⇒ 变大。整屏高度滑一遍 = 走完整量程。
-                            val h = size.height.toFloat().coerceAtLeast(1f)
-                            // 亮度留个下限：真到 0 屏幕就全黑了，什么都看不见
-                            acc = (acc - dragAmount / h).coerceIn(if (isBrightness) 0.01f else 0f, 1f)
-                            if (isBrightness) {
-                                appBrightness = acc   // 全局状态（方案 B）⇒ 全 App 统一，切页面不跳
-                            } else {
-                                val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-                                // flags = 0 ⇒ 不弹系统那条音量条，提示统一由我们自己的浮层出
-                                audioManager.setStreamVolume(
-                                    AudioManager.STREAM_MUSIC,
-                                    (acc * max).roundToInt().coerceIn(0, max),
-                                    0,
-                                )
-                            }
-                            gestureHintValue = acc
-                        },
-                    )
                 }
                 .clickable { controlsVisible = !controlsVisible }) {
                 if (videoUri != null) {
@@ -1838,6 +1975,8 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     }
                 }
                 // 【v124】手势提示：屏幕中央「图标 + 进度条 + 百分比」（样式照小米播放器）。
+                // 【v157】横向拖动（gestureHint == 3）走另一套：**只出图标 + 时间文案**，
+                //   不画进度条 —— 文案里已经有「目标时间 / 总时长」，信息量比一根条子大。
                 // 放在 Box 的**最后** = 压在最上层，别被画面/浮层/字幕条盖住。
                 if (gestureHint != 0) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1849,31 +1988,44 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text(
-                                    if (gestureHint == 1) "🔆" else "🔊",
-                                    style = MaterialTheme.typography.titleMedium,
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                // 进度条：底槽 + 白色填充（fillMaxWidth 要 0~1，滑到底不能越界）
-                                Box(
-                                    modifier = Modifier
-                                        .width(110.dp)
-                                        .height(6.dp)
-                                        .background(Color.White.copy(alpha = 0.28f), RoundedCornerShape(3.dp))
-                                ) {
+                                if (gestureHint == 3) {
+                                    Text(
+                                        if (gestureSeekText.startsWith("←")) "⏪" else "⏩",
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        gestureSeekText,
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                } else {
+                                    Text(
+                                        if (gestureHint == 1) "🔆" else "🔊",
+                                        style = MaterialTheme.typography.titleMedium,
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    // 进度条：底槽 + 白色填充（fillMaxWidth 要 0~1，滑到底不能越界）
                                     Box(
                                         modifier = Modifier
-                                            .fillMaxHeight()
-                                            .fillMaxWidth(gestureHintValue.coerceIn(0f, 1f))
-                                            .background(Color.White, RoundedCornerShape(3.dp))
+                                            .width(110.dp)
+                                            .height(6.dp)
+                                            .background(Color.White.copy(alpha = 0.28f), RoundedCornerShape(3.dp))
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxHeight()
+                                                .fillMaxWidth(gestureHintValue.coerceIn(0f, 1f))
+                                                .background(Color.White, RoundedCornerShape(3.dp))
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        "${(gestureHintValue * 100).roundToInt()}%",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.bodyMedium,
                                     )
                                 }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    "${(gestureHintValue * 100).roundToInt()}%",
-                                    color = Color.White,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                )
                             }
                         }
                     }
