@@ -430,9 +430,11 @@ private fun VideoTitleBar(name: String) {
             // 【v166】高度 12dp → **20dp**：12dp(33px) 根本装不下正常字号的标题 ——
             //    9sp 都被切掉下半（`E` 缺了底横就变 `F`，阿亮一眼看出来）。
             //    ⇒ **别再靠缩字号硬塞**，把这段空间给足。
-            // 🔴 多出来的 8dp 由**调用方**在画面**上方**那个 top padding 里等量扣掉
-            //    （12dp → 4dp）⇒ **整列总高度不变、字幕区一寸不下移**。
-            //    只改这里不改那边 = 又把字幕顶下去（阿亮盯过这个，别再犯）。
+            // ⚠️ 别再打"从画面上面借"的主意 —— v166 试过，那样等于把下面这段撑开。
+            // 【v167 阿亮验收通过】高度定在 **20dp**：
+            //    11sp 字（lineHeight 14sp ≈ 38px）在 20dp(55px) 里上下各余 ~8px，完整不裁；
+            //    实测「标题 → 字幕」的间距他认可。
+            // 🔴 **20dp 别再动** —— 16dp 试过（44px 只余 6px）没必要，改小又会回到裁字。
             .height(20.dp)
             .padding(horizontal = 14.dp),
         contentAlignment = Alignment.Center,
@@ -1321,10 +1323,11 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         modifier = Modifier.fillMaxSize().padding(
             start = if (videoFullscreen) 0.dp else 16.dp,
             end = if (videoFullscreen) 0.dp else 16.dp,
-            // 【v166】12dp → **4dp**：画面**上方**省下的这 8dp，正好补给画面下方那一行标题
-            //（标题行 12dp → 20dp）⇒ **整列总高度不变**，字幕区位置一寸不动。
-            // ⚠️ 这两处是一对，改一个必须改另一个。
-            top = if (videoFullscreen) 0.dp else 4.dp,
+            // 【v167】恢复成 **12dp**：v166 从画面上面借了 8dp 去补标题，结果
+            // 「标题 → 字幕」那段被撑开了（阿亮："下边这个边缘还是变宽了"）。
+            // 现在改成从**字幕列表自己的头部留白**里扣（`padding(top)` 10dp → 2dp），
+            // 所以这里不用再借、恢复原样。
+            top = if (videoFullscreen) 0.dp else 12.dp,
             bottom = 0.dp,
         )
     ) {
