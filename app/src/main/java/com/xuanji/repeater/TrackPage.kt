@@ -93,7 +93,10 @@ fun TrackPage(
     Column(modifier = Modifier.fillMaxSize()) {
         // 排序切换（数字/字母/时间）
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 2.dp),
+            // 【v169 🔴 统一「顶栏 → 内容」空档】top 8dp → **0dp**。
+            //   口径 = 顶栏胶囊底边 → 首个可见元素（排序 chips 是**有底色的块**，取块顶）。
+            //   实测原空档 67px ⇒ 去掉 22px 后 ≈ 45px ✓
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             FilterChip(

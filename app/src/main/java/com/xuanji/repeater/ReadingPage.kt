@@ -148,7 +148,12 @@ fun ReadingPage(
     Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         // 头部：标题 + 生词本入口（含数量）
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 2.dp),
+            // 【v169 🔴 统一「顶栏 → 内容」空档】top 6dp → **2dp**。
+            //   口径 = 胶囊底边 → 首个可见元素的最高像素。这一行的锚取**右边那颗生词本胶囊**
+            //   （有底色、比左边的灰字抢眼）：实测原 57px，减 11px ≈ 4dp ⇒ 45px ✓
+            //   ⚠️ 同一行里「阅读模式」那几个灰字的**字形顶天然比胶囊低 ~21px**（字体自带行框上白），
+            //      这是字体决定的、**不代表没对齐** —— 别为了追字顶把胶囊顶到顶栏上去。
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {

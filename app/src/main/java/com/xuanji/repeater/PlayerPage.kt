@@ -102,10 +102,12 @@ fun PlayerPage(
             // 高度不写死 ⇒ 一行/两行自然撑开，下方模块跟着往下让，不会重叠。
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
-            // 【0915 收紧】阿亮标红："顶栏 ↔ 标题"这段太空（实测 98px≈37dp）。
-            // 其中 20dp 是这里的 top padding，其余是 titleLarge 自带的行框上白。
-            // top 20→6dp；底部 bottom 保持 2dp（标题与波形条本来就贴得近，别动）。
-            modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
+            // 【v169 🔴 统一「顶栏 → 内容」空档】top 6dp → **0dp**。
+            //   口径 = 顶栏**胶囊底边** → 首个可见元素的最高像素（纯文字取**字形顶**），全 App 统一 ≈ 45px。
+            //   音频页首元素是 titleLarge 曲目名，**字体自带行框上白 ~22px** ⇒ padding 即使归零，
+            //   字形顶也落在 y287 附近（胶囊底 242 + 45）✓ ⇒ 这里**不需要负偏移**。
+            //   ⚠️ 底部 bottom 保持 2dp（标题与波形条本来就贴得近，别动）。
+            modifier = Modifier.fillMaxWidth().padding(top = 0.dp, bottom = 2.dp),
             textAlign = TextAlign.Center,
             lineHeight = MaterialTheme.typography.titleLarge.fontSize * 1.25f,
         )

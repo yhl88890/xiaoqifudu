@@ -427,16 +427,15 @@ private fun VideoTitleBar(name: String) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            // 【v166】高度 12dp → **20dp**：12dp(33px) 根本装不下正常字号的标题 ——
-            //    9sp 都被切掉下半（`E` 缺了底横就变 `F`，阿亮一眼看出来）。
-            //    ⇒ **别再靠缩字号硬塞**，把这段空间给足。
-            // ⚠️ 别再打"从画面上面借"的主意 —— v166 试过，那样等于把下面这段撑开。
-            // 【v167 阿亮验收通过】高度定在 **20dp**：
-            //    11sp 字（lineHeight 14sp ≈ 38px）在 20dp(55px) 里上下各余 ~8px，完整不裁；
-            //    实测「标题 → 字幕」的间距他认可。
-            // 🔴 **20dp 别再动** —— 16dp 试过（44px 只余 6px）没必要，改小又会回到裁字。
-            .height(20.dp)
-            .padding(horizontal = 14.dp),
+            // 【v169 🔴 与字号解耦】高度**不再写死 20dp**，改成「跟着字长」。
+            //   阿亮 1015 定的原则："如果它是自适应的那就都自适应，如果是硬性距离那就都硬性"。
+            //   旧写法 `height(20.dp)` 是**死的**，可里面的字是 `lineHeight 14sp`（随 density × fontScale 变）——
+            //   两种性质混用 ⇒ **字体一缩放，字就在框里顶死 or 露白**，他跟下面字幕的距离两台机器对不上。
+            //   主测机实测 `fontScale = 1.45`：字行高 14×1.45×2.75 = **55.8px**，已超过 20dp 框的 55px ⇒ 早就顶死了。
+            //   ⇒ `heightIn(min = 20.dp)` + 垂直 padding：**框跟着字长**，任何 fontScale 都装得下、都不裁。
+            //   ⚠️ 20dp 仍在（是**下限**）：`fontScale ≤ 1.14` 的机器框高就是 20dp，**与 v167 完全一致、零变化**。
+            .heightIn(min = 20.dp)
+            .padding(horizontal = 14.dp, vertical = 2.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -1323,11 +1322,13 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         modifier = Modifier.fillMaxSize().padding(
             start = if (videoFullscreen) 0.dp else 16.dp,
             end = if (videoFullscreen) 0.dp else 16.dp,
-            // 【v167】恢复成 **12dp**：v166 从画面上面借了 8dp 去补标题，结果
-            // 「标题 → 字幕」那段被撑开了（阿亮："下边这个边缘还是变宽了"）。
-            // 现在改成从**字幕列表自己的头部留白**里扣（`padding(top)` 10dp → 2dp），
-            // 所以这里不用再借、恢复原样。
-            top = if (videoFullscreen) 0.dp else 12.dp,
+            // 【v169 🔴 统一「顶栏 → 内容」空档】12dp → **8dp**。
+            //   阿亮 1015 定：全 App 统一走「**顶栏胶囊底边 → 首个可见元素的最高像素**」这个口径
+            //   （有底色的块取块顶、纯文字取字形顶），目标 ≈ **45px**（主测机 1080 宽屏高 2460 上占 1.8%）。
+            //   实测基线：胶囊底 y242、画面顶 y298 = 56px ⇒ 要缩到 45px ⇒ top 减 11px ≈ 4dp。
+            //   ⚠️ v167 那条注释是**错的**（自称"从字幕列表 padding 里扣了 8dp"，实际没扣，
+            //      已在 v169 补上）⇒ 这里不用再为那笔账背锅。
+            top = if (videoFullscreen) 0.dp else 8.dp,
             bottom = 0.dp,
         )
     ) {
@@ -2391,7 +2392,13 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                             // 字幕列表：点一句 -> 跳到该句开头播放；长按 -> 内联展开翻译 + 点词选词（对齐阅读模式）
                             LazyColumn(
                                 state = subtitleListState,
-                                modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 10.dp),
+                                // 【v169 🔴 补 v167 欠下的账】v167 的 commit 注释里写着
+                                //   「改成从**字幕列表自己的头部留白**里扣（`padding(top)` 10dp → 2dp）」——
+                                //   **但代码压根没改**（`git show <commit>:VideoPage.kt` 逐版核对：v161→v168 一直是 10dp，
+                                //   v167 的 diff 只碰了标题行和画面 top 两处）。
+                                //   ⇒ 画面上面借来的 8dp(22px) **白借了没还** ⇒ 字幕区整体下移 22px，
+                                //   这就是阿亮说的「标题下面那块空间又变了」。这里把账补上：10dp → **2dp**。
+                                modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 2.dp),
                                 contentPadding = PaddingValues(vertical = 4.dp),
                             ) {
                                 itemsIndexed(sentences) { index, sentence ->

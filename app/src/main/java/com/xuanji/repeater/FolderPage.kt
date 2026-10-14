@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Spacer
@@ -339,8 +340,16 @@ private fun FolderOverviewPage(
 
     Column(modifier = Modifier.fillMaxSize()) {
         // 顶行：标题 + 已忽略 + 刷新
+        // 【v169 🔴 统一「顶栏 → 内容」空档】top 8dp → **0dp** + `offset(y = -5.dp)`。
+        //   这一行首元素是 titleMedium 的「文件夹」**纯文字**（取字形顶）：实测原空档 **81px**，
+        //   是五个页面里最松的。padding 归零只省 22px，还差 14px —— 字体自带的行框上白就有 ~36px，
+        //   光靠 padding 追不回来 ⇒ 按老规矩**用 offset 提上去**（offset 不改布局高度，不影响更下面的东西）。
+        //   bottom 4dp → 0dp：把 offset 抬起来的那点视觉间距还回去，避免「标题 → 搜索框」被拉松。
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset(y = (-5).dp)
+                .padding(start = 16.dp, end = 4.dp, top = 0.dp, bottom = 0.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
