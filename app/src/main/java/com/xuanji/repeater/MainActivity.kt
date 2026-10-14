@@ -603,7 +603,13 @@ internal fun loadVideoPrefs(context: Context) {
     // hasPrev/hasNext 全 false → 两个按钮全灰，"只能重新进视频选集再选一遍"才活。
     // 这里按当前视频所在目录，从全库扫描结果里过滤出同级视频填回去（无路径的 SAF Uri 退化为全库）。
     videoFolderVideos = runCatching {
-        val all = VideoScanner.scanAll(context)
+        // 🔴【1015 修 ANR】needSrt=false 是**必须的**，不是优化：
+        //   这里只要同级视频的 id/path/标题，用来算「上一曲/下一曲」的序号，**根本用不到 hasSrt 角标**。
+        //   传 true 的话会给每个视频的父目录 listFiles 一遍 —— 副测机 747 个视频散在 166 个目录
+        //   ⇒ 166 次目录 IO，而且 `loadVideoPrefs` 是在 `LaunchedEffect` 里跑的（= 主线程）
+        //   ⇒ 卡超 5s ⇒ 「Waited 5000ms for FocusEvent」ANR ⇒ 闪退。
+        //   崩因实证见 memory/2026-10-15.md（mapping 反查：SubtitleParser.listSubtitles → File.listFiles）。
+        val all = VideoScanner.scanAll(context, needSrt = false)
         val dir = path.substringBeforeLast('/', "")
         val sibs = if (dir.isNotBlank()) all.filter { it.path.startsWith("$dir/") } else emptyList()
         sibs.ifEmpty { all }

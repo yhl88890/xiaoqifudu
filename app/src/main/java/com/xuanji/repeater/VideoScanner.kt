@@ -18,8 +18,17 @@ object VideoScanner {
         MediaStore.Video.Media.EXTERNAL_CONTENT_URI
     }
 
-    /** 扫描全部视频（过滤已删除的幽灵记录） */
-    fun scanAll(context: Context): List<VideoItem> {
+    /**
+     * 扫描全部视频（过滤已删除的幽灵记录）。
+     *
+     * @param needSrt 是否顺带判定「有没有配字幕」。🔴 这个参数是为**修 ANR** 加的（1015）：
+     *   判定字幕会给**每个视频的父目录**列一次目录（[SubtitleParser.listSubtitles]）。
+     *   副测机实测媒体库有 **747 个视频、散在 166 个不同目录**
+     *   ⇒ 冷启时就是 166 次 `File.listFiles`，而且跑在 `AndroidUiDispatcher`（**主线程**）上
+     *   ⇒ 卡超 5s ⇒ `Waited 5000ms for FocusEvent` ANR ⇒ 崩溃（副测机一天崩了 7 次）。
+     *   ⚠️ 冷启恢复「同级视频列表」只用得到 id/path/title/duration，**用不到这个角标** ⇒ 必须传 false。
+     */
+    fun scanAll(context: Context, needSrt: Boolean = true): List<VideoItem> {
         val items = mutableListOf<VideoItem>()
         val projection = arrayOf(
             MediaStore.Video.Media._ID,
@@ -59,7 +68,10 @@ object VideoScanner {
                             durationMs = duration,
                             // 【1008】角标改成和「实际自动加载」同一套判据（SRT/ASS/SSA + 去版本尾巴匹配）：
                             // 原来只判 `<基名>.srt` 存不存在 ⇒ 字幕放的是 .ass 时，明明有字幕却显示没字幕。
-                            hasSrt = SubtitleParser.pickBest(vf.name, subsOf(vf.parentFile)) != null,
+                            // 🔴 1015：`needSrt` 在前 —— 靠 Kotlin 短路求值，false 时**连 subsOf 都不会调**
+                            //   （subsOf 内部才是 listFiles）。这是修 ANR 的关键，别调换两边顺序。
+                            hasSrt = needSrt &&
+                                SubtitleParser.pickBest(vf.name, subsOf(vf.parentFile)) != null,
                         )
                     )
                 }
