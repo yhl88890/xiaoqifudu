@@ -108,12 +108,15 @@ fun SettingsPage(
     floatSizeIdx: Int,
     resumeOn: Boolean,
     layoutEdit: Boolean,
+    /** 【v170】Pad 模式开关：打开后手机横屏也走双栏（左视频 / 右字幕）。平板不用它，自动生效。 */
+    padMode: Boolean,
     onThemeIndexChange: (Int) -> Unit,
     onDarkModeChange: (Boolean) -> Unit,
     onFloatChange: (Boolean) -> Unit,
     onFloatSizeChange: (Int) -> Unit,
     onResumeChange: (Boolean) -> Unit,
     onLayoutEditChange: (Boolean) -> Unit,
+    onPadModeChange: (Boolean) -> Unit,
     onBack: () -> Unit,
     // 【v89 阿亮："滑到哪里，返回来还在哪里"】滚动状态由外部（MainActivity）持有：
     // 设置页关掉重开（或从复习通知跳走再回来）不再跳顶。
@@ -194,6 +197,15 @@ fun SettingsPage(
                 SettingsSwitch(
                     "悬浮窗", floatOn, onFloatChange,
                     trailing = { FloatSizePicker(floatSizeIdx, onFloatSizeChange) },
+                )
+                // 【v170】Pad 模式开关。放在「外观」组里 —— 它管的是**布局**（横屏左右分栏），
+                //   跟播放行为无关，搁「播放」组会让人以为它影响出声。
+                //   ⚠️ 长说明（平板自动开、手机得系统自动旋转也开着）按规矩进软件介绍，
+                //     这里只留四个字的短注，跟上面「悬浮窗」「只管音频」同一风格。
+                //   平板用户看这一项会以为没生效 —— 软件介绍里已写明"平板会自动开，不用管这个开关"。
+                SettingsSwitch(
+                    "Pad 模式", padMode, onPadModeChange,
+                    note = "横屏左右分栏",
                 )
             }
 
@@ -754,6 +766,24 @@ fun SettingsPage(
                                 IntroBlock(
                                     "阅读模式",
                                     "进入后，点任意句子 = 从该句开始复读（播到句尾自动停）；长按句子 = 展开本句翻译，并可整句或逐词加入生词本。无歌词/字幕的音频可先在顶栏点「生成字幕」在线识别。阅读模式会跟随你进来的模式：从音频模式进读音频字幕，从视频模式进读该视频字幕，点视频字幕某句会跳回视频并定位到那一句。",
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                // 【v170】Pad 模式（设置页「外观 → Pad 模式」那个开关）。
+                                //   按老规矩：开关行只留四个字，原理/前提全写这儿。
+                                //   🔴 必须讲清三件事，否则他会以为开关坏了或"别处怎么也横了"：
+                                //     ① 平板不用开这个开关（本来就自动双栏）；
+                                //     ② 只管视频页 —— 音频/阅读/选集页仍然竖屏锁死；
+                                //     ③ 不用管系统「自动旋转」（App 自己放开的，不受那个总开关约束）。
+                                IntroBlock(
+                                    "Pad 模式：横屏时左边视频、右边字幕",
+                                    "手机横屏看视频时，画面铺满屏会又扁又浪费 —— 打开设置页「外观 → Pad 模式」，" +
+                                        "再把手机横过来，界面就变成左右两栏：左边是视频画面，右边是标题和字幕列表，" +
+                                        "跟看平板一样。竖着拿还是原来的样子，什么都不变。\n" +
+                                        "平板（屏幕宽度 600dp 以上）不用开这个开关 —— 它自己就是横屏双栏、竖屏单栏。\n" +
+                                        "这个开关只管视频页。音频、阅读、选集、文件夹那些页面一直是竖屏，" +
+                                        "不会跟着横过来（它们横过来会挤坏）。\n" +
+                                        "另外它不受系统「自动旋转」总开关的约束 —— 开了 Pad 模式就能横，" +
+                                        "不用特地去下拉通知栏开自动旋转。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 // 🔴🔴【0917 阿亮新增要求】他的原话："所有要填 API 的地方要跟人说清楚：

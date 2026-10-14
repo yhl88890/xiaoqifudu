@@ -165,6 +165,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
@@ -510,7 +511,13 @@ internal val FULLSCREEN_CTRL_BAND_H = 96.dp
  *  全屏模式（需求6）：视频填满页面，仅在全屏时把字幕叠在画面上，并提供字幕开关。 */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false) {
+internal fun VideoPage(
+    readingMode: Boolean = false,
+    layoutEdit: Boolean = false,
+    /** 【v170】Pad 模式开关（设置页那个）。手机横屏要双栏得靠它打开；
+     *  平板不用 —— `isTablet` 自己就会放行。 */
+    padMode: Boolean = false,
+) {
     val subtitleListState = rememberLazyListState()
     val context = LocalContext.current
 
@@ -1318,23 +1325,55 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
     // 【0915 底部不再留白】原来垂直 12dp 四边都有，底部那 12dp 叠在底栏上方形成一道大空档
     // （实测控制排卡底边 y2143、底栏 y2250，中间空 107px；音频页无垂直边距只空 62px）。
     // 阿亮："跟底栏之间距离太高了，参照音频模式" ⇒ 只留顶部 12dp，底部交还给底栏自己收。
-    Column(
-        modifier = Modifier.fillMaxSize().padding(
-            start = if (videoFullscreen) 0.dp else 16.dp,
-            end = if (videoFullscreen) 0.dp else 16.dp,
-            // 【v169 🔴 统一「顶栏 → 内容」空档】12dp → **8dp**。
-            //   阿亮 1015 定：全 App 统一走「**顶栏胶囊底边 → 首个可见元素的最高像素**」这个口径
-            //   （有底色的块取块顶、纯文字取字形顶），目标 ≈ **45px**（主测机 1080 宽屏高 2460 上占 1.8%）。
-            //   实测基线：胶囊底 y242、画面顶 y298 = 56px ⇒ 要缩到 45px ⇒ top 减 11px ≈ 4dp。
-            //   ⚠️ v167 那条注释是**错的**（自称"从字幕列表 padding 里扣了 8dp"，实际没扣，
-            //      已在 v169 补上）⇒ 这里不用再为那笔账背锅。
-            top = if (videoFullscreen) 0.dp else 8.dp,
-            bottom = 0.dp,
-        )
-    ) {
+    // 【v170 🔴 双栏（Pad）模式判定】
+    //   阿亮 1015 定："平板上横屏**自动**双栏；竖屏就等于把手机版放大；手机上给个开关，
+    //   打开后横屏也变成双栏（左视频 / 右字幕）。"
+    //   判定 = 横屏 && (是平板 || 开关打开)。
+    //   平板判据用 `smallestScreenWidthDp >= 600`（= Android 的 sw600dp 标准线）：
+    //     主测机 sw = 1080/2.75 = 392.7dp ⇒ 手机；10" 平板 sw = 800dp ⇒ 平板 ✓
+    //   ⚠️ 全屏 / 阅读模式（readingMode）下一律单栏 —— 那两种场景本来就是"画面独占"。
+    //   用 `screenWidthDp > screenHeightDp` 判横屏（不受系统自动旋转锁定影响，拿的就是当前实际朝向）。
+    val cfg = LocalConfiguration.current
+    val isLandscape = cfg.screenWidthDp > cfg.screenHeightDp
+    val isTablet = cfg.smallestScreenWidthDp >= 600
+    // 【v170 Step2】开关从 SP 接进来（参数 `padMode`，由 MainActivity 传）。
+    //   ⚠️ 光有它还不够 —— Activity 得先**能转屏**（MainActivity 里的 `requestedOrientation`），
+    //     否则 isLandscape 永远是 false，这里判断得再对也白搭。
+    val twoPane = !videoFullscreen && !readingMode && isLandscape && (isTablet || padMode)
+
+    val paneModifier = Modifier.fillMaxSize().padding(
+        start = if (videoFullscreen) 0.dp else 16.dp,
+        end = if (videoFullscreen) 0.dp else 16.dp,
+        // 【v169 🔴 统一「顶栏 → 内容」空档】12dp → **8dp**。
+        //   阿亮 1015 定：全 App 统一走「**顶栏胶囊底边 → 首个可见元素的最高像素**」这个口径
+        //   （有底色的块取块顶、纯文字取字形顶），目标 ≈ **45px**（主测机 1080 宽屏高 2460 上占 1.8%）。
+        //   实测基线：胶囊底 y242、画面顶 y298 = 56px ⇒ 要缩到 45px ⇒ top 减 11px ≈ 4dp。
+        //   ⚠️ v167 那条注释是**错的**（自称"从字幕列表 padding 里扣了 8dp"，实际没扣，
+        //      已在 v169 补上）⇒ 这里不用再为那笔账背锅。
+        top = if (videoFullscreen) 0.dp else 8.dp,
+        bottom = 0.dp,
+    )
+
+    // 【v170 🔴 拆两栏的技术要点】两块内容用 `movableContentOf` 包 —— **不能用普通 lambda**：
+    //   普通 lambda 会让"单栏"和"双栏"两个分支的调用结构不同，Compose 会当成**全新内容重建**
+    //   ⇒ 转屏时视频会重新加载（黑一下、复读状态丢）。movableContentOf 让同一块内容在树里"搬家"
+    //   而**保留全部状态**（remember / LaunchedEffect 都不重建）。
+    //   ⚠️ 约束：同一块 movableContent 在同一时刻只能出现在一处 —— 我们 if/else 互斥，满足。
+    //   ⚠️ `remember` 必须带 key：`readingMode` / `videoFullscreen` 是**函数参数（val）**，
+    //      闭包会捕获创建那一刻的值 —— 不带 key 就永远是第一帧的旧值（切阅读模式后判断就不再更新）。
+    //      带 key 后，这两个真正变化时重建一次（那是"换页面"级别的大切换，重建可接受）。
+    val leftPane = remember(readingMode, videoFullscreen) { movableContentOf {
         Surface(
-            modifier = if (videoFullscreen) Modifier.fillMaxSize()
-                       else Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+            // 【v170 🔴 双栏必须换算法】单栏时左栏宽 = 整屏，`aspectRatio(16/9)` 先按**宽**算高没问题；
+            //   但双栏时左栏只有 ~64% 宽，而**左栏的高度是有限的**（屏高 − 顶栏 − 底栏）。
+            //   还按宽算 ⇒ 算出来的高度会超过左栏约束 ⇒ 被硬截断、**画面变形**。
+            //   ⇒ 双栏改用 `matchHeightConstraintsFirst = true`：先按**高**定高、再反推宽度
+            //     ⇒ 画面自动缩小、左右留边，**16:9 比例不变形**（这就是"黑边"的由来）。
+            modifier = when {
+                videoFullscreen -> Modifier.fillMaxSize()
+                twoPane -> Modifier.fillMaxWidth().aspectRatio(16f / 9f, matchHeightConstraintsFirst = true)
+                else -> Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+            },
             shape = RoundedCornerShape(14.dp),
             color = Color.Black,
         ) {
@@ -2128,6 +2167,17 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                 }
             }
         }
+    } }
+
+    // 【v170】右栏 = 标题条 + 模块区（字幕列表 / 控制排）。
+    //   标题条留在右栏、不跟画面走 —— 双栏时它就是右栏的"当前集名"标签，跟下面的字幕列表是一组。
+    val rightPane = remember(readingMode, videoFullscreen) { movableContentOf {
+        // 【v170 🔴 自带一层 Column —— 这是必需的，不是风格问题】原代码里的 `weight(1f)`
+        //   （字幕列表 / "这个视频还没有字幕"空态那块）用的是 **ColumnScope 的 weight**，
+        //   而 `movableContentOf` 的 lambda 类型是 `@Composable () -> Unit`、**拿不到任何 scope**
+        //   ⇒ 编译直接报 `Unresolved reference 'weight'`（实测编译两面红旗）。
+        //   解法：自己在里面套一层撑满的 Column —— 这层提供了 scope，外层给它多少高度它就吃多少。
+        Column(modifier = Modifier.fillMaxSize()) {
         // ===== 非全屏时的下方内容（全屏时隐藏，画面独占） =====
         // 【0915 模块化】控制排与字幕列表都做成可拖拽换位/调高矮的模块，与音频模式同一套机制
         // （复用 PlayerPage 里抽出的 ModuleColumnHost）。偏好独立存于 video_layout，
@@ -2538,6 +2588,47 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     }
                 }
             }
+        }
+        }
+    } }
+
+    // 【v170】单栏 / 双栏 二选一。两块内容都是 movableContent ⇒ 转屏切换时状态不丢。
+    if (twoPane) {
+        // 🔴🔴【v170 血泪 · 画面撑破容器的真凶】
+        //   原来写的是 `Row { Column(weight(1.8f)) { leftPane() } ... }`，而 leftPane 里画面是
+        //   `fillMaxWidth().aspectRatio(16/9, matchHeightConstraintsFirst = true)`。
+        //   **`fillMaxWidth()` 把宽度钉死**（实测 1525px）⇒ aspectRatio 只能反推高度 1525×9/16 = **858px**，
+        //   而左栏**只有 617px 高** ⇒ 两条件互斥时 aspectRatio 选了"按宽算高"，**无视高度上限**：
+        //       左栏   y287 .. y904（617px）
+        //       画面   y167 .. y1025（858px）  ← 往上蹿 120px 盖住顶栏、往下捅穿底栏
+        //   阿亮横屏一眼就看见："左边的视频选集被挡住了、右边重新识别没事"（右边在画面 x 范围之外）。
+        //   ⇒ 正解**不是**给画面加上限补丁，而是**别把宽度钉死**：让左栏宽度 = 画面按 16:9 吃满高度所需的宽度。
+        //     手机横屏高度只有 617px ⇒ 16:9 画面最宽只能 617×16/9 = 1097px（占屏宽 45%），
+        //     剩下的全归右栏 —— 字幕栏反而更宽，学习时更好用。平板上 64% 那份仍然够宽，就按 1.8:1 分。
+        BoxWithConstraints(modifier = paneModifier) {
+            val rowWidth = maxWidth
+            val rowHeight = maxHeight
+            // 画面 16:9 吃满高度所需宽度
+            val fitWidth = rowHeight * 16f / 9f
+            // 取小值：要么按阿亮定的 1.8:1 分（左 64%），要么刚好等于画面宽度（不剩黑边）
+            val leftWidth = minOf(rowWidth * (1.8f / 2.8f), fitWidth)
+            Row(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .width(leftWidth)
+                        .fillMaxHeight(),
+                    // 高度有余量时（平板）画面居中，别顶着上沿
+                    verticalArrangement = Arrangement.Center,
+                ) { leftPane() }
+                Column(modifier = Modifier.weight(1f).fillMaxHeight()) { rightPane() }
+            }
+        }
+    } else {
+        Column(modifier = paneModifier) {
+            leftPane()
+            // 单栏时右栏也套一层带 weight 的 Column：让它吃掉画面以下的**剩余高度**，
+            // 行为跟原来"在根 Column 里直接排 TitleBar + ModuleColumnHost"完全一致。
+            Column(modifier = Modifier.weight(1f)) { rightPane() }
         }
     }
 }

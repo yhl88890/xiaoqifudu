@@ -1582,6 +1582,31 @@ class MainActivity : ComponentActivity() {
         // 改动立即写盘；冷启由 FloatPrefs.loadSizeIndex 读回。
         var floatSizeIdx by remember { mutableStateOf(FloatPrefs.loadSizeIndex(context)) }
         var resumeOn by remember { mutableStateOf(PlaybackPrefs.loadResume(context)) }
+        // 【v170】Pad 模式开关（手机上那个「横屏就双栏」的开关）。值存在 PadModePrefs。
+        var padMode by remember { mutableStateOf(PadModePrefs.load(context)) }
+        // 【v170 🔴 方向锁 —— 双栏功能的真正前置条件】
+        //   manifest 里那句 `android:screenOrientation="portrait"` 会把整个 Activity 钉死在竖屏，
+        //   ⇒ 视频页 `LocalConfiguration.screenWidthDp > screenHeightDp` 恒为 false ⇒ **双栏永远出不来**。
+        //   v170 第一轮就是栽在这（代码写好了、装到机器上怎么转都是竖的）。
+        //   🔴 **只放给「视频页」**，不放给整 App —— 音频页 / 阅读页 / 选集页 **从没有在横屏下待过**
+        //     （方向锁一直锁着），而手机横屏只有 392.7dp 高：音频页那串
+        //     「曲目名 + 波形 + 进度 + 5 键 + 4 chips」纵向要 ~500dp，一横过来必被裁。
+        //     平板不在此列 —— 平板横屏高度有 600~800dp，那些页面装得下，所以平板全局放开。
+        //   ⚠️ 用 FULL_SENSOR 而**不是** UNSPECIFIED：UNSPECIFIED 要听系统「自动旋转」总开关，
+        //     阿亮这台主测机那个开关是关的（实测 `accelerometer_rotation=0`）⇒ 开了 Pad 模式也转不动，
+        //     在他眼里就是"开关坏了"。FULL_SENSOR 由传感器直接决定，绕开系统那层。
+        //   ⚠️ manifest 已声明 `configChanges="orientation|screenSize|keyboardHidden"`
+        //     ⇒ 转屏**不会**重建 Activity，视频/音频播放不受影响。
+        val isTabletDevice = LocalConfiguration.current.smallestScreenWidthDp >= 600
+        val videoLikePage = page == Page.VIDEO || (page == Page.READING && readingFromVideo)
+        val allowRotate = isTabletDevice || (padMode && videoLikePage)
+        LaunchedEffect(allowRotate) {
+            requestedOrientation = if (allowRotate) {
+                ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+            } else {
+                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+        }
         // 选集页滚动位置：提升到 Activity 层，页面切换（组合销毁/重建）后仍保留。
         // rememberSaveable 在这里有效：Activity 重建/旋转时也恢复。
         val trackListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
@@ -2005,7 +2030,12 @@ class MainActivity : ComponentActivity() {
                     // 阅读(视频源)时 VideoPage 进入 readingMode：只留背后挂载的 VideoView（音频继续走），
                     // 由 ReadingPage 不透明覆盖层盖住画面、只露字幕。
                     if (page == Page.VIDEO || (page == Page.READING && readingFromVideo)) {
-                        VideoPage(readingMode = page == Page.READING && readingFromVideo, layoutEdit = layoutEdit)
+                        VideoPage(
+                            readingMode = page == Page.READING && readingFromVideo,
+                            layoutEdit = layoutEdit,
+                            // 【v170】视频页据此决定横屏要不要双栏（平板会自动放行，见 VideoPage 里 isTablet）
+                            padMode = padMode,
+                        )
                     }
                     when (page) {
                         Page.PLAYER -> PlayerPage(
@@ -2165,6 +2195,8 @@ class MainActivity : ComponentActivity() {
                 floatSizeIdx = floatSizeIdx,
                 resumeOn = resumeOn,
                 layoutEdit = layoutEdit,
+                // 【v170】Pad 模式开关：手机横屏双栏用（平板自动生效，不看它）
+                padMode = padMode,
                 // 【v89】设置页滚动位置 Activity 层持有：关掉重开不再跳顶
                 scrollState = settingsScrollState,
                 onThemeIndexChange = onThemeIndexChange,
@@ -2188,6 +2220,12 @@ class MainActivity : ComponentActivity() {
                 onLayoutEditChange = {
                     layoutEdit = it
                     if (it) showSettings = false // 开启编辑模式自动收起设置面板，直接进入编辑
+                },
+                // 【v170】Pad 模式：存盘即可。放开方向锁那件事由上面那个 LaunchedEffect(padMode) 自动跟上
+                //（padMode 一变就重跑）。不需要在这里手动 setRequestedOrientation。
+                onPadModeChange = {
+                    padMode = it
+                    PadModePrefs.save(context, it)
                 },
                 onBack = { showSettings = false },
             )
