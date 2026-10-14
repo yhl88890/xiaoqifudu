@@ -191,6 +191,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.draw.clipToBounds
@@ -426,17 +427,33 @@ private fun VideoTitleBar(name: String) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            // 🔴🔴 高度 == 原来那个 `Spacer(12.dp)`，**一个字都不能多**
+            //    （多了就把字幕区顶下去，阿亮盯过这个）。
+            .height(12.dp)
             .padding(horizontal = 14.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = name,
-            style = MaterialTheme.typography.labelMedium,
+            // 🔴🔴 字号必须**塞得进这 12dp**（= 33px）：`字号 × 1.25 ≤ 33px` ⇒ 上限约 10.5sp。
+            //    取 9sp 留余量；`lineHeight` 略高于字号（×1.2 左右）避免上下被切。
+            //
+            //    为什么不能靠"溢出显示"（v163/v164 连翻两次）：
+            //    ① 溢出的上半会落进**视频画面区**，而画面是 `AndroidView{SurfaceView}` ——
+            //       **独立图层，盖在所有普通 View 之上**（v146 原生字幕踩过同一个坑）；
+            //    ② 溢出的下半会被后面的 `ModuleColumnHost`（同一 Column 里排在标题之后）盖住。
+            //    ⇒ 上下都出不去的，只能缩到自己装得下。
+            //    ⚠️ 想再放大，必须同时放宽那 12dp（先问阿亮）。
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 9.sp,
+                lineHeight = 11.sp,
+            ),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             modifier = Modifier
-                // 🔴 默认 iterations = 3（滚三遍就停），那不算"轮播" ⇒ 给成一直滚
-                .basicMarquee(iterations = Int.MAX_VALUE),
+                // 长名自动轮播。**【v161b 阿亮】用默认的 iterations = 3**（滚三遍就停）——
+                // 我一开始改成一直滚，他说"只滚三遍就停挺好的"，别自作主张。
+                .basicMarquee(),
         )
     }
 }
