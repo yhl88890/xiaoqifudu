@@ -427,26 +427,22 @@ private fun VideoTitleBar(name: String) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            // 🔴🔴 高度 == 原来那个 `Spacer(12.dp)`，**一个字都不能多**
-            //    （多了就把字幕区顶下去，阿亮盯过这个）。
-            .height(12.dp)
+            // 【v166】高度 12dp → **20dp**：12dp(33px) 根本装不下正常字号的标题 ——
+            //    9sp 都被切掉下半（`E` 缺了底横就变 `F`，阿亮一眼看出来）。
+            //    ⇒ **别再靠缩字号硬塞**，把这段空间给足。
+            // 🔴 多出来的 8dp 由**调用方**在画面**上方**那个 top padding 里等量扣掉
+            //    （12dp → 4dp）⇒ **整列总高度不变、字幕区一寸不下移**。
+            //    只改这里不改那边 = 又把字幕顶下去（阿亮盯过这个，别再犯）。
+            .height(20.dp)
             .padding(horizontal = 14.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = name,
-            // 🔴🔴 字号必须**塞得进这 12dp**（= 33px）：`字号 × 1.25 ≤ 33px` ⇒ 上限约 10.5sp。
-            //    取 9sp 留余量；`lineHeight` 略高于字号（×1.2 左右）避免上下被切。
-            //
-            //    为什么不能靠"溢出显示"（v163/v164 连翻两次）：
-            //    ① 溢出的上半会落进**视频画面区**，而画面是 `AndroidView{SurfaceView}` ——
-            //       **独立图层，盖在所有普通 View 之上**（v146 原生字幕踩过同一个坑）；
-            //    ② 溢出的下半会被后面的 `ModuleColumnHost`（同一 Column 里排在标题之后）盖住。
-            //    ⇒ 上下都出不去的，只能缩到自己装得下。
-            //    ⚠️ 想再放大，必须同时放宽那 12dp（先问阿亮）。
+            // 20dp = 55px；11sp 字、行高 14sp ≈ 38px ⇒ 居中后上下各余 ~8px，**完整不裁**。
             style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = 9.sp,
-                lineHeight = 11.sp,
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
             ),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -1325,7 +1321,10 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
         modifier = Modifier.fillMaxSize().padding(
             start = if (videoFullscreen) 0.dp else 16.dp,
             end = if (videoFullscreen) 0.dp else 16.dp,
-            top = if (videoFullscreen) 0.dp else 12.dp,
+            // 【v166】12dp → **4dp**：画面**上方**省下的这 8dp，正好补给画面下方那一行标题
+            //（标题行 12dp → 20dp）⇒ **整列总高度不变**，字幕区位置一寸不动。
+            // ⚠️ 这两处是一对，改一个必须改另一个。
+            top = if (videoFullscreen) 0.dp else 4.dp,
             bottom = 0.dp,
         )
     ) {
