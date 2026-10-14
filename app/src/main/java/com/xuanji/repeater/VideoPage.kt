@@ -66,6 +66,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -315,6 +316,12 @@ internal fun videoSeekPreview(targetMs: Long) {
     runCatching { mp.seekTo(targetMs) }
 }
 
+/** 【v157】手势跟手预览的**节流间隔**（ms）。
+ *  v157 首发 100ms → **v160 调成 50ms**：阿亮拿 1080P 和 4K 都实测过"不卡"、有余量，
+ *  加密一倍能让拖动时闪过的画面更多。
+ *  🔴 **再往下调（或去掉节流）之前，先让他试** —— 这是他手机上"卡不卡"的边界，别自己加码。 */
+private const val PREVIEW_THROTTLE_MS = 50L
+
 /** 跳到第 idx 句并高亮（与旧 VideoView 版逻辑一致：落点异步复核，避免跳到上一句中间） */
 internal fun videoSeekToSentence(idx: Int) {
     val mp = videoMpRef[0] ?: return
@@ -397,6 +404,41 @@ private fun formatSeekHint(targetMs: Long, durMs: Long, deltaMs: Long): String {
     val sign = if (deltaMs >= 0) "+" else "-"
     val step = formatSeekTime(kotlin.math.abs(deltaMs))
     return "$sign$step   ${formatSeekTime(targetMs)} / ${formatSeekTime(durMs)}"
+}
+
+/**
+ * 【v161】画面下方那一行「当前这集叫什么」。
+ *
+ * - **短标题居中、长标题自动轮播** —— `basicMarquee` 的行为正好对上这两个要求：
+ *   文字**放得下就不动**（于是被外层 Box 居中），**放不下才滚**。不用自己判长度、也不用两套分支。
+ * - 占的就是原来 `Spacer(12.dp)` 那块空白 ⇒ 只多出几 dp，下面的模块区几乎不动。
+ * - 集名为空（比如归档里那条没有文件）时**退回 12dp 空白**，不留一行空的。
+ *
+ * ⚠️ `videoName` 是 `fileNameWithoutExt` 出来的，**已经去掉扩展名**，不会带 ".mkv"。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun VideoTitleBar(name: String) {
+    if (name.isBlank()) {
+        Spacer(modifier = Modifier.height(12.dp))
+        return
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = name,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            modifier = Modifier
+                // 🔴 默认 iterations = 3（滚三遍就停），那不算"轮播" ⇒ 给成一直滚
+                .basicMarquee(iterations = Int.MAX_VALUE),
+        )
+    }
 }
 
 internal fun videoJumpSentence(step: Int) {
@@ -1415,10 +1457,13 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                                     gestureSeekText = formatSeekHint(target, dur, seekDeltaMs)
                                     gestureSeekBack = seekDeltaMs < 0
                                     gestureHintValue = (target.toFloat() / dur).coerceIn(0f, 1f)
-                                    // 跟手预览：**节流到 100ms 一次**。不节流会把解码器压垮
-                                    // （连续 seekTo 排队），4K 尤其明显 ⇒ 反而卡成幻灯片。
+                                    // 跟手预览：**节流**。不节流会让 seekTo 排队压垮解码器
+                                    // （4K 尤其明显）⇒ 反而卡成幻灯片。
+                                    // 【v160】100ms → **50ms**：阿亮 1080P / 4K 都实测试过"不卡"，
+                                    // 有余量 ⇒ 加密一倍让画面闪过更多。⚠️ 再往下调（30ms 以下）
+                                    // 或去掉节流之前，必须让他先试，别自己加码。
                                     val now = System.currentTimeMillis()
-                                    if (now - lastPreviewAt >= 100L) {
+                                    if (now - lastPreviewAt >= PREVIEW_THROTTLE_MS) {
                                         lastPreviewAt = now
                                         videoSeekPreview(target)
                                     }
@@ -2077,7 +2122,11 @@ internal fun VideoPage(readingMode: Boolean = false, layoutEdit: Boolean = false
                     }
                 )
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            // 【v161 阿亮】"视频页看不出这是哪一集" ⇒ 这一行放当前集名。
+            // 位置就是原来那个 `Spacer(12.dp)` 的空白 —— **不新占空间**，只是把它用起来。
+            // 🔴 别改去顶栏那 16dp、也别压画面（画面高是 `aspectRatio(16f/9f)` 算出来的）——
+            //    三处尺寸的实测见 `2026-10-14.md`。
+            VideoTitleBar(videoName)
             ModuleColumnHost(
                 modules = vModules,
                 heights = vHeights,
