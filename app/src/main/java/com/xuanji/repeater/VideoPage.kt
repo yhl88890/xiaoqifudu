@@ -525,12 +525,24 @@ internal fun VideoPage(
     // 关键：Activity 已在 Manifest 声明 configChanges="orientation|screenSize"，旋转不重建 Activity，
     // 否则重建会把 page 等 remember 状态打回默认（音频模式），且 VideoView 被卸载 → 全屏瞬间闪退回竖屏+音频。
     val activity = (context as? Activity)
-    DisposableEffect(videoFullscreen) {
-        // 全屏=横屏；非全屏=强制竖屏（即使手机还横着也转回，避免退出全屏卡在横屏）
-        activity?.requestedOrientation = if (videoFullscreen) {
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        } else {
-            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    // 【v170-hotfix 🔴 同一个「方向」只许一个写者】
+    //   病根（模拟器实证）：这里原来在「非全屏」时**无条件**写 `SCREEN_ORIENTATION_PORTRAIT`，
+    //   会把 `MainActivity` 刚设好的 `FULL_SENSOR` **顶回竖屏** ⇒ Activity 拿不到横屏窗口
+    //   ⇒ 本文件下面的 `isLandscape`（`screenWidthDp > screenHeightDp`）**恒为 false** ⇒ **双栏永远出不来**。
+    //   取证：`requestedOrientation=SCREEN_ORIENTATION_PORTRAIT` +
+    //         `areBoundsLetterboxed=true` / `letterboxReason=FIXED_ORIENTATION`，窗口被压成 1200×1600 竖条。
+    //   ⚠️ 为什么真机当初"验收通过"了：阿亮是在**视频页里当场打开 Pad 模式开关**的 ⇒ `allowRotate` false→true
+    //      ⇒ `MainActivity` 的 `LaunchedEffect` **最后执行**、写进 FULL_SENSOR ⇒ 侥幸转成横屏。
+    //      而**冷启动直接进视频页**、或**进出一次全屏**时，本效果器后执行 ⇒ 竖屏 ⇒ 双栏失效。
+    //   修法：允许转屏（平板 / Pad 模式）时，非全屏**不写死竖屏**，交回 FULL_SENSOR 由传感器决定；
+    //        只有"不允许转屏"的页面才维持原来的强制竖屏。
+    val rotationAllowed = LocalConfiguration.current.smallestScreenWidthDp >= 600 || padMode
+    DisposableEffect(videoFullscreen, rotationAllowed) {
+        // 全屏=横屏；非全屏且不允许转屏=强制竖屏（即使手机还横着也转回，避免退出全屏卡在横屏）
+        activity?.requestedOrientation = when {
+            videoFullscreen -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            rotationAllowed -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+            else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
         // 全屏时隐藏系统状态栏：否则顶部「字幕开关 / 退出全屏」两个按钮会被状态栏压住点不到。
         // 退出全屏再恢复显示。用 InsetsController 而非 FLAG_FULLSCREEN，兼容 Android 11+。
@@ -541,7 +553,12 @@ internal fun VideoPage(
             else insets.show(WindowInsetsCompat.Type.statusBars())
         }
         onDispose {
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            // 离开视频页：允许转屏的（平板/Pad 模式）交回 FULL_SENSOR，别顺手把平板顶回竖屏。
+            activity?.requestedOrientation = if (rotationAllowed) {
+                ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+            } else {
+                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
             activity?.window?.let { w ->
                 val view = w.decorView ?: return@let
                 WindowCompat.getInsetsController(w, view).show(WindowInsetsCompat.Type.statusBars())
