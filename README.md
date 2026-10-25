@@ -9,7 +9,9 @@
 - 技术栈：Kotlin + Jetpack Compose（Material 3），**无第三方 UI / 网络 / 播放库**
 - 签名：正式签名 `release`（`app/release.keystore`，指纹 `3fe6e64f…aefccb`，支持同签名覆盖升级）
 
-> ⚠️ 目录说明：`xuanji-app-fixed/` 是**当前在用的工程**（源码 + git 都在这）；同级的 `xuanji-app/` 是历史副本，别改错。
+## 下载安装
+
+[Releases](../../releases) 页面下载 APK，直接安装即可。**正式签名**（同签名可覆盖升级后续版本），需要 Android 8.0+（minSdk 26）。
 
 ---
 
