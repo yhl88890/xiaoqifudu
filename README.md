@@ -13,6 +13,13 @@
 
 [Releases](../../releases) 页面下载 APK，直接安装即可。**正式签名**（同签名可覆盖升级后续版本），需要 Android 8.0+（minSdk 26）。
 
+## 界面一览
+
+| 视频模式（B 站视频 + 双语字幕） | 音频模式（波形 + 复读控制） | 阅读模式（全屏精读） |
+|:---:|:---:|:---:|
+| ![视频模式](screenshots/video-playing.png) | ![音频模式](screenshots/audio-player.png) | ![阅读模式](screenshots/reading-mode.png) |
+
+---
 ---
 
 ## 一、它有哪些功能
