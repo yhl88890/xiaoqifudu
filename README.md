@@ -162,13 +162,13 @@ rm -rf app/build/intermediates/lint-cache
 
 产物：`app/build/outputs/apk/release/app-release.apk`（正式签名，R8 混淆）。
 
-⚠️ 几条踩过的坑（完整版见 `.workbuddy/memory/MEMORY.md`「构建 / 交付」）：
+⚠️ 几条踩过的坑（完整版在作者本地工作笔记，未公开）：
 - **别 `clean`**（1.5 分钟能好的事会变成好几分钟）
 - 别只信 `BUILD SUCCESSFUL`：可能只跑了 lint 没重编 ⇒ 查 APK 的 **mtime** + 在 dex 里搜新字符串
 - Gradle 按**内容哈希**判断改动，`touch` 不触发重编
 - **回退打包必须先把 `versionCode` 抬到比已装的高**（Android 拒绝降级覆盖）
 
-更细的电脑端环境说明见 `../电脑端开发指南.md`（那份是 8 月写的，环境部分仍有效，结构部分已过时）。
+
 
 ---
 
@@ -177,9 +177,9 @@ rm -rf app/build/intermediates/lint-cache
 | 文档 | 放什么 |
 |---|---|
 | **本 README** | 稳定的事实：项目定位、功能清单、代码地图、怎么构建、数据在哪 |
-| `../.workbuddy/memory/HANDBOOK.md` | **踩坑与「为什么这么设计」**：ASR / 断句、发音、布局白边、adb 验收、各类「故意这么设计」清单、拆巨石手法 |
-| `../.workbuddy/memory/MEMORY.md` | 项目硬约束速查（≤9KB） |
-| `../.workbuddy/memory/YYYY-MM-DD.md` | 逐日工作记录 |
+| （本地）HANDBOOK | **踩坑与「为什么这么设计」**：ASR / 断句、发音、布局白边、adb 验收、各类「故意这么设计」清单、拆巨石手法 |
+| （本地）MEMORY | 项目硬约束速查（≤9KB） |
+| （本地）逐日记录 | 逐日工作记录 |
 | **App 内「设置 → 关于 → 软件介绍」** | 给**用户**看的大白话说明（源码 `SettingsPage.kt` 的 `showIntro`）——**不是**本文件 |
 
 > 🔴 改「软件介绍」请改 App 内那份，不要写到这里来。两者受众不同。
