@@ -4,7 +4,7 @@
 不做社交、不做课程、不做账号体系，就解决一件事：**手上有什么材料（本地音频 / 美剧字幕 / B 站视频），就能拿来精听。**
 
 - 包名：`com.xuanji.repeater`
-- 版本：`1.2`（versionCode `42`）
+- 版本：`1.3.84`（versionCode `184`，发布版见 [Releases](../../releases)）
 - SDK：minSdk `26` / targetSdk `35` / compileSdk `35`
 - 技术栈：Kotlin + Jetpack Compose（Material 3），**无第三方 UI / 网络 / 播放库**
 - 签名：正式签名 `release`（`app/release.keystore`，指纹 `3fe6e64f…aefccb`，支持同签名覆盖升级）
