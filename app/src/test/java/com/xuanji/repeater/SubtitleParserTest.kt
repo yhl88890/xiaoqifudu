@@ -316,6 +316,24 @@ class SubtitleParserTest {
         assertEquals("movie.srt", hit?.name)
     }
 
+    // ---------- 🔴 边界（1011 定，别动）----------
+    //   两份同名/同源字幕并存时，**真·抓来的那份优先，绝不能被 ASR 版抢走**（抓的准，ASR 可能有错字）。
+    //   下面 `匹配_抓的字幕与ASR副本共存_优先命中原名那份` 钉的就是这条。
+
+    @Test
+    fun `匹配_没跑过识别的老友记_行为一点不变`() {
+        // ⚠️ 这是本次改动的**回归保护**：老友记那类自带好字幕的视频，旁边**根本没有** `-ASR` 文件
+        //   （全盘实测：`-ASR.srt` 只有 2 个、都在 B站目录）⇒ 必须还是命中同名那份。
+        val subs = listOf(File("E04.srt"), File("E05.srt"))
+        assertEquals("E04.srt", SubtitleParser.pickBest("E04.mkv", subs)?.name)
+    }
+
+    @Test
+    fun `匹配_只有ASR落地版时也能命中`() {
+        val subs = listOf(File("movie-ASR.srt"))
+        assertEquals("movie-ASR.srt", SubtitleParser.pickBest("movie.mp4", subs)?.name)
+    }
+
     @Test
     fun `匹配_扩展名优先级_srt优先于ass`() {
         // EXTS = [srt, ass, ssa] ⇒ 同基名时按这个顺序取。

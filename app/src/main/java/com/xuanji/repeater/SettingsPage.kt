@@ -204,8 +204,8 @@ fun SettingsPage(
                 //     这里只留四个字的短注，跟上面「悬浮窗」「只管音频」同一风格。
                 //   平板用户看这一项会以为没生效 —— 软件介绍里已写明"平板会自动开，不用管这个开关"。
                 SettingsSwitch(
-                    "Pad 模式", padMode, onPadModeChange,
-                    note = "横屏左右分栏",
+                    "双栏模式", padMode, onPadModeChange,
+                    note = "横屏全屏：左画面右字幕",
                 )
             }
 
@@ -563,6 +563,65 @@ fun SettingsPage(
                         AsrPrefs.saveTranslateModel(context, asrProvider, it.id)
                     },
                 )
+
+                // 🔴🔴【1017 阿亮】腾讯云翻译 —— **纯备用通道，不是新功能**。
+                //   原话："我只是多一个接口，让它复制原来的所有功能就行了，不用添加功能好不好，
+                //   就是多一个翻译接口。如果硅基流动不能用了，我现在所有的功能都能正常正常使用"
+                //   ⇒ 它只换"英文 → 中文"这一步的**来源**：识别、长句发音、长按查词**全都不动**。
+                //   默认「跟识别服务商一家」= 关，行为一个字不变。
+                var tcOn by remember { mutableStateOf(AsrPrefs.loadTencentEnabled(context)) }
+                PickerRow(
+                    // 名字不用"翻译引擎" —— 那个已经是上面的模型下拉，两个同名他会分不清。
+                    label = "翻译走哪家",
+                    options = listOf(false, true),
+                    current = tcOn,
+                    labelOf = { if (it) "腾讯云（备用）" else "跟识别服务商一家" },
+                    onPick = {
+                        tcOn = it
+                        AsrPrefs.saveTencentEnabled(context, it)
+                    },
+                )
+                if (tcOn) {
+                    // ⚠️ 每次改一个框都要把**另外两个当前值**一起写回去 —— saveTencentCred 是整组覆盖的。
+                    val cred0 = AsrPrefs.loadTencentCred(context)
+                    var tcAppId by remember { mutableStateOf(cred0.appId) }
+                    var tcSid by remember { mutableStateOf(cred0.secretId) }
+                    var tcSkey by remember { mutableStateOf(cred0.secretKey) }
+                    OutlinedTextField(
+                        value = tcAppId,
+                        onValueChange = {
+                            tcAppId = it
+                            AsrPrefs.saveTencentCred(context, it, tcSid, tcSkey)
+                        },
+                        label = { Text("AppID（腾讯云账号的 APPID）") },
+                        placeholder = { Text("一串数字，翻译本身用不到，识别那步才用") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    )
+                    OutlinedTextField(
+                        value = tcSid,
+                        onValueChange = {
+                            tcSid = it
+                            AsrPrefs.saveTencentCred(context, tcAppId, it, tcSkey)
+                        },
+                        label = { Text("SecretId") },
+                        placeholder = { Text("访问管理 → API 密钥管理 里那一对") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    )
+                    OutlinedTextField(
+                        value = tcSkey,
+                        onValueChange = {
+                            tcSkey = it
+                            AsrPrefs.saveTencentCred(context, tcAppId, tcSid, it)
+                        },
+                        label = { Text("SecretKey") },
+                        placeholder = { Text("只在新建时显示一次，没存就得重新建") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    )
+                }
             }
 
             // ---------------- B站 ----------------
@@ -773,17 +832,28 @@ fun SettingsPage(
                                 //   🔴 必须讲清三件事，否则他会以为开关坏了或"别处怎么也横了"：
                                 //     ① 平板不用开这个开关（本来就自动双栏）；
                                 //     ② 只管视频页 —— 音频/阅读/选集页仍然竖屏锁死；
-                                //     ③ 不用管系统「自动旋转」（App 自己放开的，不受那个总开关约束）。
+                                //     ③ 【v173 改口径】**系统「方向锁定」是一票否决** ——
+                                //        v170 原来写的是"不受系统自动旋转约束"，那是**故意绕开**的（因为
+                                //        他那台总开关本来就是关的，不绕开就转不动、看着像开关坏了）；
+                                //        1016 他实测后拍板要听系统的 ⇒ 文案必须跟着改，否则就是骗人。
                                 IntroBlock(
-                                    "Pad 模式：横屏时左边视频、右边字幕",
-                                    "手机横屏看视频时，画面铺满屏会又扁又浪费 —— 打开设置页「外观 → Pad 模式」，" +
-                                        "再把手机横过来，界面就变成左右两栏：左边是视频画面，右边是标题和字幕列表，" +
-                                        "跟看平板一样。竖着拿还是原来的样子，什么都不变。\n" +
-                                        "平板（屏幕宽度 600dp 以上）不用开这个开关 —— 它自己就是横屏双栏、竖屏单栏。\n" +
+                                    "双栏模式：手机横屏 = 左画面 + 右字幕（全屏）",
+                                    "手机横屏看视频，画面铺满整屏又扁又浪费。打开设置页「外观 → 双栏模式」，" +
+                                        "把手机横过来，界面就变成：左边视频画面、右边字幕列表，" +
+                                        "顶栏、底栏这些外框全部隐藏，整屏都用来放内容 —— " +
+                                        "右边能一次显示十几行字幕，画面还比原来大一圈。竖着拿还是原来的样子。\n" +
+                                        "怎么退出：从屏幕边缘往里滑一下（或按返回键）就回到竖屏；" +
+                                        "把手机再横过来，又会自动进入双栏。\n" +
+                                        "视频还没字幕的时候：先退出，在竖屏下点顶栏「生成字幕」跑一遍识别、" +
+                                        "或者放个同名 .srt 到视频旁边，再横过来就能看了。\n" +
+                                        "平板（屏幕宽度 600dp 以上）不用开这个开关 —— 它自己就是横屏双栏、竖屏单栏，" +
+                                        "而且平板的双栏保留顶栏底栏、不会全屏。\n" +
                                         "这个开关只管视频页。音频、阅读、选集、文件夹那些页面一直是竖屏，" +
                                         "不会跟着横过来（它们横过来会挤坏）。\n" +
-                                        "另外它不受系统「自动旋转」总开关的约束 —— 开了 Pad 模式就能横，" +
-                                        "不用特地去下拉通知栏开自动旋转。",
+                                        "还有一个前提：手机系统那个「方向锁定」管着它。你从下拉通知栏把方向锁上，" +
+                                        "双栏模式也就不转了 —— 想横着看双栏，得先把系统的自动旋转打开。" +
+                                        "两个都放开（这个开关开着 + 系统没锁方向）才转得动；" +
+                                        "你锁了它就听你的，横着拿也一直竖着。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 // 🔴🔴【0917 阿亮新增要求】他的原话："所有要填 API 的地方要跟人说清楚：
@@ -1123,7 +1193,9 @@ fun SettingsPage(
                                         "长按是个开关：按一下把藏起来的那行补回来，再长按一下又收回去。\n" +
                                         "双语档下长按不一样：两句本来就都摆着，没什么可补的，所以长按直接进选词" +
                                         "（点单词查词、加生词本），不再做整句翻译 —— 中文它自己就在那儿，再翻一遍没意义。\n" +
-                                        "这一档在「阅读模式」里同样管用，而且两个地方是同一个档位，不用各调一次。",
+                                        "这一档在「阅读模式」里同样管用，而且两个地方是同一个档位，不用各调一次。\n" +
+                                        "另外，要是这份字幕只有一种语言（比如 B站 抓来的纯英文、或者只带中文字幕），" +
+                                        "菜单里的三个选项就不会出现，只留一行灰标题 —— 它就一种语言，本来就没什么可裁的。",
                                 )
                                 Spacer(Modifier.height(12.dp))
                                 IntroBlock(

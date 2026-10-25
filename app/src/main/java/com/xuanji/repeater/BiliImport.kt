@@ -206,7 +206,16 @@ object BiliImport {
         val finalLines = if (needTranslate) {
             val enTexts = subLines.map { if (it.cn.isBlank()) it.text else "" }   // 已有中文的段不重复翻
             val key = AsrPrefs.loadKey(context)
-            val zh = if (key.isNotBlank()) {
+            val zh = if (AsrPrefs.useTencentForTranslate(context)) {
+                // 🔴【1017 阿亮】备用翻译通道：整批改走腾讯云机器翻译。
+                //   原话："我只是多一个接口…如果硅基流动不能用了，我现在所有的功能都能正常使用"
+                //   ⇒ **功能一点没变**，只把"英→中"这一步的数据来源换掉。
+                //   ⚠️ [TencentTranslate.translateBatch] 是阻塞调用，必须挪到 IO 线程。
+                //   ⚠️ 它返回等长列表、失败项给 ""，跟下面那支的契约一模一样 ⇒ 下游代码一行不用改。
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    TencentTranslate.translateBatch(enTexts, AsrPrefs.loadTencentCred(context))
+                }
+            } else if (key.isNotBlank()) {
                 // 【v44】翻译跟着「识别服务商」走（地址 + 模型都由它推出来）
                 val provider = AsrProvider.current(context)
                 SubtitleTranslator.translateBatch(

@@ -165,7 +165,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
@@ -201,6 +200,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -514,12 +514,22 @@ internal val FULLSCREEN_CTRL_BAND_H = 96.dp
 internal fun VideoPage(
     readingMode: Boolean = false,
     layoutEdit: Boolean = false,
-    /** 【v170】Pad 模式开关（设置页那个）。手机横屏要双栏得靠它打开；
+    /** 【v170】双栏模式开关（设置页那个，原名「Pad 模式」）。手机横屏要双栏得靠它打开；
      *  平板不用 —— `isTablet` 自己就会放行。 */
     padMode: Boolean = false,
+    /** 【v172】手机「沉浸双栏」：横屏时外框全隐，只留「左画面 + 右字幕」。
+     *  判定在 MainActivity（见那边 `immersive` 的注释），平板恒为 false。 */
+    immersive: Boolean = false,
 ) {
     val subtitleListState = rememberLazyListState()
     val context = LocalContext.current
+    // 【v172】沉浸标记用 rememberUpdatedState，**不能**直接读参数、也**不能**进 remember 的 key：
+    //   ① 【v173 起已不成立】原本担心直接读参数会被左/右栏 lambda 的闭包冻结
+    //      —— 但自 v173 起 leftPane/rightPane 改回了**普通 lambda**，每次重组都重新捕获，读到就是最新值。
+    //   ② 放进 remember 的 key —— key 一变就重建内容 ⇒ AndroidView 重建、Surface 销毁重建
+    //      ⇒ 视频从关键帧重新解码闪一下（v171 记过的老账）。
+    //   rememberUpdatedState 两头都躲开：闭包不变、读到的永远是最新值。
+    val immersiveNow by rememberUpdatedState(immersive)
 
     // 全屏：强制横屏（SENSOR_LANDSCAPE 锁定横屏，左右横屏都跟手）；退出全屏强制回竖屏。
     // 关键：Activity 已在 Manifest 声明 configChanges="orientation|screenSize"，旋转不重建 Activity，
@@ -536,32 +546,29 @@ internal fun VideoPage(
     //      而**冷启动直接进视频页**、或**进出一次全屏**时，本效果器后执行 ⇒ 竖屏 ⇒ 双栏失效。
     //   修法：允许转屏（平板 / Pad 模式）时，非全屏**不写死竖屏**，交回 FULL_SENSOR 由传感器决定；
     //        只有"不允许转屏"的页面才维持原来的强制竖屏。
-    val rotationAllowed = LocalConfiguration.current.smallestScreenWidthDp >= 600 || padMode
-    DisposableEffect(videoFullscreen, rotationAllowed) {
-        // 全屏=横屏；非全屏且不允许转屏=强制竖屏（即使手机还横着也转回，避免退出全屏卡在横屏）
-        activity?.requestedOrientation = when {
-            videoFullscreen -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            rotationAllowed -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-            else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        }
-        // 全屏时隐藏系统状态栏：否则顶部「字幕开关 / 退出全屏」两个按钮会被状态栏压住点不到。
-        // 退出全屏再恢复显示。用 InsetsController 而非 FLAG_FULLSCREEN，兼容 Android 11+。
+    // 【v172 🔴 这里**不再写方向** —— 方向只剩一个写者（MainActivity 的 LaunchedEffect）】
+    //   v171 的血泪就是两处抢写 `requestedOrientation`：本处 DisposableEffect 是**同步执行**的，
+    //   而 MainActivity 的 LaunchedEffect 要等下一帧才跑 ⇒ **本处赢** ⇒ 把刚设好的传感器方向
+    //   顶回竖屏 ⇒ 双栏永远出不来。现在本处只负责「系统栏隐藏」，方向一律由 MainActivity 算。
+    DisposableEffect(videoFullscreen, immersive) {
+        // 全屏 / 沉浸双栏：都隐藏**状态栏 + 导航栏**，整屏交给内容。
+        // ⚠️ 沉浸必须连导航栏一起隐 —— 否则底部那条手势条会压在字幕行上。
         activity?.window?.let { w ->
             val view = w.decorView ?: return@let
             val insets = WindowCompat.getInsetsController(w, view)
-            if (videoFullscreen) insets.hide(WindowInsetsCompat.Type.statusBars())
-            else insets.show(WindowInsetsCompat.Type.statusBars())
+            if (videoFullscreen || immersive) {
+                insets.hide(WindowInsetsCompat.Type.systemBars())
+                insets.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                insets.show(WindowInsetsCompat.Type.systemBars())
+            }
         }
         onDispose {
-            // 离开视频页：允许转屏的（平板/Pad 模式）交回 FULL_SENSOR，别顺手把平板顶回竖屏。
-            activity?.requestedOrientation = if (rotationAllowed) {
-                ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-            } else {
-                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            }
             activity?.window?.let { w ->
                 val view = w.decorView ?: return@let
-                WindowCompat.getInsetsController(w, view).show(WindowInsetsCompat.Type.statusBars())
+                WindowCompat.getInsetsController(w, view)
+                    .show(WindowInsetsCompat.Type.systemBars())
             }
         }
     }
@@ -1353,33 +1360,58 @@ internal fun VideoPage(
     val cfg = LocalConfiguration.current
     val isLandscape = cfg.screenWidthDp > cfg.screenHeightDp
     val isTablet = cfg.smallestScreenWidthDp >= 600
+    // 🔴【1016 阿亮报"从全屏切回竖屏时闪过一帧双栏"】根因 = **两个状态不同步**：
+    //   点退出全屏 ⇒ `videoFullscreen` 这一帧就变 false，可 Activity 的**方向还没转回来**
+    //   （系统配置变更要几十~几百 ms）⇒ 这期间 `!videoFullscreen && isLandscape` 同时成立
+    //   ⇒ `twoPane` 抢跑一帧双栏；等方向落定 `isLandscape` 变 false，双栏又消失 ⇒ 看着就是"闪一下"。
+    // 🔴 修法：**横屏必须连续稳定 200ms 才认**（转屏中间态一律不算）——
+    //   `isLandscape` 一变这个 effect 就被重启、`landscapeSettled` 打回 false ⇒ 中间态天然被盖住。
+    //   ⚠️ 别改成"退出全屏后固定禁 N 毫秒"那种：方向落定快慢不定，那是拍脑袋兜底。
+    //   ⚠️ 全屏时恒 false（进全屏的那一下也要把 settled 清掉，否则退出时留着旧 true 会闪）。
+    var landscapeSettled by remember { mutableStateOf(isLandscape) }
+    LaunchedEffect(videoFullscreen, isLandscape) {
+        if (!videoFullscreen && isLandscape) {
+            delay(200)
+            landscapeSettled = true
+        } else {
+            landscapeSettled = false
+        }
+    }
     // 【v170 Step2】开关从 SP 接进来（参数 `padMode`，由 MainActivity 传）。
     //   ⚠️ 光有它还不够 —— Activity 得先**能转屏**（MainActivity 里的 `requestedOrientation`），
     //     否则 isLandscape 永远是 false，这里判断得再对也白搭。
-    val twoPane = !videoFullscreen && !readingMode && isLandscape && (isTablet || padMode)
+    val twoPane = !videoFullscreen && !readingMode && landscapeSettled && (isTablet || padMode)
 
     val paneModifier = Modifier.fillMaxSize().padding(
-        start = if (videoFullscreen) 0.dp else 16.dp,
-        end = if (videoFullscreen) 0.dp else 16.dp,
+        // 【v172】沉浸双栏：整屏铺满，去掉左右 16dp / 顶部 8dp 的内边距（壳都隐了，留白只会浪费）
+        start = if (videoFullscreen || immersive) 0.dp else 16.dp,
+        end = if (videoFullscreen || immersive) 0.dp else 16.dp,
         // 【v169 🔴 统一「顶栏 → 内容」空档】12dp → **8dp**。
         //   阿亮 1015 定：全 App 统一走「**顶栏胶囊底边 → 首个可见元素的最高像素**」这个口径
         //   （有底色的块取块顶、纯文字取字形顶），目标 ≈ **45px**（主测机 1080 宽屏高 2460 上占 1.8%）。
         //   实测基线：胶囊底 y242、画面顶 y298 = 56px ⇒ 要缩到 45px ⇒ top 减 11px ≈ 4dp。
         //   ⚠️ v167 那条注释是**错的**（自称"从字幕列表 padding 里扣了 8dp"，实际没扣，
         //      已在 v169 补上）⇒ 这里不用再为那笔账背锅。
-        top = if (videoFullscreen) 0.dp else 8.dp,
+        top = if (videoFullscreen || immersive) 0.dp else 8.dp,
         bottom = 0.dp,
     )
 
-    // 【v170 🔴 拆两栏的技术要点】两块内容用 `movableContentOf` 包 —— **不能用普通 lambda**：
-    //   普通 lambda 会让"单栏"和"双栏"两个分支的调用结构不同，Compose 会当成**全新内容重建**
-    //   ⇒ 转屏时视频会重新加载（黑一下、复读状态丢）。movableContentOf 让同一块内容在树里"搬家"
-    //   而**保留全部状态**（remember / LaunchedEffect 都不重建）。
-    //   ⚠️ 约束：同一块 movableContent 在同一时刻只能出现在一处 —— 我们 if/else 互斥，满足。
-    //   ⚠️ `remember` 必须带 key：`readingMode` / `videoFullscreen` 是**函数参数（val）**，
-    //      闭包会捕获创建那一刻的值 —— 不带 key 就永远是第一帧的旧值（切阅读模式后判断就不再更新）。
-    //      带 key 后，这两个真正变化时重建一次（那是"换页面"级别的大切换，重建可接受）。
-    val leftPane = remember(readingMode, videoFullscreen) { movableContentOf {
+    // 【v170 为什么当初用 movableContentOf —— 以及 v173 为什么推翻它】
+    //   v170 拆两栏时用 `movableContentOf` 包这两块内容：普通 lambda 会让"单栏/双栏"两个分支的
+    //   调用结构不同，Compose 当成**全新内容重建** ⇒ 转屏时视频重新加载（黑一下、复读状态丢）。
+    //   movableContentOf 让同一块内容在树里"搬家"、**保留全部状态**（remember/LaunchedEffect 不重建）。
+    //
+    //   🔴🔴 但 v173 发现它的**致命代价**（阿亮 1016 真机复现、adb 日志铁证）：
+    //     搬过家之后，Compose **复用已组合出来的结果、不重新执行 lambda 体**
+    //     ⇒ 之后**任何状态变化都不会让这块重组**。表现：
+    //       「双栏 → 点全屏（转横屏）→ BACK 回竖屏 → 点画面」⇒ `controlsVisible` 状态**确实翻了 true**
+    //       （日志有），但控制条**整块不渲染**（dump 里连「字幕」「全屏」键都没有）——
+    //       不是"读到旧值"，是"这段代码压根没重跑"。切一次模式（VideoPage 整体重建）就恢复，正是铁证。
+    //     ⚠️ 试过 `rememberUpdatedState` 修 —— **无效**（整个 lambda 体不重跑，不是读值的问题）。
+    //   ⇒ 正解：**改回普通 lambda**，每次重组都真正执行、天然捕获最新参数与 State。
+    //   ⚠️ 代价：转屏 / 双栏切换时这块钱会重建（v170 省的就是这个）。"点不出来"比"转屏黑一下"严重得多
+    //     ⇒ 正确性优先。若日后要同时保住两者，得换别的状态提升方案，别再退回 movableContentOf。
+    val leftPane: @Composable () -> Unit = {
         Surface(
             // 【v170 🔴 双栏必须换算法】单栏时左栏宽 = 整屏，`aspectRatio(16/9)` 先按**宽**算高没问题；
             //   但双栏时左栏只有 ~64% 宽，而**左栏的高度是有限的**（屏高 − 顶栏 − 底栏）。
@@ -1388,6 +1420,10 @@ internal fun VideoPage(
             //     ⇒ 画面自动缩小、左右留边，**16:9 比例不变形**（这就是"黑边"的由来）。
             modifier = when {
                 videoFullscreen -> Modifier.fillMaxSize()
+                // 【v172 沉浸】左栏宽就是按 16:9 算出来的视频宽 ⇒ 这里**按宽度算高**。
+                //   ⚠️ 绝不能用下面那支的 `matchHeightConstraintsFirst`：它按「左栏剩余高度」定高、
+                //      再反推宽度 ⇒ 反推出来的宽度会超过左栏 ⇒ **画面横向溢出**（v170 踩过的同款坑）。
+                immersiveNow -> Modifier.fillMaxWidth().aspectRatio(16f / 9f)
                 twoPane -> Modifier.fillMaxWidth().aspectRatio(16f / 9f, matchHeightConstraintsFirst = true)
                 else -> Modifier.fillMaxWidth().aspectRatio(16f / 9f)
             },
@@ -1549,7 +1585,9 @@ internal fun VideoPage(
                         }
                     }
                 }
-                .clickable { controlsVisible = !controlsVisible }) {
+                .clickable {
+                    controlsVisible = !controlsVisible
+                }) {
                 if (videoUri != null) {
                     AndroidView(
                         factory = { ctx ->
@@ -1856,7 +1894,17 @@ internal fun VideoPage(
                                 //   ⇒ 统一口径 = **用不了 ⇒ 只留一行标题（灰），子项一律不列**。
                                 //     标题留着是为了让用户知道"这里有这么个东西、现在用不了"，
                                 //     子项不列是因为**列出来也没用、还占菜单高度**（v151 顶破过一次）。
-                                val dimDownSub = subtitlesFromAsr
+                                // 🔴🔴【v173 阿亮】再补一种"不适用"：**单语字幕**（比如 B站 抓来的纯英文）。
+                                //   阿亮 1016 原话："明明下边显示的是英文，但它还是勾着中英双显，哎，
+                                //   这是个什么小问题。" —— 根因在 `SentenceCodec.filterByMode`：
+                                //   单语字幕（`cn.isEmpty() || en.isEmpty()`）**任何档位都原样返回** ⇒
+                                //   三个档位对它全都不生效，可菜单还照旧勾着「英中双语」= **在说谎**。
+                                //   ⇒ 按既有统一口径收掉：**用不了的就只留灰标题、子项一律不列**
+                                //     （跟 ASR 那份处理一模一样，只是原因不同）。勾都不出现，自然不骗人。
+                                //   ⚠️ 判据 = 整份字幕里**有没有任何一句是双语**；只在菜单展开时才算，
+                                //     不占常驻开销（`none` 遇到第一句双语就短路，双语字幕判定极快）。
+                                val singleLangSub = sentences.none { isBilingual(it.text) }
+                                val dimDownSub = subtitlesFromAsr || singleLangSub
                                 DropdownMenuItem(
                                     text = {
                                         Text(
@@ -1941,9 +1989,14 @@ internal fun VideoPage(
                     }
                 }
                 // 全屏：顶部右侧 字幕开关 + 退出全屏（避开状态栏，避免被挡）
+                // 🔴【v174 阿亮报"全屏时这两个键往下一档"】原来是 `padding(8.dp)`，而非全屏那排
+                //   （上面 1816 行）是 `padding(4.dp)` ⇒ 全屏时整整低了 4dp。
+                //   真机实测（主测机 1080×2460 @440dpi，横屏）：非全屏 y=**45px**、全屏 y=**55px**，
+                //   差 10px 肉眼可见 ⇒ 阿亮："感觉是在右上角的往下一档"。
+                //   ⇒ 统一成 4dp：全屏与其他状态**同一个贴顶口径**。
                 if (!readingMode && videoFullscreen && videoUri != null) {
                     Row(
-                        modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(8.dp),
+                        modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(4.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         IconButton(onClick = { videoSubOn = !videoSubOn }) {
@@ -2184,14 +2237,14 @@ internal fun VideoPage(
                 }
             }
         }
-    } }
+    }
 
     // 【v170】右栏 = 标题条 + 模块区（字幕列表 / 控制排）。
     //   标题条留在右栏、不跟画面走 —— 双栏时它就是右栏的"当前集名"标签，跟下面的字幕列表是一组。
-    val rightPane = remember(readingMode, videoFullscreen) { movableContentOf {
+    val rightPane: @Composable () -> Unit = {
         // 【v170 🔴 自带一层 Column —— 这是必需的，不是风格问题】原代码里的 `weight(1f)`
         //   （字幕列表 / "这个视频还没有字幕"空态那块）用的是 **ColumnScope 的 weight**，
-        //   而 `movableContentOf` 的 lambda 类型是 `@Composable () -> Unit`、**拿不到任何 scope**
+        //   而 `@Composable () -> Unit` 这种无 scope 的 lambda 类型**拿不到任何 scope**
         //   ⇒ 编译直接报 `Unresolved reference 'weight'`（实测编译两面红旗）。
         //   解法：自己在里面套一层撑满的 Column —— 这层提供了 scope，外层给它多少高度它就吃多少。
         Column(modifier = Modifier.fillMaxSize()) {
@@ -2213,9 +2266,13 @@ internal fun VideoPage(
             // 位置就是原来那个 `Spacer(12.dp)` 的空白 —— **不新占空间**，只是把它用起来。
             // 🔴 别改去顶栏那 16dp、也别压画面（画面高是 `aspectRatio(16f/9f)` 算出来的）——
             //    三处尺寸的实测见 `2026-10-14.md`。
-            VideoTitleBar(videoName)
+            // 【v172】沉浸双栏：右栏只留字幕 —— 连标题条也隐掉（省下的 24dp 全归字幕）
+            if (!immersiveNow) VideoTitleBar(videoName)
             ModuleColumnHost(
-                modules = vModules,
+                // 【v172】沉浸时把 TRANSPORT 从**渲染列表**里剔掉（它已经搬到左栏画面下方了）。
+                //   ⚠️ 只过滤这一次渲染，**不动 `vModules`** —— 那是持久化偏好（video_layout），
+                //     退出沉浸后用户排好的模块顺序 / 高度原样还在。
+                modules = if (immersiveNow) vModules.filter { it != VideoModule.TRANSPORT } else vModules,
                 heights = vHeights,
                 layoutEdit = layoutEdit,
                 onMove = { from, to ->
@@ -2607,9 +2664,9 @@ internal fun VideoPage(
             }
         }
         }
-    } }
+    }
 
-    // 【v170】单栏 / 双栏 二选一。两块内容都是 movableContent ⇒ 转屏切换时状态不丢。
+    // 【v170】单栏 / 双栏 二选一。两块内容用普通 lambda（v173 起，见上方注释）。
     if (twoPane) {
         // 🔴🔴【v170 血泪 · 画面撑破容器的真凶】
         //   原来写的是 `Row { Column(weight(1.8f)) { leftPane() } ... }`，而 leftPane 里画面是
@@ -2625,10 +2682,30 @@ internal fun VideoPage(
         BoxWithConstraints(modifier = paneModifier) {
             val rowWidth = maxWidth
             val rowHeight = maxHeight
-            // 画面 16:9 吃满高度所需宽度
-            val fitWidth = rowHeight * 16f / 9f
-            // 取小值：要么按阿亮定的 1.8:1 分（左 64%），要么刚好等于画面宽度（不剩黑边）
-            val leftWidth = minOf(rowWidth * (1.8f / 2.8f), fitWidth)
+            // 【v172 沉浸双栏 · 左栏宽度（带兜底，换任何屏幕都放得下）】
+            //   目标 = min( 64% 屏宽 , 「(屏高 − 键排最小高) × 16/9」)
+            //   ① 64%（= 阿亮定的 1.8:1）是基准：视频按 16:9 填进去后，下方自然空出的部分正好放键排；
+            //   ② 兜底项伺候**超长屏**（22:9 往上）：屏越窄长，视频吃掉的像素越多、越留不出键排的位置
+            //      ⇒ 这时自动把左栏缩窄，缩到「视频 + 48dp 键排」刚好塞进屏高为止。
+            //      实测富余（各机 density 折算）：16:9 → 172dp、20:9 → 78dp、阿亮这台(2.28) → ~70dp、
+            //      21:9 → 63dp、22:9 → 43dp（**只有它触发兜底**）。
+            //   ⚠️ 非沉浸（平板 / 普通双栏）**一行不改**，仍走原来的 fitWidth 逻辑。
+            val kpMin = 48.dp
+            val leftWidth = if (immersive) {
+                minOf(
+                    rowWidth * (1.8f / 2.8f),
+                    (rowHeight - kpMin).coerceAtLeast(0.dp) * 16f / 9f,
+                )
+            } else {
+                // 画面 16:9 吃满高度所需宽度
+                val fitWidth = rowHeight * 16f / 9f
+                // 取小值：要么按阿亮定的 1.8:1 分（左 64%），要么刚好等于画面宽度（不剩黑边）
+                minOf(rowWidth * (1.8f / 2.8f), fitWidth)
+            }
+            // 沉浸时键排高度 = 「屏高 − 视频高」，夹在 48~88dp：
+            //   48dp = Android 无障碍最小触摸目标（再矮不好按）；88dp = 现有控制排高度（再高纯浪费）。
+            val videoH = leftWidth * 9f / 16f
+            val transportH = (rowHeight - videoH).coerceIn(48.dp, 88.dp)
             Row(modifier = Modifier.fillMaxSize()) {
                 Column(
                     modifier = Modifier
@@ -2636,7 +2713,28 @@ internal fun VideoPage(
                         .fillMaxHeight(),
                     // 高度有余量时（平板）画面居中，别顶着上沿
                     verticalArrangement = Arrangement.Center,
-                ) { leftPane() }
+                ) {
+                    leftPane()
+                    // 【v172 沉浸双栏 · 键排搬到画面正下方】
+                    //   为什么放这儿：右栏因此**一根毛都不被占**，整屏高度全归字幕（实测 6 行 → 十几行）；
+                    //   而视频高度由**宽度**决定 ⇒ 键排吃的是「视频下方本来就空着的那块」⇒ **视频一点没变小**。
+                    //   ⚠️ 只在沉浸下加。平板 / 普通双栏的键排仍在右栏模块区里，保持可拖拽换位/调高矮。
+                    if (immersive) {
+                        VideoTransportRow(
+                            modifier = Modifier.fillMaxWidth().height(transportH),
+                            onPrevTrack = { prevVideo() },
+                            onPrevSentence = { videoJumpSentence(-1) },
+                            onPrevSentenceHoldChange = { held -> if (held) startRewind() else stopFast() },
+                            onToggle = { videoTogglePlay() },
+                            onNextSentence = { videoJumpSentence(1) },
+                            onNextSentenceHoldChange = { held -> if (held) startFastForward() else stopFast() },
+                            onNextTrack = { nextVideo() },
+                            prevTrackEnabled = hasPrevVideo,
+                            nextTrackEnabled = hasNextVideo,
+                            playing = videoPlaying,
+                        )
+                    }
+                }
                 Column(modifier = Modifier.weight(1f).fillMaxHeight()) { rightPane() }
             }
         }

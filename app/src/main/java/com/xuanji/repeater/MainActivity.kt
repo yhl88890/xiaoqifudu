@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.net.Uri
+import android.view.OrientationEventListener
 import android.view.WindowManager
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -21,6 +22,9 @@ import java.io.File
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
+import android.database.ContentObserver
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -874,8 +878,8 @@ private fun videoGenerateLyrics(context: Context) {
                 //     ▸ 下次打开视频走 `SubtitleParser.pickBest` 的「同名/含 ASR 标记」匹配，自动认得
                 //   ⚠️ **顺序不能反**：上面库那份是保底，必须先存好。旁边写不进去（只读目录/权限）
                 //      也只是少一份副本，绝不能让用户白跑一次识别。
-                //   ⚠️ 命名/退让规则见 `SubtitleExport.writeAsrBeside`：优先 `<基名>.srt`，
-                //      被占（一般是抓来的）⇒ 退让 `<基名>-ASR.srt`；内容一样则早退不重写。
+                //   ⚠️ 命名规则见 `SubtitleExport.writeAsrBeside`：**固定写 `<基名>-ASR.srt`**，
+                //      绝不去碰 `<基名>.srt`（那是"最好的字幕"的黄金位置）；内容没变则早退不重写。
                 //   ⚠️ 写失败**不改变** msg 的"识别完成"口径，只在后面追加一句说明。
                 val saved = if (videoPath.isNotBlank()) {
                     runCatching { SubtitleExport.writeAsrBeside(videoPath, finalSentences) }
@@ -1546,6 +1550,73 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** 【v172】读取「设备物理上是不是竖着」。用于沉浸双栏的退出复位。
+     *  🔴 为什么不能只看 Activity 的配置：退出沉浸 = 请求竖屏 ⇒ Activity 被钉在竖屏
+     *     ⇒ `LocalConfiguration` 永远报「竖」⇒ 如果拿它当复位条件，就永远解不了锁、也永远退不出去。
+     *     所以必须直接读**传感器给的角度**（跟显示方向无关）：0°/180°±45° = 竖，90°/270°±45° = 横。
+     *  ⚠️ 回调在主线程（构造时绑定当前 Looper）⇒ 可以直接改 Compose state。 */
+    @Composable
+    private fun rememberDevicePortrait(): Boolean {
+        val context = LocalContext.current
+        var portrait by remember { mutableStateOf(true) }
+        DisposableEffect(context) {
+            val listener = object : OrientationEventListener(context) {
+                override fun onOrientationChanged(orientation: Int) {
+                    if (orientation == ORIENTATION_UNKNOWN) return
+                    portrait = orientation < 45 || orientation > 315 ||
+                        (orientation > 135 && orientation < 225)
+                }
+            }
+            if (listener.canDetectOrientation()) listener.enable()
+            onDispose { listener.disable() }
+        }
+        return portrait
+    }
+
+    /** 【v173】读取「系统还允许自动旋转吗」。阿亮 1016 拍板：**系统锁了方向，App 就得听**。
+     *  他那句原话："我把整个手机的方向锁定锁住之后，它横屏还是有反应，还是能转。"
+     *
+     *  - 判据 = `Settings.System.ACCELEROMETER_ROTATION`。MIUI 那个「自动旋转／方向锁定」快捷开关
+     *    改的就是它（**1 = 允许转，0 = 锁住**）。实测他那台现在就是 0。
+     *  - 🔴 必须挂 `ContentObserver` **实时跟着**：他在下拉快捷开关里一锁一解时，组合不会自己重跑
+     *    （`LaunchedEffect` 的 key 没变）⇒ 不跟就会变成"我明明解了锁，它还是不转"。
+     *  - ⚠️ 为什么不干脆用 `SCREEN_ORIENTATION_USER` / `UNSPECIFIED` 交给系统判断：
+     *    manifest 里那句 `screenOrientation="portrait"` 会被当成"activity 自己想要的朝向"，
+     *    系统可能顺着它走 ⇒ 那就永远转不动了。**直接读设置、再显式选 SENSOR / PORTRAIT**
+     *    最可控，也不受各家 ROM 对 USER 语义的实现差异影响。
+     *  - ⚠️ 回调在**主线程**（构造时绑主 Looper）⇒ 可以直接改 Compose state。 */
+    @Composable
+    private fun rememberSystemAutoRotate(): Boolean {
+        val context = LocalContext.current
+        fun read(): Boolean = runCatching {
+            Settings.System.getInt(
+                context.contentResolver,
+                Settings.System.ACCELEROMETER_ROTATION,
+                0,
+            ) == 1
+        }.getOrDefault(false)
+
+        var autoRotate by remember { mutableStateOf(read()) }
+        DisposableEffect(context) {
+            val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+                override fun onChange(selfChange: Boolean) {
+                    autoRotate = read()
+                }
+            }
+            runCatching {
+                context.contentResolver.registerContentObserver(
+                    Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION),
+                    false,
+                    observer,
+                )
+            }
+            onDispose {
+                runCatching { context.contentResolver.unregisterContentObserver(observer) }
+            }
+        }
+        return autoRotate
+    }
+
     @Composable
     private fun AppRoot(
         themeIndex: Int,
@@ -1597,14 +1668,66 @@ class MainActivity : ComponentActivity() {
         //     在他眼里就是"开关坏了"。FULL_SENSOR 由传感器直接决定，绕开系统那层。
         //   ⚠️ manifest 已声明 `configChanges="orientation|screenSize|keyboardHidden"`
         //     ⇒ 转屏**不会**重建 Activity，视频/音频播放不受影响。
-        val isTabletDevice = LocalConfiguration.current.smallestScreenWidthDp >= 600
+        val cfgImm = LocalConfiguration.current
+        val isTabletDevice = cfgImm.smallestScreenWidthDp >= 600
+        val isLandscapeImm = cfgImm.screenWidthDp > cfgImm.screenHeightDp
         val videoLikePage = page == Page.VIDEO || (page == Page.READING && readingFromVideo)
         val allowRotate = isTabletDevice || (padMode && videoLikePage)
-        LaunchedEffect(allowRotate) {
-            requestedOrientation = if (allowRotate) {
-                ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-            } else {
-                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        // 【v172 🔴 手机「沉浸双栏」】阿亮 1016 定：手机开了双栏模式，横屏 = **直接把外框全隐**，
+        //   只留「左画面 + 右字幕」（不是平板那种带顶栏底栏的双栏）。手机上**没有**中间态。
+        //   为什么能多显示字幕：外框（顶栏 217px + 底栏 183px）本来是**全屏**共用的，隐掉后
+        //   内容区从 724px（= 屏高的 64%）涨到整屏，而视频按 16:9 ⇒ 高度多一分宽度多 1.78 分
+        //   ⇒ **画面反而更大**，右栏能显示十几行（原来只有 6 行）。
+        //   退出：屏幕边缘内滑（系统返回手势）或返回键 ⇒ 请求竖屏回单栏。
+        //   ⚠️ 平板不算沉浸（平板屏高 800dp，那圈壳只占 11%，不碍事，保持原样一行不改）。
+        //   ⚠️ 全屏（videoFullscreen / SENSOR_LANDSCAPE 那条）也不是沉浸 —— 它本来就没有壳。
+        var immersiveExited by remember { mutableStateOf(false) }
+        // 🔴 退出标记的复位：**必须等手机真的竖起来**再复位，否则死循环
+        //   （请求竖屏 ⇒ 但传感器读到手机还横着 ⇒ 又转回横屏 ⇒ 退不掉）。
+        val devicePortrait = rememberDevicePortrait()
+        LaunchedEffect(devicePortrait) { if (devicePortrait) immersiveExited = false }
+        val immersive = padMode && !isTabletDevice && page == Page.VIDEO &&
+            isLandscapeImm && !videoFullscreen && !immersiveExited
+        // 【v172 🔴 方向只有这一个写者】VideoPage 里原来那段写 requestedOrientation 的
+        //   DisposableEffect **已删除**（v171 就是两处抢写、把双栏顶回竖屏的，血的教训）。
+        //   这里统一覆盖所有情况：全屏 → 锁横屏；不允许转屏 → 竖屏；已退出沉浸 → 竖屏；
+        //   系统锁了方向 → 竖屏；平板 → FULL_SENSOR；手机双栏 → **SENSOR**。
+        //   🔴 为什么手机换 SENSOR（不再是 FULL_SENSOR）：FULL_SENSOR 把「反向横屏 / 反向竖屏」
+        //     也算数，手机平放在桌上、或只是稍微歪一点，就会被判成**反向**横屏 ⇒ 界面整个倒过来
+        //     （v170 之后的遗留雷，阿亮实测到过）。SENSOR 只认正向竖/横，**一样跟传感器**，但不会乱翻。
+        //   🔴🔴【v173 阿亮改口径】**系统锁了方向 ⇒ 一律竖屏**。
+        //     v170 当初是**故意**绕开系统那个「自动旋转」总开关的 —— 因为他那台总开关本来就是关的，
+        //     不绕开的话开了双栏模式也转不动、在他眼里就是"双栏开关坏了"。
+        //     但那等于把用户自己按下的「方向锁定」也一起无视了 ⇒ 1016 他实测后拍板：
+        //       "我把整个手机的方向锁定锁住之后，它横屏还是有反应，还是能转" ⇒ **要听系统的**。
+        //     ⇒ 现在的分工：**「双栏模式」开关 = 允不允许转的闸门；系统「方向锁定」= 一票否决**。
+        //       两个都放开（双栏模式开 + 系统没锁）才转得动。
+        //     ⚠️ 代价（已跟他讲明）：他平时系统自动旋转是关的，锁着的时候双栏模式进不去，
+        //        得先把系统的锁解开。
+        val systemAutoRotate = rememberSystemAutoRotate()
+        LaunchedEffect(allowRotate, immersiveExited, videoFullscreen, systemAutoRotate) {
+            requestedOrientation = when {
+                // 🔴🔴【1016 阿亮拍板 · 血案】一律用 **USER 系**（尊重用户的方向锁定），绝不再用 SENSOR 系。
+                //   原因（副测机 `7042e0ef` 实测）：`SENSOR / SENSOR_LANDSCAPE / FULL_SENSOR` 的语义是
+                //   「**跟传感器走、忽略用户旋转锁定**」⇒ 系统为了让这个请求生效，**必须先把用户亲手
+                //   按下的方向锁解冻**（回写 `Settings.System.ACCELEROMETER_ROTATION = 1`）。
+                //   对照实验（100% 复现）：
+                //     [A] 停掉 App + 设 acc=0  -> acc=0  wm=lock 0
+                //     [B] 等 10 秒（App 没跑）  -> acc=0  wm=lock 0    ← 稳住、没人动
+                //     [C] 启动 App + 等 12 秒   -> acc=1  wm=free     ← 锁被顶开
+                //   ⇒ 阿亮在下拉栏锁一次、App 一启动就给解一次 ⇒ 他体感 = "怎么你一操作就又开了"。
+                //   **用户锁了就是锁了** —— 那是他的手机设置，App 没资格替他改。阿亮原话：
+                //   "那肯定要先听系统的呀……系统锁了肯定就要锁住啊！"
+                //   ⚠️ 代价（已知晓并接受）：他平时系统自动旋转是关的 ⇒ 锁着时双栏进不去、全屏也不横，
+                //     要横得先把系统那把锁解开。
+                //   ⚠️ 旧注释担心"manifest 的 `portrait` 会被 USER 顺着走" —— 那条针对的是 `UNSPECIFIED`
+                //     （不表态）；显式 `USER` = "按用户偏好"，不冲突（1016 实测复核）。
+                videoFullscreen -> ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+                !allowRotate -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                immersiveExited -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                !systemAutoRotate -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                isTabletDevice -> ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+                else -> ActivityInfo.SCREEN_ORIENTATION_USER
             }
         }
         // 选集页滚动位置：提升到 Activity 层，页面切换（组合销毁/重建）后仍保留。
@@ -1713,6 +1836,8 @@ class MainActivity : ComponentActivity() {
         // （表现就是「设置页要按两次返回才关」）
         BackHandler(enabled = page != Page.PLAYER && !showSettings) {
             when {
+                // 【v172】沉浸双栏：返回/边缘内滑 = 退出沉浸（请求竖屏回单栏），不要跳回音频播放页
+                immersive -> immersiveExited = true
                 // 视频全屏时：返回先退出全屏、留在视频模式，不要跳回音频播放页
                 page == Page.VIDEO && videoFullscreen -> videoFullscreen = false
                 // 复习页：返回回生词本（它是从生词本进去的）
@@ -1786,7 +1911,7 @@ class MainActivity : ComponentActivity() {
                 // ⚠️ 这里**不是**"遮挡"也不是另一套界面 —— 就是同一个 Column 里的第一行，
                 //    隐藏后内容会直接顶到状态栏底下 ⇒ 下面 Box 那处必须补 statusBarsPadding，
                 //    不然返回箭头会被状态栏压住（视频全屏那条分支**不加**，全屏就是要铺满）。
-                val hideTopBar = (page == Page.VIDEO && videoFullscreen) ||
+                val hideTopBar = (page == Page.VIDEO && videoFullscreen) || immersive ||
                     page == Page.VOCAB || page == Page.REVIEW
                 if (!hideTopBar) Box(
                     modifier = Modifier.fillMaxWidth().statusBarsPadding().height(52.dp)
@@ -2035,6 +2160,8 @@ class MainActivity : ComponentActivity() {
                             layoutEdit = layoutEdit,
                             // 【v170】视频页据此决定横屏要不要双栏（平板会自动放行，见 VideoPage 里 isTablet）
                             padMode = padMode,
+                            // 【v172】沉浸双栏：手机横屏时壳全隐，左栏画面贴顶 + 下方键排，右栏纯字幕
+                            immersive = immersive,
                         )
                     }
                     when (page) {
@@ -2161,7 +2288,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 // 底栏三模式：音频 / 阅读 / 视频（等宽，固定底部）
-                            if (!(page == Page.VIDEO && videoFullscreen)) ModeBar(
+                            // 【v172】沉浸双栏时底栏也一起隐掉（整屏都留给画面 + 字幕）
+                            if (!(page == Page.VIDEO && videoFullscreen) && !immersive) ModeBar(
                 current = page,
                 enabled = !layoutEdit,
                     onSelect = { target ->

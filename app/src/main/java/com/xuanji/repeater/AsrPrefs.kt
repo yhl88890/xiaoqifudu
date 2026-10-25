@@ -70,4 +70,43 @@ object AsrPrefs {
 
     fun saveBiliSessdata(ctx: Context, v: String) =
         sp(ctx).edit().putString(KEY_BILI_SESSDATA, v.trim()).apply()
+
+    // ---------------- 腾讯云翻译备用通道（1017 阿亮要：硅基流动挂了也能翻） ----------------
+    // 🔴 只影响**整批字幕翻译**这一步（[SubtitleTranslator] 那条路），
+    //    不碰识别、不碰长句发音、不碰长按查词（那三条各有自己的通道）。
+
+    private const val KEY_TC_ON = "tencent_translate_on"
+    private const val KEY_TC_APPID = "tencent_appid"
+    private const val KEY_TC_SID = "tencent_secret_id"
+    private const val KEY_TC_SKEY = "tencent_secret_key"
+
+    /** 备用通道开关，默认**关**（不填就用原来的硅基流动，行为一个字不变） */
+    fun loadTencentEnabled(ctx: Context): Boolean = sp(ctx).getBoolean(KEY_TC_ON, false)
+
+    fun saveTencentEnabled(ctx: Context, on: Boolean) =
+        sp(ctx).edit().putBoolean(KEY_TC_ON, on).apply()
+
+    fun loadTencentCred(ctx: Context): TencentTranslate.Cred {
+        val s = sp(ctx)
+        return TencentTranslate.Cred(
+            appId = s.getString(KEY_TC_APPID, "") ?: "",
+            secretId = s.getString(KEY_TC_SID, "") ?: "",
+            secretKey = s.getString(KEY_TC_SKEY, "") ?: "",
+        )
+    }
+
+    fun saveTencentCred(ctx: Context, appId: String, secretId: String, secretKey: String) =
+        sp(ctx).edit()
+            .putString(KEY_TC_APPID, appId.trim())
+            .putString(KEY_TC_SID, secretId.trim())
+            .putString(KEY_TC_SKEY, secretKey.trim())
+            .apply()
+
+    /**
+     * 这次翻译到底走不走腾讯。
+     * 判据 = 开关打开 **且** 两个必需值都填了（AppID 这批翻译用不上，填不填都行）。
+     * ⚠️ 开关打开但没填全 ⇒ 回落硅基流动那条路，**不要**直接空着（空着会被误当成"翻译失败"）。
+     */
+    fun useTencentForTranslate(ctx: Context): Boolean =
+        loadTencentEnabled(ctx) && loadTencentCred(ctx).usable
 }
